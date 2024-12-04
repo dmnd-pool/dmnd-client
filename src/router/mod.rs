@@ -1,7 +1,10 @@
 use std::{
     net::SocketAddr,
+    sync::Arc,
     time::{Duration, Instant},
 };
+
+pub mod task_manager;
 
 use crate::jd_client::job_declarator::{setup_connection::SetupConnectionHandler, JobDeclarator};
 use codec_sv2::{buffer_sv2::Slice, HandshakeRole};
@@ -9,12 +12,14 @@ use demand_share_accounting_ext::parser::PoolExtMessages;
 use demand_sv2_connection::noise_connection_tokio::Connection;
 use key_utils::Secp256k1PublicKey;
 use noise_sv2::Initiator;
+use roles_logic_sv2::utils::Mutex;
 use roles_logic_sv2::{common_messages_sv2::SetupConnection, parsers::Mining};
+use task_manager::{PoolState, TaskManager};
 use tokio::{
     net::TcpStream,
     sync::mpsc::{Receiver, Sender},
 };
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use crate::{
     minin_pool_connection::{self, get_mining_setup_connection_msg, mining_setup_connection},
@@ -22,13 +27,13 @@ use crate::{
 };
 
 /// Router handles connection to Multiple upstreams.
-
 pub struct Router {
     pool_addresses: Vec<SocketAddr>,
     current_pool: Option<SocketAddr>,
     auth_pub_k: Secp256k1PublicKey,
     setup_connection_msg: Option<SetupConnection<'static>>,
     timer: Option<Duration>,
+    pub task_manager: Arc<Mutex<TaskManager>>,
 }
 
 impl Router {
@@ -43,12 +48,14 @@ impl Router {
         // If None, default time of 5s is used.
         timer: Option<Duration>,
     ) -> Self {
+        let task_manager = TaskManager::initialize();
         Self {
             pool_addresses,
             current_pool: None,
             auth_pub_k,
             setup_connection_msg,
             timer,
+            task_manager,
         }
     }
 
@@ -118,6 +125,7 @@ impl Router {
             tokio::sync::mpsc::Sender<PoolExtMessages<'static>>,
             tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>,
             AbortOnDrop,
+            AbortOnDrop,
         ),
         (),
     > {
@@ -142,10 +150,49 @@ impl Router {
         .await
         {
             Ok((send_to_pool, recv_from_pool, pool_connection_abortable)) => {
-                Ok((send_to_pool, recv_from_pool, pool_connection_abortable))
+                // Successfully connected to the pool
+                // Start watch_pool_state task to monitor pool's state
+                TaskManager::watch_pool_state(self.task_manager.clone()).await;
+                // Update the pool state to "Up" since the connection was successful
+                if let Err(err) = self
+                    .task_manager
+                    .safe_lock(|t| t.update_pool_state(PoolState::Up))
+                {
+                    error!("Error updating pool state to Up: {:?}", err);
+                }
+
+                // Retrieve the abort handle for the pool state tasks
+                let pool_state_aborter = match self.task_manager.safe_lock(|t| t.get_aborter()) {
+                    Ok(Some(aborter)) => aborter,
+                    Ok(None) => {
+                        error!("Router abort handle is missing");
+                        return Err(()); // Return an error if abort handle is not found
+                    }
+                    Err(err) => {
+                        error!("Failed to retrieve router abort handle: {:?}", err);
+                        return Err(());
+                    }
+                };
+
+                Ok((
+                    send_to_pool,
+                    recv_from_pool,
+                    pool_connection_abortable,
+                    pool_state_aborter,
+                ))
             }
 
-            Err(_) => Err(()),
+            Err(_) => {
+                // Connection to the pool failed
+                // Update the pool state to "Down" since connection was not successful
+                if let Err(err) = self
+                    .task_manager
+                    .safe_lock(|t| t.update_pool_state(PoolState::Down))
+                {
+                    error!("Error updating pool state to Down: {:?}", err);
+                }
+                Err(())
+            }
         }
     }
 
@@ -188,6 +235,13 @@ impl Router {
         if let Some(best_pool) = self.select_pool_monitor(epsilon).await {
             if Some(best_pool) != self.current_pool {
                 info!("Switching to faster upstreamn {:?}", best_pool);
+                // Temporary set the PoolState to Down beacuse a better upstream was found
+                if let Err(err) = self
+                    .task_manager
+                    .safe_lock(|t| t.update_pool_state(PoolState::Down))
+                {
+                    error!("Error updating pool state to Down: {:?}", err);
+                }
                 return Some(best_pool);
             } else {
                 return None;

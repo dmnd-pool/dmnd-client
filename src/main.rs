@@ -1,6 +1,6 @@
 use async_recursion::async_recursion;
 use jemallocator::Jemalloc;
-use router::Router;
+use router::{task_manager::PoolState, Router};
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
@@ -74,7 +74,7 @@ async fn initialize_proxy(
     epsilon: Duration,
 ) {
     // Initial setup for the proxy
-    let (send_to_pool, recv_from_pool, pool_connection_abortable) = router
+    let (send_to_pool, recv_from_pool, pool_connection_abortable, pool_state_aborter) = router
         .connect_pool(pool_addr)
         .await
         .expect("Error connecting pool");
@@ -131,6 +131,7 @@ async fn initialize_proxy(
         (sv1_ingress_abortable, "sv1_ingress".to_string()),
         (translator_abortable, "translator".to_string()),
         (share_accounter_abortable, "share_accounter".to_string()),
+        (pool_state_aborter, "pool_state".to_string()),
     ];
     if let Some(jdc_handle) = jdc_abortable {
         abort_handles.push((jdc_handle, "jdc".to_string()));
@@ -144,7 +145,6 @@ async fn monitor(
     abort_handles: Vec<(AbortOnDrop, std::string::String)>,
     epsilon: Duration,
 ) {
-    //let mut interval = tokio::time::interval(time::Duration::from_secs(10));
     loop {
         if let Some(new_upstream) = router.monitor_upstream(epsilon).await {
             info!("Faster upstream detected. Reinitializing proxy...");
@@ -164,6 +164,18 @@ async fn monitor(
             }
             return;
         }
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        // Check if PoolState is Down
+        if matches!(
+            router.task_manager.safe_lock(|t| t.get_pool_state()),
+            Ok(PoolState::Down)
+        ) {
+            // Drop the abort handles for all current tasks.
+            // To make sure tasks are gracefully aborted before reinitializing proxy.
+            drop(abort_handles);
+            initialize_proxy(router, None, epsilon).await;
+            return;
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     }
 }
