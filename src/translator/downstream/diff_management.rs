@@ -194,23 +194,6 @@ impl Downstream {
             )
         })?;
 
-        if realized_share_per_min == 0.0 || realized_share_per_min.is_infinite() {
-            if time_delta_millis < 5 * 1000 {
-                return Ok(None); // Wait at least 5 secs
-            }
-            // If relized_share_per is 0 or infinite after 5secs,
-            // it means that the diff is eithr too small or too big.
-            // So the current diff is far off from ideal diff for the miner
-            // To correct this, increase p and i so that it adjusts diff more aggressively
-
-            // Adjust difficulty by approx 50%
-            let change = -0.50 * current_difficulty;
-            // Set p_gain to be ratio of the change to the current error
-            let p_gain = change / (pid.setpoint - realized_share_per_min);
-            pid.p(p_gain, pid.output_limit);
-            pid.i(p_gain / 10.0, pid.output_limit);
-            pid.d(0.1, pid.output_limit);
-        }
         let pid_output = pid.next_control_output(realized_share_per_min).output;
         let new_difficulty = (current_difficulty + pid_output).max(0.001);
 

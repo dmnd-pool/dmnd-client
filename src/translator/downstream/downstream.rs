@@ -126,11 +126,11 @@ impl Downstream {
         // The positive D gain (0.05) dampens rapid changes, e.g., if share rate jumps from 8 to 12, D might
         // add a small positive adjustment to prevent overshooting.
 
-        let output_limit = initial_hash_rate * 0.7;
+        let output_limit = initial_hash_rate * 0.5;
         let mut pid: Pid<f32> = Pid::new(crate::SHARE_PER_MIN, output_limit);
-        pid.p(-0.01, output_limit)
-            .i(0.01, output_limit)
-            .d(0.01, output_limit);
+        pid.p(-10.0, output_limit)
+            .i(1.0, output_limit)
+            .d(0.1, output_limit);
 
         let difficulty_mgmt = DownstreamDifficultyConfig {
             estimated_downstream_hash_rate: *crate::EXPECTED_SV1_HASHPOWER,
@@ -246,6 +246,16 @@ impl Downstream {
                     // message will be sent to the upstream Translator to be translated to SV2 and
                     // forwarded to the `Upstream`
                     // let sender = self_.safe_lock(|s| s.connection.sender_upstream)
+                    if let json_rpc::Message::StandardRequest(request) = &message_sv1 {
+                        if request.method == "mining.submit" {
+                            if let json_rpc::Message::OkResponse(response) = r.clone().into() {
+                                // Check handle_submit returned true,if so we save share
+                                if response.result.as_bool() == Some(true) {
+                                    Self::save_share(self_.clone())?;
+                                }
+                            }
+                        }
+                    }
                     Self::send_message_downstream(self_, r.into()).await;
                     Ok(())
                 } else {
