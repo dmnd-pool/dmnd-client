@@ -406,7 +406,8 @@ impl IsServer<'static> for Downstream {
                     error!("Share rejected: No last job found");
                     return false;
                 };
-                //check share is valid
+                crate::translator::utils::update_share_count(self.connection_id); // update share count
+                                                                                  //check share is valid
                 if validate_share(
                     request,
                     job,

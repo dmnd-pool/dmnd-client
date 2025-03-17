@@ -3,7 +3,10 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 
-use crate::translator::error::Error;
+use crate::{
+    proxy_state::{DownstreamType, ProxyState},
+    translator::error::Error,
+};
 use bitcoin::hashes::{sha256d, Hash};
 use lazy_static::lazy_static;
 use roles_logic_sv2::{mining_sv2::Target, utils::Mutex};
@@ -15,6 +18,8 @@ lazy_static! {
     pub static ref SHARE_TIMESTAMPS: Arc<Mutex<VecDeque<tokio::time::Instant>>> =
         Arc::new(Mutex::new(VecDeque::with_capacity(70)));
     pub static ref IS_RATE_LIMITED: AtomicBool = AtomicBool::new(false);
+    static ref SHARE_COUNTS: Arc<Mutex<std::collections::HashMap<u32, (u32, tokio::time::Instant)>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
 }
 
 /// Checks if a share can be sent upstream based on a rate limit of 70 shares per minute.
@@ -37,6 +42,7 @@ pub async fn check_share_rate_limit() {
             })
             .unwrap_or_else(|e| {
                 error!("Failed to lock SHARE_TIMESTAMPS: {:?}", e);
+                ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
                 0
             });
 
@@ -120,6 +126,51 @@ pub fn validate_share(
     let target = Downstream::difficulty_to_target(difficulty);
     let target: Target = target.into();
     hash <= target
+}
+
+// Update share count for each miner
+pub fn update_share_count(connection_id: u32) {
+    SHARE_COUNTS
+        .safe_lock(|share_counts| {
+            let now = tokio::time::Instant::now();
+            if let Some((count, last_update)) = share_counts.get_mut(&connection_id) {
+                if now.duration_since(*last_update) < std::time::Duration::from_secs(60) {
+                    *count += 1;
+                } else {
+                    *count = 1;
+                    *last_update = now;
+                }
+            } else {
+                share_counts.insert(connection_id, (1, now));
+            }
+        })
+        .unwrap_or_else(|_| {
+            error!("Failed to lock SHARE_COUNTS");
+            ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream)
+        });
+}
+
+// Get share count for the last 60 secs
+pub fn get_share_count(connection_id: u32) -> f32 {
+    let now = tokio::time::Instant::now();
+    let share_counts = SHARE_COUNTS
+        .safe_lock(|share_counts| {
+            if let Some((count, last_update)) = share_counts.get(&connection_id) {
+                if now.duration_since(*last_update) < tokio::time::Duration::from_secs(60) {
+                    *count as f32 // Shares per minute
+                } else {
+                    0.0 // More than 60 seconds since the last share, so return 0.
+                }
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or_else(|_| {
+            error!("Failed to lock SHARE_COUNTS");
+            ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+            0.0
+        });
+    share_counts
 }
 
 // /// currently the pool only supports 16 bytes exactly for its channels

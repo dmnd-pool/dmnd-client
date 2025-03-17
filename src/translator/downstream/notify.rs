@@ -63,7 +63,9 @@ pub async fn start_notify(
                     }
                     first_sent = true;
                 } else if is_a && last_notify.is_some() {
-                    if let Err(e) = start_update(task_manager, downstream.clone()).await {
+                    if let Err(e) =
+                        start_update(task_manager, downstream.clone(), connection_id).await
+                    {
                         warn!("Translator impossible to start update task: {e}");
                         break;
                     };
@@ -113,10 +115,21 @@ pub async fn start_notify(
 async fn start_update(
     task_manager: Arc<Mutex<TaskManager>>,
     downstream: Arc<Mutex<Downstream>>,
+    connection_id: u32,
 ) -> Result<(), Error<'static>> {
     let handle = task::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+            let share_count = crate::translator::utils::get_share_count(connection_id);
+            let sleep_duration = if share_count >= crate::SHARE_PER_MIN * 3.0
+                || share_count <= crate::SHARE_PER_MIN / 3.0
+            {
+                std::time::Duration::from_millis(2_000)
+            } else {
+                std::time::Duration::from_millis(20_000)
+            };
+
+            tokio::time::sleep(sleep_duration).await;
+
             let ln = match downstream.safe_lock(|d| d.last_notify.clone()) {
                 Ok(ln) => ln,
                 Err(e) => {
