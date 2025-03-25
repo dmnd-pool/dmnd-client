@@ -98,7 +98,19 @@ pub async fn start_notify(
             }
             // TODO here we want to be sure that on drop this is called
             let _ = Downstream::remove_downstream_hashrate_from_channel(&downstream);
-            // TODO here we want to kill the tasks
+            
+            // Remove tasks associated with this downstream
+            if let Ok(downstream_id) = downstream.safe_lock(|d| d.id) {
+                if let Err(e) = task_manager.safe_lock(|tm| {
+                    tm.remove_notify(downstream_id);
+                    tm.remove_update(downstream_id);
+                }) {
+                    error!("Failed to remove tasks for downstream {}: {}", downstream_id, e);
+                }
+            } else {
+                error!("Failed to get downstream ID from poisoned mutex");
+            }
+            
             warn!(
                 "Downstream: Shutting down sv1 downstream job notifier for {}",
                 &host
