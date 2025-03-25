@@ -72,6 +72,7 @@ pub struct JobDeclarator {
         BuildNoHashHasher<u64>,
     >,
     up: Arc<Mutex<Upstream>>,
+    pub token_updated_notify: Arc<Notify>,
     pub coinbase_tx_prefix: B064K<'static>,
     pub coinbase_tx_suffix: B064K<'static>,
     pub task_manager: Arc<Mutex<TaskManager>>,
@@ -117,6 +118,7 @@ impl JobDeclarator {
             coinbase_tx_suffix: vec![].try_into().expect("Internal error: this operation can not fail because Vec can always be converted into Inner"),
             set_new_prev_hash_counter: 0,
             task_manager,
+            token_updated_notify: Arc::new(Notify::new()),
         }));
 
         Self::allocate_tokens(&self_, 2).await;
@@ -349,6 +351,7 @@ impl JobDeclarator {
                                         last_declare.coinbase_pool_output,
                                     ),
                                 );
+                                s.token_updated_notify.notify_waiters();
                             }) {
                                 error!("{e}");
                                 ProxyState::update_jd_state(JdState::Down);
@@ -426,6 +429,9 @@ impl JobDeclarator {
         self_mutex: Arc<Mutex<Self>>,
         set_new_prev_hash: SetNewPrevHash<'static>,
     ) -> Result<(), Error> {
+        let notify = self_mutex.safe_lock(|s| s.token_updated_notify.clone())
+             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
+        notify.notified().await;
         let task_manager = self_mutex
             .safe_lock(|s| s.task_manager.clone())
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
