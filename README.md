@@ -39,10 +39,12 @@ The executable will be created in the `target/release/` directory.
 To run the CLI in test mode:
 
 ```bash
+export TOKEN=oFzg1EUmceEcDuvzT3qt
 ./target/release/demand-cli --test -d 50T
 ```
 
 Options:
+
 - `--test`: Connects to the test endpoint.
 - `--d`: Specifies the expected downstream hashrate (e.g., `10T`, `2.5P`, `5E`). Defaults to `100TH/s` if not provided.
 
@@ -51,6 +53,14 @@ The proxy listens for connections on `0.0.0.0:32767`, allowing StratumV1 miners 
 ### Environment Variables
 
 - `TOKEN` (Required): Your mining pool authentication token.
+
+  - For testing, use this token: `oFzg1EUmceEcDuvzT3qt`.
+  - Set the token using:
+
+  ```bash
+  export TOKEN=<your_token>
+  ```
+
 - `SV1_DOWN_LISTEN_ADDR` (Optional): Address for StratumV1 downstream connections (default: `0.0.0.0:32767`).
 - `TP_ADDRESS` (Optional): Template Provider address for job declaration.
 
