@@ -41,17 +41,25 @@ const TEST_AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:32767";
 
 lazy_static! {
+    static ref ARGS: Args = Args::parse();
     static ref SV1_DOWN_LISTEN_ADDR: String =
         std::env::var("SV1_DOWN_LISTEN_ADDR").unwrap_or(DEFAULT_LISTEN_ADDRESS.to_string());
     static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<String>> =
         roles_logic_sv2::utils::Mutex::new(std::env::var("TP_ADDRESS").ok());
-    static ref EXPECTED_SV1_HASHPOWER: f32 = Args::parse()
-        .downstream_hashrate
-        .unwrap_or(DEFAULT_SV1_HASHPOWER);
+    static ref EXPECTED_SV1_HASHPOWER: f32 = {
+        // First try command-line argument (from ARGS)
+        if let Some(value) = ARGS.downstream_hashrate {
+            value
+        } else {
+            // Then try environment variable
+            let env_var = std::env::var("EXPECTED_SV1_HASHPOWER").ok();
+            env_var.and_then(|s| parse_hashrate(&s).ok())
+                .unwrap_or(DEFAULT_SV1_HASHPOWER)
+        }
+    };
 }
 
 lazy_static! {
-    static ref ARGS: Args = Args::parse();
     pub static ref POOL_ADDRESS: &'static str = if ARGS.test {
         TEST_POOL_ADDRESS
     } else {
