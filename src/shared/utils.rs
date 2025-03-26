@@ -38,13 +38,14 @@ pub fn sv1_rolling(configure: &sv1_api::client_to_server::Configure) -> (HexU32B
     let pool_mask = std::env::var("POOL_MASK")
         .map(|val| u32::from_str_radix(&val, 16).unwrap_or(0x1FFFE000))
         .unwrap_or(0x1FFFE000);
-    let miner_mask = configure.version_rolling_mask().unwrap_or(0xFFFFFFFF);
-    let negotiated_mask = miner_mask & pool_mask;
-    let min_bit_count = configure.version_rolling_min_bit_count().unwrap_or(0);
-    (
-        HexU32Be(negotiated_mask),
-        HexU32Be(min_bit_count),
-    )
+    let miner_mask = configure
+        .version_rolling_mask()
+        .unwrap_or(HexU32Be(0xFFFFFFFF));
+    let negotiated_mask = HexU32Be(miner_mask.0 & pool_mask);
+    let min_bit_count = configure
+        .version_rolling_min_bit_count()
+        .unwrap_or(HexU32Be(0));
+    (negotiated_mask, min_bit_count)
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
