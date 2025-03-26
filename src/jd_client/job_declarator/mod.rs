@@ -1,5 +1,6 @@
 pub mod message_handler;
 mod task_manager;
+use tokio::sync::Notify;
 use binary_sv2::{Seq0255, Seq064K, B016M, B064K, U256};
 use bitcoin::{util::psbt::serialize::Deserialize, Transaction};
 use codec_sv2::{HandshakeRole, Initiator, StandardEitherFrame, StandardSv2Frame};
