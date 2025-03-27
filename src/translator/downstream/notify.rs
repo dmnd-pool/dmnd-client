@@ -1,3 +1,4 @@
+use crate::api::stats::DownstreamStatsRegistry;
 use crate::proxy_state::{DownstreamType, ProxyState};
 use crate::translator::downstream::SUBSCRIBE_TIMEOUT_SECS;
 use crate::translator::error::Error;
@@ -19,6 +20,7 @@ pub async fn start_notify(
     host: String,
     connection_id: u32,
 ) -> Result<(), Error<'static>> {
+    DownstreamStatsRegistry::setup_stats(connection_id).await;
     let handle = {
         let task_manager = task_manager.clone();
         let upstream_difficulty_config =

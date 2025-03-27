@@ -22,12 +22,14 @@ use crate::{
 };
 
 /// Router handles connection to Multiple upstreams.
+#[derive(Clone)]
 pub struct Router {
     pool_addresses: Vec<SocketAddr>,
-    current_pool: Option<SocketAddr>,
+    pub current_pool: Option<SocketAddr>,
     auth_pub_k: Secp256k1PublicKey,
     setup_connection_msg: Option<SetupConnection<'static>>,
     timer: Option<Duration>,
+    pub latency: Option<Duration>,
 }
 
 impl Router {
@@ -48,15 +50,17 @@ impl Router {
             auth_pub_k,
             setup_connection_msg,
             timer,
+            latency: None,
         }
     }
 
     /// Internal function to select pool with the least latency.
-    async fn select_pool(&self) -> Option<(SocketAddr, Duration)> {
+    async fn select_pool(&mut self) -> Option<(SocketAddr, Duration)> {
+        let pool_addresses = self.pool_addresses.clone();
         let mut best_pool = None;
         let mut least_latency = Duration::MAX;
 
-        for &pool_addr in &self.pool_addresses {
+        for pool_addr in pool_addresses {
             if let Ok(latency) = self.get_latency(pool_addr).await {
                 if latency < least_latency {
                     least_latency = latency;
@@ -69,7 +73,7 @@ impl Router {
     }
 
     /// Select the best pool for connection
-    pub async fn select_pool_connect(&self) -> Option<SocketAddr> {
+    pub async fn select_pool_connect(&mut self) -> Option<SocketAddr> {
         info!("Selecting the best upstream ");
         if let Some((pool, latency)) = self.select_pool().await {
             info!("Latency for upstream {:?} is {:?}", pool, latency);
@@ -81,7 +85,7 @@ impl Router {
     }
 
     /// Select the best pool for monitoring
-    async fn select_pool_monitor(&self, epsilon: Duration) -> Option<SocketAddr> {
+    async fn select_pool_monitor(&mut self, epsilon: Duration) -> Option<SocketAddr> {
         if let Some((best_pool, best_pool_latency)) = self.select_pool().await {
             if let Some(current_pool) = self.current_pool {
                 if best_pool == current_pool {
@@ -155,7 +159,7 @@ impl Router {
     }
 
     /// Returns the sum all the latencies for a given upstream
-    async fn get_latency(&self, pool_address: SocketAddr) -> Result<Duration, ()> {
+    async fn get_latency(&mut self, pool_address: SocketAddr) -> Result<Duration, ()> {
         let mut pool = PoolLatency::new(pool_address);
         let setup_connection_msg = self.setup_connection_msg.as_ref();
         let timer = self.timer.as_ref();
@@ -208,6 +212,7 @@ impl Router {
         ];
         // Get sum of all latencies for pool
         let sum_of_latencies: Duration = latencies.iter().flatten().sum();
+        self.latency = Some(sum_of_latencies);
         Ok(sum_of_latencies)
     }
 

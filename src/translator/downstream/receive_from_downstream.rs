@@ -45,6 +45,7 @@ pub async fn start_receive_downstream(
                 return;
             }
         }
+        crate::api::stats::DownstreamStatsRegistry.remove_downstream_stats(&connection_id);
         // No message to receive
         warn!(
             "Downstream: Shutting down sv1 downstream reader {}",

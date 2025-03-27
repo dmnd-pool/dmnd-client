@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use lazy_static::lazy_static;
 use roles_logic_sv2::utils::Mutex;
+use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
 lazy_static! {
@@ -22,70 +23,70 @@ pub enum ProxyStates {
 }
 
 /// Represents the state of the pool
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum PoolState {
     Up,
     Down,
 }
 
 /// Represents the state of the Tp
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum TpState {
     Up,
     Down,
 }
 
 /// Represents the state of the Translator
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum TranslatorState {
     Up,
     Down,
 }
 
 /// Represents the state of the JD
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum JdState {
     Up,
     Down,
 }
 
 /// Represents the state of the Share Accounter
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ShareAccounterState {
     Up,
     Down,
 }
 
 /// Represents the state of the Downstream
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DownstreamState {
     Up,
     Down(Vec<DownstreamType>), // A specific downstream is down
 }
 
 /// Represents the state of the Upstream
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum UpstreamState {
     Up,
     Down(Vec<UpstreamType>), // A specific upstream is down
 }
 
 /// Represents different downstreams
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DownstreamType {
     JdClientMiningDownstream,
     TranslatorDownstream,
 }
 
 /// Represents different upstreams
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum UpstreamType {
     JDCMiningUpstream,
     TranslatorUpstream,
 }
 
 /// Represents global proxy state
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyState {
     pub pool: PoolState,
     pub tp: TpState,
