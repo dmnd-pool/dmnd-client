@@ -4,15 +4,20 @@ mod utils;
 use crate::router::Router;
 use axum::{routing::get, Router as AxumRouter};
 use routes::Api;
+use stats::StatsSender;
 
 // Holds shared state (like the router) that so that it can be accessed in all routes.
 #[derive(Clone)]
 pub struct AppState {
     router: Router,
+    stats_sender: StatsSender,
 }
 
-pub(crate) async fn start(router: Router) {
-    let state = AppState { router };
+pub(crate) async fn start(router: Router, stats_sender: StatsSender) {
+    let state = AppState {
+        router,
+        stats_sender,
+    };
     let app = AxumRouter::new()
         .route("/health", get(Api::health_check))
         .route("/pool/info", get(Api::get_pool_info))
@@ -21,7 +26,7 @@ pub(crate) async fn start(router: Router) {
         .route("/stats/system", get(Api::system_stats))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:9099")
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3001")
         .await
         .expect("Invalid server address");
     println!("API Server listening on port 3001 ");

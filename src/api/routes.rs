@@ -1,40 +1,21 @@
-use super::{stats::DownstreamStatsRegistry, utils::get_cpu_and_memory_usage, AppState};
+use super::{utils::get_cpu_and_memory_usage, AppState};
 use crate::proxy_state::ProxyState;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::Serialize;
-use std::{collections::HashMap, sync::atomic::Ordering};
 
 pub struct Api {}
 
 impl Api {
     // Retrieves connected donwnstreams stats
-    pub async fn get_downstream_stats() -> impl IntoResponse {
-        match DownstreamStatsRegistry.collect_stats() {
-            Ok(stats) => {
-                // converts to serializable format
-                let serializable_stats = stats
-                    .iter()
-                    .map(|(id, arc_stats)| {
-                        let stats = arc_stats;
-                        (
-                            *id,
-                            SerializableDownstreamStats {
-                                device_name: DownstreamStatsRegistry.get_device_name(id),
-                                hashrate: stats.hashrate.load(Ordering::Acquire),
-                                accepted_shares: stats.accepted_shares.load(Ordering::Acquire),
-                                rejected_shares: stats.rejected_shares.load(Ordering::Acquire),
-                            },
-                        )
-                    })
-                    .collect::<HashMap<u32, SerializableDownstreamStats>>();
-                (
-                    StatusCode::OK,
-                    Json(APIResponse::success(Some(serializable_stats))),
-                )
-            }
+    pub async fn get_downstream_stats(State(state): State<AppState>) -> impl IntoResponse {
+        match state.stats_sender.collect_stats().await {
+            Ok(stats) => (StatusCode::OK, Json(APIResponse::success(Some(stats)))),
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(APIResponse::error(Some(e))),
+                Json(APIResponse::error(Some(format!(
+                    "Failed to collect stats: {}",
+                    e
+                )))),
             ),
         }
     }
@@ -48,55 +29,64 @@ impl Api {
     }
 
     // Returns aggregate stats of all downstream devices
-    pub async fn get_aggregate_stats() -> impl IntoResponse {
+    pub async fn get_aggregate_stats(State(state): State<AppState>) -> impl IntoResponse {
+        let stats = match state.stats_sender.collect_stats().await {
+            Ok(stats) => stats,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(APIResponse::error(Some(format!(
+                        "Failed to collect stats: {}",
+                        e
+                    )))),
+                );
+            }
+        };
         let mut total_connected_device = 0;
         let mut total_accepted_shares = 0;
         let mut total_rejected_shares = 0;
         let mut total_hashrate = 0.0;
-        match DownstreamStatsRegistry.collect_stats() {
-            Ok(stats) => {
-                for (_, downstream) in stats {
-                    total_connected_device += 1;
-                    total_accepted_shares += downstream.accepted_shares.load(Ordering::Acquire);
-                    total_rejected_shares += downstream.rejected_shares.load(Ordering::Acquire);
-                    total_hashrate += downstream.hashrate.load(Ordering::Acquire) as f64;
-                }
-                let result = AggregateStates {
-                    total_connected_device,
-                    aggregate_hashrate: total_hashrate,
-                    aggregate_accepted_shares: total_accepted_shares,
-                    aggregate_rejected_shares: total_rejected_shares,
-                };
-                (StatusCode::OK, Json(APIResponse::success(Some(result))))
-            }
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(APIResponse::error(Some(e))),
-            ),
+        let mut total_diff = 0.0;
+        for (_, downstream) in stats {
+            total_connected_device += 1;
+            total_accepted_shares += downstream.accepted_shares;
+            total_rejected_shares += downstream.rejected_shares;
+            total_hashrate += downstream.hashrate as f64;
+            total_diff += downstream.current_difficulty as f64
         }
+        let result = AggregateStates {
+            total_connected_device,
+            aggregate_hashrate: total_hashrate,
+            aggregate_accepted_shares: total_accepted_shares,
+            aggregate_rejected_shares: total_rejected_shares,
+            aggregate_diff: total_diff,
+        };
+        (StatusCode::OK, Json(APIResponse::success(Some(result))))
     }
 
     // Retrieves the current pool information
     pub async fn get_pool_info(State(state): State<AppState>) -> impl IntoResponse {
         let current_pool_address = state.router.current_pool;
-        let latency = state.router.latency;
+        let latency = *state.router.latency_rx.borrow();
 
-        let response_data = match (current_pool_address, latency) {
+        match (current_pool_address, latency) {
             (Some(address), Some(latency)) => {
-                serde_json::json!({
+                let response_data = serde_json::json!({
                     "address": address.to_string(),
                     "latency": latency.as_millis().to_string()
-                })
+                });
+                (
+                    StatusCode::OK,
+                    Json(APIResponse::success(Some(response_data))),
+                )
             }
-            (_, _) => {
-                serde_json::json!({
-                    "address": "Pool address not available".to_string(),
-                    "latency": "Pool letency not available".to_string()
-                })
-            }
-        };
-
-        Json(APIResponse::success(Some(response_data)))
+            (_, _) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(APIResponse::error(Some(
+                    "Pool information unavailable".to_string(),
+                ))),
+            ),
+        }
     }
 
     // Returns the status of the Proxy
@@ -111,19 +101,12 @@ impl Api {
 }
 
 #[derive(Serialize)]
-struct SerializableDownstreamStats {
-    device_name: Option<String>,
-    hashrate: f32,
-    accepted_shares: u64,
-    rejected_shares: u64,
-}
-
-#[derive(Serialize)]
 struct AggregateStates {
     total_connected_device: u32,
     aggregate_hashrate: f64, // f64 is used here to avoid overflow
     aggregate_accepted_shares: u64,
     aggregate_rejected_shares: u64,
+    aggregate_diff: f64,
 }
 
 #[derive(Debug, Serialize)]

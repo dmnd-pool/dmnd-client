@@ -1,141 +1,148 @@
-use atomic_float::AtomicF32;
-use lazy_static::lazy_static;
-use roles_logic_sv2::utils::Mutex;
+use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use tracing::{error, warn};
+use tokio::sync::{mpsc, oneshot};
+use tracing::warn;
 
-use crate::proxy_state::ProxyState;
-
-lazy_static! {
-    pub static ref DownstreamStatsRegistry: Arc<Mutex<HashMap<u32, Arc<DownstreamConnectionStats>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-}
-
-// Stats for each connected downstream device
 #[derive(Debug)]
-pub struct DownstreamConnectionStats {
-    pub device_name: Arc<Mutex<Option<String>>>,
-    pub hashrate: Arc<AtomicF32>,
-    pub accepted_shares: Arc<AtomicU64>,
-    pub rejected_shares: Arc<AtomicU64>,
+enum StatsCommand {
+    SetupStats(u32),
+    UpdateHashrate(u32, f32),
+    UpdateDiff(u32, f32),
+    UpdateAcceptedShares(u32),
+    UpdateRejectedShares(u32),
+    UpdateDeviceName(u32, String),
+    RemoveStats(u32),
+    GetStats(oneshot::Sender<HashMap<u32, DownstreamConnectionStats>>),
 }
 
-impl DownstreamStatsRegistry {
-    // Starts tracking stats for a new downstream connection
-    pub async fn setup_stats(connection_id: u32) {
-        let stats = Arc::new(DownstreamConnectionStats {
-            device_name: Arc::new(Mutex::new(None)),
-            hashrate: Arc::new(AtomicF32::new(0.0)),
-            accepted_shares: Arc::new(AtomicU64::new(0)),
-            rejected_shares: Arc::new(AtomicU64::new(0)),
-        });
-        if let Err(e) = DownstreamStatsRegistry.safe_lock(|dm| dm.insert(connection_id, stats)) {
-            error!("Failed to acquire DownstreamStatsRegistry lock: {e}")
+#[derive(Debug, Clone, Serialize)]
+pub struct DownstreamConnectionStats {
+    pub device_name: Option<String>,
+    pub hashrate: f32,
+    pub accepted_shares: u64,
+    pub rejected_shares: u64,
+    pub current_difficulty: f32,
+}
+
+impl DownstreamConnectionStats {
+    fn new() -> Self {
+        Self {
+            device_name: None,
+            hashrate: 0.0,
+            accepted_shares: 0,
+            rejected_shares: 0,
+            current_difficulty: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StatsSender {
+    sender: mpsc::Sender<StatsCommand>,
+}
+
+impl StatsSender {
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::channel(100);
+        tokio::spawn(StatsManager::new(rx).run());
+        Self { sender: tx }
+    }
+
+    fn send(&self, command: StatsCommand) {
+        if let Err(e) = self.sender.try_send(command) {
+            warn!("Failed to send command: {:?}", e);
         }
     }
 
-    // Retrieves stats for all connected downstream devices
-    pub fn collect_stats(&self) -> Result<HashMap<u32, Arc<DownstreamConnectionStats>>, String> {
-        match self.safe_lock(|dsr| dsr.clone()) {
-            Ok(dsr) => Ok(dsr),
-            Err(e) => Err(format!(
-                "Failed to acquire DownstreamStatsRegistry lock: {e}"
-            )),
+    pub fn setup_stats(&self, connection_id: u32) {
+        self.send(StatsCommand::SetupStats(connection_id));
+    }
+
+    pub fn update_hashrate(&self, connection_id: u32, hashrate: f32) {
+        self.send(StatsCommand::UpdateHashrate(connection_id, hashrate));
+    }
+
+    pub fn update_diff(&self, connection_id: u32, diff: f32) {
+        self.send(StatsCommand::UpdateDiff(connection_id, diff));
+    }
+
+    pub fn update_accepted_shares(&self, connection_id: u32) {
+        self.send(StatsCommand::UpdateAcceptedShares(connection_id));
+    }
+
+    pub fn update_rejected_shares(&self, connection_id: u32) {
+        self.send(StatsCommand::UpdateRejectedShares(connection_id));
+    }
+
+    pub fn update_device_name(&self, connection_id: u32, name: String) {
+        self.send(StatsCommand::UpdateDeviceName(connection_id, name));
+    }
+
+    pub fn remove_stats(&self, connection_id: u32) {
+        self.send(StatsCommand::RemoveStats(connection_id));
+    }
+
+    pub async fn collect_stats(&self) -> Result<HashMap<u32, DownstreamConnectionStats>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.send(StatsCommand::GetStats(tx));
+        match rx.await {
+            Ok(stats) => Ok(stats),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+struct StatsManager {
+    stats: HashMap<u32, DownstreamConnectionStats>,
+    receiver: mpsc::Receiver<StatsCommand>,
+}
+
+impl StatsManager {
+    fn new(receiver: mpsc::Receiver<StatsCommand>) -> Self {
+        Self {
+            stats: HashMap::new(),
+            receiver,
         }
     }
 
-    // Updates the hashrate for a specific connected downstream device
-    pub fn update_hashrate(&self, new_hashrate: f32, connection_id: &u32) {
-        if let Err(e) = self.safe_lock(|dm| {
-            if let Some(stats) = dm.get(connection_id) {
-                stats.hashrate.store(new_hashrate, Ordering::Relaxed);
-            }
-        }) {
-            error!("Failed to acquire DownstreamStatsRegistry lock: {e}");
-            ProxyState::update_inconsistency(Some(1))
-        }
-    }
-
-    // Updates the accepted share count for a specific connected downstream device
-    pub fn update_accepted_shares(&self, connection_id: &u32) {
-        if let Err(e) = self.safe_lock(|dm| {
-            if let Some(stats) = dm.get(connection_id) {
-                stats.accepted_shares.fetch_add(1, Ordering::Acquire);
-            }
-        }) {
-            error!("Failed to acquire DownstreamStatsRegistry lock: {e}");
-            ProxyState::update_inconsistency(Some(1))
-        }
-    }
-
-    // Updates the rejected share count for a specific connected downstream device
-    pub fn update_rejected_shares(&self, connection_id: &u32) {
-        if let Err(e) = self.safe_lock(|dm| {
-            if let Some(stats) = dm.get(connection_id) {
-                stats.rejected_shares.fetch_add(1, Ordering::Acquire);
-            }
-        }) {
-            error!("Failed to acquire DownstreamStatsRegistry lock: {e}");
-            ProxyState::update_inconsistency(Some(1))
-        }
-    }
-
-    // Updates the device name for a specific downstream
-    pub fn update_device_name(&self, name: &str, connection_id: &u32) {
-        if let Err(e) = self.safe_lock(|dm| {
-            if let Some(downstream) = dm.get(connection_id) {
-                if let Err(e) = downstream.device_name.safe_lock(|device_name| {
-                    *device_name = Some(name.to_string());
-                }) {
-                    error!("Failed to acquire device_name lock: {e}");
-                    ProxyState::update_inconsistency(Some(1))
+    async fn run(mut self) {
+        while let Some(msg) = self.receiver.recv().await {
+            match msg {
+                StatsCommand::SetupStats(id) => {
+                    self.stats.insert(id, DownstreamConnectionStats::new());
                 }
-            }
-        }) {
-            error!("Failed to acquire DownstreamStatsRegistry lock: {e}");
-            ProxyState::update_inconsistency(Some(1))
-        }
-    }
-
-    // Retrieves the device_name for a specific connected downstream
-    pub fn get_device_name(&self, connection_id: &u32) -> Option<String> {
-        match self.safe_lock(|dm| dm.get(connection_id).cloned()) {
-            Ok(Some(downstream)) => {
-                match downstream
-                    .device_name
-                    .safe_lock(|device_name| device_name.clone())
-                {
-                    Ok(device_name) => device_name,
-                    Err(e) => {
-                        error!("Failed to acquire device_name lock: {}", e);
-                        ProxyState::update_inconsistency(Some(1));
-                        None
+                StatsCommand::UpdateHashrate(id, hashrate) => {
+                    if let Some(stats) = self.stats.get_mut(&id) {
+                        stats.hashrate = hashrate
                     }
                 }
+                StatsCommand::UpdateDiff(id, diff) => {
+                    if let Some(stats) = self.stats.get_mut(&id) {
+                        stats.current_difficulty = diff
+                    }
+                }
+                StatsCommand::UpdateAcceptedShares(id) => {
+                    if let Some(stats) = self.stats.get_mut(&id) {
+                        stats.accepted_shares += 1
+                    }
+                }
+                StatsCommand::UpdateRejectedShares(id) => {
+                    if let Some(stats) = self.stats.get_mut(&id) {
+                        stats.rejected_shares += 1
+                    }
+                }
+                StatsCommand::UpdateDeviceName(id, name) => {
+                    if let Some(stats) = self.stats.get_mut(&id) {
+                        stats.device_name = Some(name)
+                    }
+                }
+                StatsCommand::RemoveStats(id) => {
+                    self.stats.remove(&id);
+                }
+                StatsCommand::GetStats(tx) => {
+                    let _ = tx.send(self.stats.clone());
+                }
             }
-            Ok(None) => None,
-            Err(e) => {
-                error!("Failed to acquire DownstreamStatsRegistry lock: {}", e);
-                ProxyState::update_inconsistency(Some(1));
-                None
-            }
-        }
-    }
-
-    //// Removes stats for a disconnected downstream device
-    pub fn remove_downstream_stats(&self, connection_id: &u32) {
-        if let Err(e) = self.safe_lock(|dm| {
-            if dm.remove(connection_id).is_some() {
-                warn!(
-                    "Stats for Downstream with connection {} removed",
-                    connection_id
-                )
-            }
-        }) {
-            error!("Failed to acquire DownstreamStatsRegistry lock: {e}");
-            ProxyState::update_inconsistency(Some(1))
         }
     }
 }

@@ -157,6 +157,8 @@ async fn initialize_proxy(
 ) {
     loop {
         // Initial setup for the proxy
+        let stats_sender = api::stats::StatsSender::new();
+
         let (send_to_pool, recv_from_pool, pool_connection_abortable) =
             match router.connect_pool(pool_addr).await {
                 Ok(connection) => connection,
@@ -177,16 +179,17 @@ async fn initialize_proxy(
         let sv1_ingress_abortable = ingress::sv1_ingress::start_listen_for_downstream(downs_sv1_tx);
 
         let (translator_up_tx, mut translator_up_rx) = channel(10);
-        let translator_abortable = match translator::start(downs_sv1_rx, translator_up_tx).await {
-            Ok(abortable) => abortable,
-            Err(e) => {
-                error!("Impossible to initialize translator: {e}");
-                // Impossible to start the proxy so we restart proxy
-                ProxyState::update_translator_state(TranslatorState::Down);
-                ProxyState::update_tp_state(TpState::Down);
-                return;
-            }
-        };
+        let translator_abortable =
+            match translator::start(downs_sv1_rx, translator_up_tx, stats_sender.clone()).await {
+                Ok(abortable) => abortable,
+                Err(e) => {
+                    error!("Impossible to initialize translator: {e}");
+                    // Impossible to start the proxy so we restart proxy
+                    ProxyState::update_translator_state(TranslatorState::Down);
+                    ProxyState::update_tp_state(TpState::Down);
+                    return;
+                }
+            };
 
         let (from_jdc_to_share_accounter_send, from_jdc_to_share_accounter_recv) = channel(10);
         let (from_share_accounter_to_jdc_send, from_share_accounter_to_jdc_recv) = channel(10);
@@ -259,7 +262,7 @@ async fn initialize_proxy(
         if let Some(jdc_handle) = jdc_abortable {
             abort_handles.push((jdc_handle, "jdc".to_string()));
         }
-        let server_handle = tokio::spawn(api::start(router.clone()));
+        let server_handle = tokio::spawn(api::start(router.clone(), stats_sender));
         match monitor(router, abort_handles, epsilon, server_handle).await {
             Reconnect::NewUpstream(new_pool_addr) => {
                 ProxyState::update_proxy_state_up();
@@ -290,7 +293,8 @@ async fn monitor(
                 info!("Faster upstream detected. Reinitializing proxy...");
                 drop(abort_handles);
                 server_handle.abort(); // abort server
-                                       // Needs a little to time to drop
+
+                // Needs a little to time to drop
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 return Reconnect::NewUpstream(new_upstream);
             }

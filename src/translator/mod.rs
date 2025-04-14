@@ -34,6 +34,7 @@ pub async fn start(
         TReceiver<Mining<'static>>,
         Option<Address>,
     )>,
+    stats_sender: crate::api::stats::StatsSender,
 ) -> Result<AbortOnDrop, Error<'static>> {
     let task_manager = TaskManager::initialize(pool_connection.clone());
     let abortable = task_manager
@@ -174,6 +175,7 @@ pub async fn start(
                 b,
                 diff_config,
                 downstreams,
+                stats_sender,
             )
             .await
             {

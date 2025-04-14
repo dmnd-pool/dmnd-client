@@ -1,5 +1,5 @@
 use crate::{
-    api::stats::DownstreamStatsRegistry,
+    api::stats::StatsSender,
     proxy_state::{DownstreamType, ProxyState},
     shared::utils::AbortOnDrop,
     translator::{
@@ -106,6 +106,7 @@ pub struct Downstream {
     pub(super) upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
     pub last_call_to_update_hr: u128,
     pub(super) last_notify: Option<server_to_client::Notify<'static>>,
+    pub(super) stats_sender: StatsSender,
 }
 
 impl Downstream {
@@ -123,6 +124,7 @@ impl Downstream {
         send_to_down: Sender<String>,
         recv_from_down: Receiver<String>,
         task_manager: Arc<Mutex<TaskManager>>,
+        stats_sender: StatsSender,
     ) {
         assert!(last_notify.is_some());
 
@@ -185,6 +187,7 @@ impl Downstream {
             upstream_difficulty_config,
             last_call_to_update_hr: 0,
             last_notify: last_notify.clone(),
+            stats_sender,
         }));
 
         if let Err(e) = start_receive_downstream(
@@ -235,6 +238,7 @@ impl Downstream {
         bridge: Arc<Mutex<super::super::proxy::Bridge>>,
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
         downstreams: Receiver<(Sender<String>, Receiver<String>, IpAddr)>,
+        stats_sender: StatsSender,
     ) -> Result<AbortOnDrop, Error<'static>> {
         let task_manager = TaskManager::initialize();
         let abortable = task_manager
@@ -248,6 +252,7 @@ impl Downstream {
             bridge,
             upstream_difficulty_config,
             downstreams,
+            stats_sender,
         )
         .await
         {
@@ -340,6 +345,7 @@ impl Downstream {
         extranonce2_len: usize,
         difficulty_mgmt: DownstreamDifficultyConfig,
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
+        stats_sender: StatsSender,
     ) -> Self {
         Downstream {
             connection_id,
@@ -355,6 +361,7 @@ impl Downstream {
             upstream_difficulty_config,
             last_call_to_update_hr: 0,
             last_notify: None,
+            stats_sender,
         }
     }
 }
@@ -387,7 +394,8 @@ impl IsServer<'static> for Downstream {
     /// Because no one unsubscribed in practice, they just unplug their machine.
     fn handle_subscribe(&self, request: &client_to_server::Subscribe) -> Vec<(String, String)> {
         info!("Down: Handling mining.subscribe: {:?}", &request);
-        DownstreamStatsRegistry.update_device_name(&request.agent_signature, &self.connection_id);
+        self.stats_sender
+            .update_device_name(self.connection_id, request.agent_signature.clone());
 
         let set_difficulty_sub = (
             "mining.set_difficulty".to_string(),
@@ -419,7 +427,7 @@ impl IsServer<'static> for Downstream {
 
         // check first job received
         if !self.first_job_received {
-            DownstreamStatsRegistry.update_rejected_shares(&self.connection_id);
+            self.stats_sender.update_rejected_shares(self.connection_id);
             return false;
         }
         //check allowed to send shares
@@ -427,7 +435,7 @@ impl IsServer<'static> for Downstream {
             Ok(true) => {
                 let Some(job) = &self.last_notify else {
                     error!("Share rejected: No last job found");
-                    DownstreamStatsRegistry.update_rejected_shares(&self.connection_id);
+                    self.stats_sender.update_rejected_shares(self.connection_id);
                     return false;
                 };
                 crate::translator::utils::update_share_count(self.connection_id); // update share count
@@ -451,26 +459,26 @@ impl IsServer<'static> for Downstream {
                         .try_send(DownstreamMessages::SubmitShares(to_send))
                     {
                         error!("Failed to start receive downstream task: {e:?}");
-                        DownstreamStatsRegistry.update_rejected_shares(&self.connection_id);
+                        self.stats_sender.update_rejected_shares(self.connection_id);
                         // Return false because submit was not properly handled
                         return false;
                     };
-                    DownstreamStatsRegistry.update_accepted_shares(&self.connection_id);
+                    self.stats_sender.update_accepted_shares(self.connection_id);
                     true
                 } else {
                     error!("Share rejected: Invalid share");
-                    DownstreamStatsRegistry.update_rejected_shares(&self.connection_id);
+                    self.stats_sender.update_rejected_shares(self.connection_id);
                     false
                 }
             }
             Ok(false) => {
                 warn!("Share rejected: Exceeded 70 shares/min limit");
-                DownstreamStatsRegistry.update_rejected_shares(&self.connection_id);
+                self.stats_sender.update_rejected_shares(self.connection_id);
                 false
             }
             Err(e) => {
                 error!("Failed to record share: {e:?}");
-                DownstreamStatsRegistry.update_rejected_shares(&self.connection_id);
+                self.stats_sender.update_rejected_shares(self.connection_id);
                 ProxyState::update_inconsistency(Some(1)); // restart proxy
                 false
             }

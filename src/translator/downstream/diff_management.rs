@@ -1,5 +1,3 @@
-use crate::api::stats::DownstreamStatsRegistry;
-
 use super::{Downstream, DownstreamMessages, SetDownstreamTarget};
 use pid::Pid;
 use roles_logic_sv2::{self, utils::from_u128_to_uint256};
@@ -227,19 +225,22 @@ impl Downstream {
         new_estimation: f32,
         current_diff: f32,
     ) -> ProxyResult<'static, ()> {
-        let (upstream_difficulty_config, old_estimation, connection_id) = self_.safe_lock(|d| {
-            let old_estimation = d.difficulty_mgmt.estimated_downstream_hash_rate;
-            d.difficulty_mgmt.estimated_downstream_hash_rate = new_estimation;
-            d.difficulty_mgmt.reset();
-            d.difficulty_mgmt.current_difficulty = current_diff;
+        let (upstream_difficulty_config, old_estimation, connection_id, stats_sender) = self_
+            .safe_lock(|d| {
+                let old_estimation = d.difficulty_mgmt.estimated_downstream_hash_rate;
+                d.difficulty_mgmt.estimated_downstream_hash_rate = new_estimation;
+                d.difficulty_mgmt.reset();
+                d.difficulty_mgmt.current_difficulty = current_diff;
 
-            (
-                d.upstream_difficulty_config.clone(),
-                old_estimation,
-                d.connection_id,
-            )
-        })?;
-        DownstreamStatsRegistry.update_hashrate(new_estimation, &connection_id);
+                (
+                    d.upstream_difficulty_config.clone(),
+                    old_estimation,
+                    d.connection_id,
+                    d.stats_sender.clone(),
+                )
+            })?;
+        stats_sender.update_hashrate(connection_id, new_estimation);
+        stats_sender.update_diff(connection_id, current_diff);
         let hash_rate_delta = new_estimation - old_estimation;
         upstream_difficulty_config.safe_lock(|c| {
             if (c.channel_nominal_hashrate + hash_rate_delta) > 0.0 {
@@ -399,6 +400,7 @@ mod test {
             0,
             downstream_conf.clone(),
             Arc::new(Mutex::new(upstream_config)),
+            crate::api::stats::StatsSender::new(),
         );
         downstream.difficulty_mgmt.estimated_downstream_hash_rate = start_hashrate as f32;
 
