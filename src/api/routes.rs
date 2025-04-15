@@ -81,7 +81,7 @@ impl Api {
                 )
             }
             (_, _) => (
-                StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::NOT_FOUND,
                 Json(APIResponse::error(Some(
                     "Pool information unavailable".to_string(),
                 ))),
@@ -91,12 +91,20 @@ impl Api {
 
     // Returns the status of the Proxy
     pub async fn health_check() -> impl IntoResponse {
-        let response = match ProxyState::is_proxy_down() {
-            (false, None) => "Proxy OK".to_string(),
-            (true, Some(states)) => states,
-            _ => "Unknown proxy state".to_string(),
-        };
-        Json(APIResponse::success(Some(response)))
+        match ProxyState::is_proxy_down() {
+            (false, None) => (
+                StatusCode::OK,
+                Json(APIResponse::success(Some("Proxy OK".to_string()))),
+            ),
+            (true, Some(states)) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(APIResponse::error(Some(states))),
+            ),
+            _ => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(APIResponse::error(Some("Unknown proxy state".to_string()))),
+            ),
+        }
     }
 }
 
