@@ -118,17 +118,17 @@ Point your Stratum V1 miners  to <your_proxy_ip>:32767.
 
   | Endpoint             | Method | Description                                                                 | Response Status Codes |
   |----------------------|--------|-----------------------------------------------------------------------------|-----------------------|
-  | `/health`            | GET    | Checks the health status of the proxy.                                       | 200, 503              |
-  | `/pool/info`         | GET    | Retrieves the current pool address and latency.                              | 200, 404                   |
-  | `/stats/miners`      | GET    | Returns device_name, hashrate, accepted and rejected shares count, and current_difficulty for all connected downstream devices (empty if none). | 200, 500              |
-  | `/stats/aggregate`   | GET    | Provides aggregated stats of all connected downstream devices.                     | 200, 500              |
-  | `/stats/system`      | GET    | Returns system resource usage (CPU and memory) for the proxy process.        | 200                   |
+  | `/api/health`            | GET    | Checks the health status of the proxy.                                       | 200, 503              |
+  | `/api/pool/info`         | GET    | Retrieves the current pool address and latency.                              | 200, 404                   |
+  | `/api/stats/miners`      | GET    | Returns device_name, hashrate, accepted and rejected shares count, and current_difficulty for all connected downstream devices (empty if none). | 200, 500              |
+  | `/api/stats/aggregate`   | GET    | Provides aggregated stats of all connected downstream devices.                     | 200, 500              |
+  | `/api/stats/system`      | GET    | Returns system resource usage (CPU and memory) for the proxy process.        | 200                   |
 
 
 ### Endpoint Details
 
 <details>
-<summary><strong>GET /health</strong> - Retrieves the health of the proxy</summary>
+<summary><strong>GET /api/health</strong> - Retrieves the health of the proxy</summary>
 
 - **Responses**:
   - **200 OK** (Healthy):
@@ -143,7 +143,7 @@ Point your Stratum V1 miners  to <your_proxy_ip>:32767.
 </details>
 
 <details>
-<summary><strong>GET /pool/info</strong> - Retrieves the current pool’s address and latency in milliseconds or null if not currently connected to pool</summary>
+<summary><strong>GET /api/pool/info</strong> - Retrieves the current pool’s address and latency in milliseconds or null if not currently connected to pool</summary>
 
 - **Responses**:
   - **200 OK** (Connected to Pool):
@@ -164,7 +164,7 @@ Point your Stratum V1 miners  to <your_proxy_ip>:32767.
 </details>
 
 <details>
-<summary><strong>GET /stats/miners</strong> - Shows stats for connected devices, empty if none.</summary>
+<summary><strong>GET /api/stats/miners</strong> - Shows stats for connected devices, empty if none.</summary>
 
 - **Responses**:
   - **200 OK** (Miing devices connected):
@@ -202,7 +202,7 @@ Point your Stratum V1 miners  to <your_proxy_ip>:32767.
 </details>
 
 <details>
-<summary><strong>GET /stats/aggregate</strong> - Aggregates metrics across all devices</summary>
+<summary><strong>GET /api/stats/aggregate</strong> - Aggregates metrics across all devices</summary>
 
 - **Responses**:
   - **200 OK**:
@@ -227,7 +227,7 @@ Point your Stratum V1 miners  to <your_proxy_ip>:32767.
 </details>
 
 <details>
-<summary><strong>GET /stats/system</strong> - Reports CPU and memory usage (0 - 100%).</summary>
+<summary><strong>GET /api/stats/system</strong> - Reports CPU and memory usage (0 - 100%).</summary>
 
 - **Responses**:
   - **200 OK**:

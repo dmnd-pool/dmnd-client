@@ -19,11 +19,11 @@ pub(crate) async fn start(router: Router, stats_sender: StatsSender) {
         stats_sender,
     };
     let app = AxumRouter::new()
-        .route("/health", get(Api::health_check))
-        .route("/pool/info", get(Api::get_pool_info))
-        .route("/stats/miners", get(Api::get_downstream_stats))
-        .route("/stats/aggregate", get(Api::get_aggregate_stats))
-        .route("/stats/system", get(Api::system_stats))
+        .route("/api/health", get(Api::health_check))
+        .route("/api/pool/info", get(Api::get_pool_info))
+        .route("/api/stats/miners", get(Api::get_downstream_stats))
+        .route("/api/stats/aggregate", get(Api::get_aggregate_stats))
+        .route("/api/stats/system", get(Api::system_stats))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3001")
