@@ -77,6 +77,8 @@ struct Args {
     noise_connection_log: String,
     #[clap(long = "delay", default_value = "0")]
     delay: u64,
+    #[clap(long = "interval", default_value = "120_000")]
+    adjustment_interval: u64,
 }
 
 #[tokio::main]
@@ -166,6 +168,7 @@ async fn initialize_proxy(
                 Ok(connection) => connection,
                 Err(_) => {
                     error!("No upstream available. Retrying...");
+                    error!("Are you using the correct TOKEN??");
                     let mut secs = 10;
                     while secs > 0 {
                         tracing::warn!("Retrying in {} seconds...", secs);

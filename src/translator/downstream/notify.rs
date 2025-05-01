@@ -145,8 +145,7 @@ async fn start_update(
             {
                 std::time::Duration::from_millis(5000)
             } else {
-                // TODO we really need to use differenet times seems to work well enaugh with 5 sec
-                std::time::Duration::from_millis(5000)
+                std::time::Duration::from_millis(crate::ARGS.adjustment_interval)
             };
 
             tokio::time::sleep(sleep_duration).await;
