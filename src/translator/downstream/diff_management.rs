@@ -17,7 +17,14 @@ impl Downstream {
     /// Initializes difficult managment.
     /// Send downstream a first target.
     pub async fn init_difficulty_management(self_: &Arc<Mutex<Self>>) -> ProxyResult<()> {
-        let diff = self_.safe_lock(|d| d.difficulty_mgmt.current_difficulty)?;
+        let (diff, stats_sender, connection_id, estimated_hashrate) = self_.safe_lock(|d| {
+            (
+                d.difficulty_mgmt.current_difficulty,
+                d.stats_sender.clone(),
+                d.connection_id,
+                d.difficulty_mgmt.estimated_downstream_hash_rate,
+            )
+        })?;
 
         let (message, _) = diff_to_sv1_message(diff as f64)?;
         Downstream::send_message_downstream(self_.clone(), message.clone()).await;
@@ -38,7 +45,8 @@ impl Downstream {
                 Downstream::send_message_downstream(self_clone.clone(), message.clone()).await;
             }
         });
-
+        stats_sender.update_diff(connection_id, diff);
+        stats_sender.update_hashrate(connection_id, estimated_hashrate);
         tokio::spawn(crate::translator::utils::check_share_rate_limit());
 
         Ok(())
