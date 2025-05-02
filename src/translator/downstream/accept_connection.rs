@@ -33,8 +33,20 @@ pub async fn start_accept_connection(
             let _s = tx_mining_notify.subscribe();
             while let Some((send, recv, addr)) = downstreams.recv().await {
                 info!("Translator opening connection for ip {}", addr);
-                // TODO handle also cases where a cpuminer want to connect
-                let expected_hash_rate = *crate::EXPECTED_SV1_HASHPOWER;
+
+                // The initial difficulty is derived from the formula: difficulty = hash_rate / (shares_per_second * 2^32)
+                let initial_hash_rate = *crate::EXPECTED_SV1_HASHPOWER;
+                let share_per_second = crate::SHARE_PER_MIN / 60.0;
+                let initial_difficulty =
+                    dbg!(initial_hash_rate / (share_per_second * 2f32.powf(32.0)));
+                let initial_difficulty =
+                    crate::translator::downstream::diff_management::nearest_power_of_10(
+                        initial_difficulty,
+                    );
+
+                // Formula: expected_hash_rate = (shares_per_second) * initial_difficulty * 2^32, where shares_per_second = SHARE_PER_MIN / 60
+                let expected_hash_rate =
+                    (crate::SHARE_PER_MIN / 60.0) * initial_difficulty * 2f32.powf(32.0);
                 if Bridge::ready(&bridge).await.is_err() {
                     error!("Bridge not ready");
                     break;
@@ -66,6 +78,7 @@ pub async fn start_accept_connection(
                             send,
                             recv,
                             task_manager.clone(),
+                            initial_difficulty,
                             stats_sender.clone(),
                         )
                         .await

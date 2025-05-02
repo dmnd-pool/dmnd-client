@@ -78,7 +78,6 @@ impl Bridge {
     ) -> Result<Arc<Mutex<Self>>, Error<'static>> {
         info!("Creating new bridge for up_id {}:", up_id);
         let ids = Arc::new(Mutex::new(GroupId::new()));
-        let share_per_min = 1.0;
         let upstream_target: [u8; 32] =  target.safe_lock(|t| {
     t.clone().try_into().expect("Internal error: this operation can not fail because Vec<U8> can always be converted into [u8; 32]")
 }).map_err(|e| Error::TargetError(RolesLogicError::PoisonLock(e.to_string())))?;
@@ -91,7 +90,7 @@ impl Bridge {
                 ids,
                 extranonces,
                 None,
-                share_per_min,
+                crate::SHARE_PER_MIN,
                 ExtendedChannelKind::Proxy { upstream_target },
                 None,
                 up_id,

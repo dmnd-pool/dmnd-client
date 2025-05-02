@@ -3,7 +3,6 @@ use crate::{
     proxy_state::{DownstreamType, ProxyState},
     shared::utils::AbortOnDrop,
     translator::{
-        downstream::diff_management::nearest_power_of_10,
         error::Error,
         utils::{allow_submit_share, validate_share},
     },
@@ -124,17 +123,12 @@ impl Downstream {
         send_to_down: Sender<String>,
         recv_from_down: Receiver<String>,
         task_manager: Arc<Mutex<TaskManager>>,
+        initial_difficulty: f32,
         stats_sender: StatsSender,
     ) {
         assert!(last_notify.is_some());
 
         let (tx_outgoing, receiver_outgoing) = channel(crate::TRANSLATOR_BUFFER_SIZE);
-
-        // The initial difficulty is derived from the formula: difficulty = hash_rate / (shares_per_second * 2^32),
-        let initial_hash_rate = *crate::EXPECTED_SV1_HASHPOWER;
-        let share_per_second = crate::SHARE_PER_MIN / 60.0;
-        let initial_difficulty = dbg!(initial_hash_rate / (share_per_second * 2f32.powf(32.0)));
-        let initial_difficulty = nearest_power_of_10(initial_difficulty);
 
         // The PID controller uses negative proportional (P) and integral (I) gains to reduce difficulty
         // when the actual share rate falls below the target rate (SHARE_PER_MIN). Negative gains are chosen
