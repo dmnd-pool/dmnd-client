@@ -77,7 +77,7 @@ struct Args {
     noise_connection_log: String,
     #[clap(long = "delay", default_value = "0")]
     delay: u64,
-    #[clap(long = "interval", default_value = "120_000")]
+    #[clap(long = "interval", default_value = "120000")]
     adjustment_interval: u64,
 }
 
