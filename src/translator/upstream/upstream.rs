@@ -180,15 +180,6 @@ impl Upstream {
             min_extranonce_size: crate::MIN_EXTRANONCE2_SIZE,
         });
 
-        // reset channel hashrate so downstreams can manage from now on out
-        self_
-            .safe_lock(|u| {
-                u.difficulty_config
-                    .safe_lock(|d| d.channel_nominal_hashrate = 0.0)
-                    .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)
-            })
-            .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)??;
-
         if sender.send(open_channel).await.is_err() {
             error!("Failed to send message");
             return Err(Error::AsyncChannelError);

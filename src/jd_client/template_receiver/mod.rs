@@ -346,6 +346,7 @@ impl TemplateRx {
                                                 // template message
                                                 let transactions_data = m.transaction_list;
                                                 let excess_data = m.excess_data;
+                                                let expected_template_id = m.template_id;
                                                 let m = match self_mutex
                                                     .safe_lock(|t| t.new_template_message.clone())
                                                 {
@@ -359,6 +360,9 @@ impl TemplateRx {
                                                         break;
                                                     }
                                                 };
+                                                if m.template_id != expected_template_id {
+                                                    continue;
+                                                }
                                                 let token = last_token.unwrap().unwrap();
                                                 last_token = None;
                                                 let mining_token = token.mining_job_token.to_vec();

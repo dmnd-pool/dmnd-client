@@ -273,19 +273,17 @@ impl DownstreamMiningNode {
                 let job_id_future =
                     UpstreamMiningNode::get_job_id(&upstream_mutex, last_template_id);
                 //?check
-                let job_id = timeout(Duration::from_secs(10), job_id_future)
-                    .await
-                    .map_err(|_| {
-                        error!("Timeout getting job_id for last_template_id: {last_template_id}");
-                        JdClientError::Unrecoverable
-                    })??;
-                share.job_id = job_id;
-                debug!(
-                    "Sending valid block solution upstream, with job_id {}",
-                    job_id
-                );
-                let message = Mining::SubmitSharesExtended(share);
-                UpstreamMiningNode::send(&upstream_mutex, message).await?;
+                if let Ok(Ok(job_id)) = timeout(Duration::from_secs(20), job_id_future).await {
+                    share.job_id = job_id;
+                    debug!(
+                        "Sending valid block solution upstream, with job_id {}",
+                        job_id
+                    );
+                    let message = Mining::SubmitSharesExtended(share);
+                    UpstreamMiningNode::send(&upstream_mutex, message).await?;
+                } else {
+                    error!("Timeout getting job_id for last_template_id: {last_template_id}, discard share");
+                }
             }
             Ok(SendTo::RelayNewMessage(message)) => {
                 let upstream_mutex = self_mutex

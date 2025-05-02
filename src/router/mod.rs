@@ -12,7 +12,10 @@ use noise_sv2::Initiator;
 use roles_logic_sv2::{common_messages_sv2::SetupConnection, parsers::Mining};
 use tokio::{
     net::TcpStream,
-    sync::mpsc::{Receiver, Sender},
+    sync::{
+        mpsc::{Receiver, Sender},
+        watch,
+    },
 };
 use tracing::{error, info};
 
@@ -22,12 +25,15 @@ use crate::{
 };
 
 /// Router handles connection to Multiple upstreams.
+#[derive(Clone)]
 pub struct Router {
     pool_addresses: Vec<SocketAddr>,
-    current_pool: Option<SocketAddr>,
+    pub current_pool: Option<SocketAddr>,
     auth_pub_k: Secp256k1PublicKey,
     setup_connection_msg: Option<SetupConnection<'static>>,
     timer: Option<Duration>,
+    latency_tx: watch::Sender<Option<Duration>>,
+    pub latency_rx: watch::Receiver<Option<Duration>>,
 }
 
 impl Router {
@@ -42,12 +48,15 @@ impl Router {
         // If None, default time of 5s is used.
         timer: Option<Duration>,
     ) -> Self {
+        let (latency_tx, latency_rx) = watch::channel(None);
         Self {
             pool_addresses,
             current_pool: None,
             auth_pub_k,
             setup_connection_msg,
             timer,
+            latency_tx,
+            latency_rx,
         }
     }
 
@@ -73,6 +82,7 @@ impl Router {
         info!("Selecting the best upstream ");
         if let Some((pool, latency)) = self.select_pool().await {
             info!("Latency for upstream {:?} is {:?}", pool, latency);
+            self.latency_tx.send_replace(Some(latency)); // update latency
             Some(pool)
         } else {
             //info!("No available pool");

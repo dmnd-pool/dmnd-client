@@ -45,6 +45,9 @@ pub async fn start_receive_downstream(
                 return;
             }
         }
+        if let Ok(stats_sender) = downstream.safe_lock(|d| d.stats_sender.clone()) {
+            stats_sender.remove_stats(connection_id);
+        }
         // No message to receive
         warn!(
             "Downstream: Shutting down sv1 downstream reader {}",

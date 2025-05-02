@@ -1,3 +1,4 @@
+use crate::jd_client::IS_CUSTOM_JOB_SET;
 use crate::proxy_state::{DownstreamType, ProxyState, TpState, UpstreamType};
 use crate::{jd_client::error::Error, jd_client::error::ProxyResult, shared::utils::AbortOnDrop};
 
@@ -577,6 +578,7 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
         if let Some(template_id) = self.template_to_job_id.take_template_id(m.request_id) {
             self.template_to_job_id
                 .register_job_id(template_id, m.job_id);
+            IS_CUSTOM_JOB_SET.store(true, std::sync::atomic::Ordering::Release);
             Ok(SendTo::None(None))
         } else {
             error!("Attention received a SetupConnectionSuccess with unknown request_id");

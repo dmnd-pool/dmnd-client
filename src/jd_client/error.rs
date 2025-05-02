@@ -1,6 +1,6 @@
 use std::fmt;
 
-use bitcoin::util::uint::ParseLengthError;
+use bitcoin::error::ParseIntError;
 
 pub type ProxyResult<T> = core::result::Result<T, Error>;
 
@@ -27,7 +27,7 @@ pub enum Error {
     // Locking Errors
     PoisonLock,
     TokioChannelErrorRecv(tokio::sync::broadcast::error::RecvError),
-    Uint256Conversion(ParseLengthError),
+    Uint256Conversion(ParseIntError),
     Infallible(std::convert::Infallible),
     Unrecoverable,
     TaskManagerFailed,
@@ -163,8 +163,8 @@ impl From<Vec<u8>> for Error {
     }
 }
 
-impl From<ParseLengthError> for Error {
-    fn from(e: ParseLengthError) -> Self {
+impl From<ParseIntError> for Error {
+    fn from(e: ParseIntError) -> Self {
         Error::Uint256Conversion(e)
     }
 }

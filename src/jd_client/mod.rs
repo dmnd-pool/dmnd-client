@@ -38,6 +38,8 @@ use tracing::{error, info};
 ///    between all the contexts is not necessary.
 pub static IS_NEW_TEMPLATE_HANDLED: AtomicBool = AtomicBool::new(true);
 
+pub static IS_CUSTOM_JOB_SET: AtomicBool = AtomicBool::new(true);
+
 use crate::proxy_state::{DownstreamType, ProxyState, TpState};
 use roles_logic_sv2::{parsers::Mining, utils::Mutex};
 use std::{
@@ -56,6 +58,9 @@ pub async fn start(
     up_receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     up_sender: tokio::sync::mpsc::Sender<Mining<'static>>,
 ) -> Option<AbortOnDrop> {
+    // This will not work when we implement support for multiple upstream
+    IS_CUSTOM_JOB_SET.store(true, std::sync::atomic::Ordering::Release);
+    IS_NEW_TEMPLATE_HANDLED.store(true, std::sync::atomic::Ordering::Release);
     initialize_jd(receiver, sender, up_receiver, up_sender).await
 }
 

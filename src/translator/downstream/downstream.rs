@@ -1,7 +1,9 @@
 use crate::{
+    api::stats::StatsSender,
     proxy_state::{DownstreamType, ProxyState},
     shared::utils::AbortOnDrop,
     translator::{
+        downstream::diff_management::nearest_power_of_10,
         error::Error,
         utils::{allow_submit_share, validate_share},
     },
@@ -27,7 +29,7 @@ use roles_logic_sv2::{
     utils::Mutex,
 };
 
-use std::{net::IpAddr, sync::Arc};
+use std::{collections::VecDeque, net::IpAddr, sync::Arc};
 use sv1_api::{
     client_to_server, json_rpc, server_to_client,
     utils::{Extranonce, HexU32Be},
@@ -38,10 +40,37 @@ use tracing::{error, info, warn};
 #[derive(Debug, Clone)]
 pub struct DownstreamDifficultyConfig {
     pub estimated_downstream_hash_rate: f32,
-    pub submits_since_last_update: u32,
-    pub timestamp_of_last_update: u128,
+    pub submits: VecDeque<std::time::Instant>,
     pub pid_controller: Pid<f32>,
     pub current_difficulty: f32,
+    pub initial_difficulty: f32,
+}
+
+impl DownstreamDifficultyConfig {
+    pub fn share_count(&mut self) -> Option<f32> {
+        let now = std::time::Instant::now();
+        if self.submits.is_empty() {
+            return Some(0.0);
+        }
+        let oldest = self.submits[0];
+        if now - oldest < std::time::Duration::from_secs(20) {
+            return None;
+        }
+        if now - oldest < std::time::Duration::from_secs(60) {
+            let elapsed = now - oldest;
+            Some(self.submits.len() as f32 / (elapsed.as_millis() as f32 / (60.0 * 1000.0)))
+        } else {
+            self.submits.pop_front();
+            self.share_count()
+        }
+    }
+    pub fn on_new_valid_share(&mut self) {
+        self.submits.push_back(std::time::Instant::now());
+    }
+
+    pub fn reset(&mut self) {
+        self.submits.clear();
+    }
 }
 
 impl PartialEq for DownstreamDifficultyConfig {
@@ -63,7 +92,7 @@ pub struct Downstream {
     //extranonce1: Vec<u8>,
     //extranonce2_size: usize,
     /// Version rolling mask bits
-    version_rolling_mask: Option<HexU32Be>,
+    pub(super) version_rolling_mask: Option<HexU32Be>,
     /// Minimum version rolling mask bits size
     version_rolling_min_bit: Option<HexU32Be>,
     /// Sends a SV1 `mining.submit` message received from the Downstream role to the `Bridge` for
@@ -77,6 +106,7 @@ pub struct Downstream {
     pub(super) upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
     pub last_call_to_update_hr: u128,
     pub(super) last_notify: Option<server_to_client::Notify<'static>>,
+    pub(super) stats_sender: StatsSender,
 }
 
 impl Downstream {
@@ -94,6 +124,7 @@ impl Downstream {
         send_to_down: Sender<String>,
         recv_from_down: Receiver<String>,
         task_manager: Arc<Mutex<TaskManager>>,
+        stats_sender: StatsSender,
     ) {
         assert!(last_notify.is_some());
 
@@ -102,7 +133,8 @@ impl Downstream {
         // The initial difficulty is derived from the formula: difficulty = hash_rate / (shares_per_second * 2^32),
         let initial_hash_rate = *crate::EXPECTED_SV1_HASHPOWER;
         let share_per_second = crate::SHARE_PER_MIN / 60.0;
-        let initial_difficulty = initial_hash_rate / (share_per_second * 2f32.powf(32.0));
+        let initial_difficulty = dbg!(initial_hash_rate / (share_per_second * 2f32.powf(32.0)));
+        let initial_difficulty = nearest_power_of_10(initial_difficulty);
 
         // The PID controller uses negative proportional (P) and integral (I) gains to reduce difficulty
         // when the actual share rate falls below the target rate (SHARE_PER_MIN). Negative gains are chosen
@@ -126,18 +158,19 @@ impl Downstream {
         // The positive D gain (0.05) dampens rapid changes, e.g., if share rate jumps from 8 to 12, D might
         // add a small positive adjustment to prevent overshooting.
 
-        let output_limit = initial_hash_rate * 0.7;
-        let mut pid: Pid<f32> = Pid::new(crate::SHARE_PER_MIN, output_limit);
-        pid.p(-0.01, output_limit)
-            .i(0.01, output_limit)
-            .d(0.01, output_limit);
+        let mut pid: Pid<f32> = Pid::new(crate::SHARE_PER_MIN, initial_difficulty * 10.0);
+        let pk = -initial_difficulty * 0.01;
+        //let pi = initial_difficulty * 0.1;
+        //let pd = initial_difficulty * 0.01;
+        pid.p(pk, f32::MAX).i(0.0, f32::MAX).d(0.0, f32::MAX);
 
+        let estimated_downstream_hash_rate = *crate::EXPECTED_SV1_HASHPOWER;
         let difficulty_mgmt = DownstreamDifficultyConfig {
-            estimated_downstream_hash_rate: *crate::EXPECTED_SV1_HASHPOWER,
-            submits_since_last_update: 0,
-            timestamp_of_last_update: 0,
+            estimated_downstream_hash_rate,
+            submits: vec![].into(),
             pid_controller: pid,
             current_difficulty: initial_difficulty,
+            initial_difficulty,
         };
 
         let downstream = Arc::new(Mutex::new(Downstream {
@@ -154,6 +187,7 @@ impl Downstream {
             upstream_difficulty_config,
             last_call_to_update_hr: 0,
             last_notify: last_notify.clone(),
+            stats_sender,
         }));
 
         if let Err(e) = start_receive_downstream(
@@ -204,6 +238,7 @@ impl Downstream {
         bridge: Arc<Mutex<super::super::proxy::Bridge>>,
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
         downstreams: Receiver<(Sender<String>, Receiver<String>, IpAddr)>,
+        stats_sender: StatsSender,
     ) -> Result<AbortOnDrop, Error<'static>> {
         let task_manager = TaskManager::initialize();
         let abortable = task_manager
@@ -217,6 +252,7 @@ impl Downstream {
             bridge,
             upstream_difficulty_config,
             downstreams,
+            stats_sender,
         )
         .await
         {
@@ -309,6 +345,7 @@ impl Downstream {
         extranonce2_len: usize,
         difficulty_mgmt: DownstreamDifficultyConfig,
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
+        stats_sender: StatsSender,
     ) -> Self {
         Downstream {
             connection_id,
@@ -324,6 +361,7 @@ impl Downstream {
             upstream_difficulty_config,
             last_call_to_update_hr: 0,
             last_notify: None,
+            stats_sender,
         }
     }
 }
@@ -356,6 +394,8 @@ impl IsServer<'static> for Downstream {
     /// Because no one unsubscribed in practice, they just unplug their machine.
     fn handle_subscribe(&self, request: &client_to_server::Subscribe) -> Vec<(String, String)> {
         info!("Down: Handling mining.subscribe: {:?}", &request);
+        self.stats_sender
+            .update_device_name(self.connection_id, request.agent_signature.clone());
 
         let set_difficulty_sub = (
             "mining.set_difficulty".to_string(),
@@ -387,6 +427,7 @@ impl IsServer<'static> for Downstream {
 
         // check first job received
         if !self.first_job_received {
+            self.stats_sender.update_rejected_shares(self.connection_id);
             return false;
         }
         //check allowed to send shares
@@ -394,9 +435,11 @@ impl IsServer<'static> for Downstream {
             Ok(true) => {
                 let Some(job) = &self.last_notify else {
                     error!("Share rejected: No last job found");
+                    self.stats_sender.update_rejected_shares(self.connection_id);
                     return false;
                 };
-                //check share is valid
+                crate::translator::utils::update_share_count(self.connection_id); // update share count
+                                                                                  //check share is valid
                 if validate_share(
                     request,
                     job,
@@ -416,21 +459,26 @@ impl IsServer<'static> for Downstream {
                         .try_send(DownstreamMessages::SubmitShares(to_send))
                     {
                         error!("Failed to start receive downstream task: {e:?}");
+                        self.stats_sender.update_rejected_shares(self.connection_id);
                         // Return false because submit was not properly handled
                         return false;
                     };
+                    self.stats_sender.update_accepted_shares(self.connection_id);
                     true
                 } else {
                     error!("Share rejected: Invalid share");
+                    self.stats_sender.update_rejected_shares(self.connection_id);
                     false
                 }
             }
             Ok(false) => {
                 warn!("Share rejected: Exceeded 70 shares/min limit");
+                self.stats_sender.update_rejected_shares(self.connection_id);
                 false
             }
             Err(e) => {
                 error!("Failed to record share: {e:?}");
+                self.stats_sender.update_rejected_shares(self.connection_id);
                 ProxyState::update_inconsistency(Some(1)); // restart proxy
                 false
             }

@@ -23,6 +23,7 @@ pub async fn start_accept_connection(
     bridge: Arc<Mutex<super::super::proxy::Bridge>>,
     upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
     mut downstreams: Receiver<(Sender<String>, Receiver<String>, IpAddr)>,
+    stats_sender: crate::api::stats::StatsSender,
 ) -> Result<(), Error<'static>> {
     let handle = {
         let task_manager = task_manager.clone();
@@ -65,6 +66,7 @@ pub async fn start_accept_connection(
                             send,
                             recv,
                             task_manager.clone(),
+                            stats_sender.clone(),
                         )
                         .await
                     }

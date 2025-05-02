@@ -34,6 +34,7 @@ pub async fn start(
         TReceiver<Mining<'static>>,
         Option<Address>,
     )>,
+    stats_sender: crate::api::stats::StatsSender,
 ) -> Result<AbortOnDrop, Error<'static>> {
     let task_manager = TaskManager::initialize(pool_connection.clone());
     let abortable = task_manager
@@ -84,9 +85,11 @@ pub async fn start(
         broadcast::Receiver<server_to_client::Notify>,
     ) = broadcast::channel(crate::TRANSLATOR_BUFFER_SIZE);
 
+    let channel_nominal_hashrate = 0.0;
+
     let upstream_diff = UpstreamDifficultyConfig {
         channel_diff_update_interval: crate::CHANNEL_DIFF_UPDTATE_INTERVAL,
-        channel_nominal_hashrate: *crate::EXPECTED_SV1_HASHPOWER,
+        channel_nominal_hashrate,
     };
     let diff_config = Arc::new(Mutex::new(upstream_diff));
 
@@ -172,6 +175,7 @@ pub async fn start(
                 b,
                 diff_config,
                 downstreams,
+                stats_sender,
             )
             .await
             {

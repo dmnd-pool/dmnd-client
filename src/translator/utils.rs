@@ -3,10 +3,18 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 
-use crate::translator::error::Error;
-use bitcoin::hashes::{sha256d, Hash};
+use crate::{
+    proxy_state::{DownstreamType, ProxyState},
+    translator::error::Error,
+};
+use binary_sv2::Sv2DataType;
+use bitcoin::{
+    block::{Header, Version},
+    hashes::{sha256d, Hash as BHash},
+    BlockHash, CompactTarget,
+};
 use lazy_static::lazy_static;
-use roles_logic_sv2::{mining_sv2::Target, utils::Mutex};
+use roles_logic_sv2::utils::Mutex;
 use sv1_api::{client_to_server, server_to_client::Notify};
 use tracing::error;
 
@@ -15,6 +23,8 @@ lazy_static! {
     pub static ref SHARE_TIMESTAMPS: Arc<Mutex<VecDeque<tokio::time::Instant>>> =
         Arc::new(Mutex::new(VecDeque::with_capacity(70)));
     pub static ref IS_RATE_LIMITED: AtomicBool = AtomicBool::new(false);
+    static ref SHARE_COUNTS: Arc<Mutex<std::collections::HashMap<u32, (u32, tokio::time::Instant)>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
 }
 
 /// Checks if a share can be sent upstream based on a rate limit of 70 shares per minute.
@@ -37,6 +47,7 @@ pub async fn check_share_rate_limit() {
             })
             .unwrap_or_else(|e| {
                 error!("Failed to lock SHARE_TIMESTAMPS: {:?}", e);
+                ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
                 0
             });
 
@@ -79,8 +90,7 @@ pub fn validate_share(
     }
 
     let prev_hash_vec: Vec<u8> = job.prev_hash.clone().into();
-    let prev_hash: [u8; 32] = prev_hash_vec.try_into().expect("PrevHash must be 32 bytes");
-
+    let prev_hash = binary_sv2::U256::from_vec_(prev_hash_vec).unwrap();
     let mut merkle_branch = Vec::new();
     for branch in &job.merkle_branch {
         merkle_branch.push(branch.0.to_vec());
@@ -102,24 +112,107 @@ pub fn validate_share(
         .0;
     let version = (job_version & !mask) | (request_version & mask);
 
-    let mut hash = roles_logic_sv2::utils::get_target(
+    let mut hash = get_hash(
         request.nonce.0,
         version,
         request.time.0,
         extranonce,
-        job.coin_base1.as_ref(),
-        job.coin_base2.as_ref(),
-        bitcoin::BlockHash::from(sha256d::Hash::from_inner(prev_hash)),
+        job,
+        roles_logic_sv2::utils::u256_to_block_hash(prev_hash),
         merkle_branch,
-        job.bits.0,
     );
 
-    hash.reverse(); //conver to little-endian
-
-    let hash: Target = hash.into();
+    hash.reverse(); //convert to little-endian
+    println!("Hash: {:?}", hex::encode(hash));
     let target = Downstream::difficulty_to_target(difficulty);
-    let target: Target = target.into();
+    println!("Target: {:?}", hex::encode(target));
     hash <= target
+}
+
+pub fn get_hash(
+    nonce: u32,
+    version: u32,
+    ntime: u32,
+    extranonce: &[u8],
+    job: &Notify,
+    prev_hash: BlockHash,
+    merkle_path: Vec<Vec<u8>>,
+) -> [u8; 32] {
+    // Construct coinbase
+    let mut coinbase = Vec::new();
+    coinbase.extend_from_slice(job.coin_base1.as_ref());
+    coinbase.extend_from_slice(extranonce);
+    coinbase.extend_from_slice(job.coin_base2.as_ref());
+
+    // Calculate the Merkle root
+    let coinbase_hash = <sha256d::Hash as bitcoin::hashes::Hash>::hash(&coinbase);
+    let mut merkle_root = coinbase_hash.to_byte_array();
+
+    for path in merkle_path {
+        let mut combined = Vec::with_capacity(64);
+        combined.extend_from_slice(&merkle_root);
+        combined.extend_from_slice(path.as_ref());
+        merkle_root = <sha256d::Hash as bitcoin::hashes::Hash>::hash(&combined).to_byte_array();
+    }
+
+    // Construct the block header
+    let header = Header {
+        version: Version::from_consensus(version.try_into().unwrap()),
+        prev_blockhash: prev_hash,
+        merkle_root: bitcoin::TxMerkleNode::from_byte_array(merkle_root),
+        time: ntime,
+        bits: CompactTarget::from_consensus(job.bits.0),
+        nonce,
+    };
+
+    // Calculate the block hash
+    let block_hash: [u8; 32] = header.block_hash().to_raw_hash().to_byte_array();
+    block_hash
+}
+
+// Update share count for each miner
+pub fn update_share_count(connection_id: u32) {
+    SHARE_COUNTS
+        .safe_lock(|share_counts| {
+            let now = tokio::time::Instant::now();
+            if let Some((count, last_update)) = share_counts.get_mut(&connection_id) {
+                if now.duration_since(*last_update) < std::time::Duration::from_secs(60) {
+                    *count += 1;
+                } else {
+                    *count = 1;
+                    *last_update = now;
+                }
+            } else {
+                share_counts.insert(connection_id, (1, now));
+            }
+        })
+        .unwrap_or_else(|_| {
+            error!("Failed to lock SHARE_COUNTS");
+            ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream)
+        });
+}
+
+// Get share count for the last 60 secs
+pub fn get_share_count(connection_id: u32) -> f32 {
+    let now = tokio::time::Instant::now();
+    let share_counts = SHARE_COUNTS
+        .safe_lock(|share_counts| {
+            if let Some((count, last_update)) = share_counts.get(&connection_id) {
+                if now.duration_since(*last_update) < tokio::time::Duration::from_secs(60) {
+                    *count as f32 // Shares per minute
+                } else {
+                    0.0 // More than 60 seconds since the last share, so return 0.
+                }
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or_else(|_| {
+            error!("Failed to lock SHARE_COUNTS");
+            ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+            0.0
+        });
+    share_counts
 }
 
 // /// currently the pool only supports 16 bytes exactly for its channels
