@@ -7,15 +7,20 @@ edition = "2021"
 dashmap = {version = "6.1.0", features = ["inline"]}
 bitcoin = {version = "0.32.5", features = ["serde","rand"]}
 serde_json = { version = "1.0.64", default-features = false, features = ["alloc"] }
-tokio-util = { version = "*", features = ["codec"] }
-nohash-hasher = "*"
-futures = "*"
+tokio-util = { version = "0.7.14", features = ["codec"] }
+nohash-hasher = "0.2.0"
+futures = "0.3.30"
 async-recursion = "1.0.0"
 lazy_static = "1.4.0"
 rand = "0.8.4"
 tracing = { version = "0.1" }
+
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"]}
+tokio = {version="^1.36.0",features = ["full","tracing"]}
+
 tracing-subscriber = { version = "*", features = ["env-filter"]}
 tokio = {version="^1.36.0",features = ["full","tracing", "macros","rt-multi-thread"]}
+
 key-utils = "1.0.0"
 pid = { version = "4.0.0"}
 clap = {version = "4.5.31", features = ["derive"]}
@@ -69,4 +74,4 @@ panic = 'abort'
 panic = 'abort'
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
-jemallocator = "*"
+jemallocator = "0.5.4"
