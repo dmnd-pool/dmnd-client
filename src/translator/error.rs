@@ -78,3 +78,9 @@ impl From<roles_logic_sv2::Error> for Error<'_> {
         Self::RolesSv2Logic(value)
     }
 }
+
+impl<'a> From<sv1_api::error::Error<'a>> for Error<'a> {
+    fn from(value: sv1_api::error::Error<'a>) -> Self {
+        Self::V1Protocol(value)
+    }
+}
