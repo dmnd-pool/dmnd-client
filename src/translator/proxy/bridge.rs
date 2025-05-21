@@ -667,9 +667,14 @@ mod test {
                     sequence: bitcoin::Sequence(0),
                     witness: Witness::new(),
                 };
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as u32;
+
                 let tx = bitcoin::Transaction {
                     version: bitcoin::transaction::Version(1),
-                    lock_time: bitcoin::locktime::absolute::LockTime::from_time(0).unwrap(),
+                    lock_time: bitcoin::locktime::absolute::LockTime::from_time(now).unwrap(),
                     input: vec![in_],
                     output: vec![],
                 };
