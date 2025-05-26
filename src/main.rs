@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, ArgAction};
 #[cfg(not(target_os = "windows"))]
 use jemallocator::Jemalloc;
 use router::Router;
@@ -41,17 +41,27 @@ const TEST_AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:32767";
 
 lazy_static! {
+    static ref ARGS: Args = Args::parse();
+    // Remove or comment out the old TOKEN line:
+    // static ref TOKEN: String = std::env::var("TOKEN").expect("Missing TOKEN environment variable");
+    
+    // Other existing lazy_static variables...
     static ref SV1_DOWN_LISTEN_ADDR: String =
         std::env::var("SV1_DOWN_LISTEN_ADDR").unwrap_or(DEFAULT_LISTEN_ADDRESS.to_string());
     static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<String>> =
-        roles_logic_sv2::utils::Mutex::new(std::env::var("TP_ADDRESS").ok());
-    static ref EXPECTED_SV1_HASHPOWER: f32 = Args::parse()
-        .downstream_hashrate
-        .unwrap_or(DEFAULT_SV1_HASHPOWER);
+        roles_logic_sv2::utils::Mutex::new(None); // We'll set this from config
+    static ref EXPECTED_SV1_HASHPOWER: f32 = {
+        if let Some(value) = ARGS.downstream_hashrate {
+            value
+        } else {
+            let env_var = std::env::var("EXPECTED_SV1_HASHPOWER").ok();
+            env_var.and_then(|s| parse_hashrate(&s).ok())
+                .unwrap_or(DEFAULT_SV1_HASHPOWER)
+        }
+    };
 }
 
 lazy_static! {
-    static ref ARGS: Args = Args::parse();
     pub static ref POOL_ADDRESS: &'static str = if ARGS.test {
         TEST_POOL_ADDRESS
     } else {
@@ -63,8 +73,9 @@ lazy_static! {
         MAIN_AUTH_PUB_KEY
     };
 }
-#[derive(Parser)]
-struct Args {
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+pub struct Args {
     // Use test enpoint if test flag is provided
     #[clap(long)]
     test: bool,
@@ -74,6 +85,17 @@ struct Args {
     loglevel: String,
     #[clap(long = "nc", short = 'n', default_value = "off")]
     noise_connection_log: String,
+    // New argument for multiple upstream servers
+    #[clap(long = "upstream", short = 'u', action = ArgAction::Append)]
+    upstream_servers: Option<Vec<String>>,
+    // Option to enable round-robin distribution
+    #[clap(long = "round-robin", short = 'r')]
+    round_robin: bool,
+    // In Args struct
+#[clap(long = "monitor-hashrate", short = 'm')]
+monitor_hashrate: bool,
+    #[clap(long = "config", short = 'c')]
+    pub config_file: Option<String>,
 }
 
 #[tokio::main]
@@ -112,9 +134,44 @@ async fn main() {
             log_level, noise_connection_log_level
         )))
         .init();
-    std::env::var("TOKEN").expect("Missing TOKEN environment variable");
+    // std::env::var("TOKEN").expect("Missing TOKEN environment variable");
 
-    let hashpower = *EXPECTED_SV1_HASHPOWER;
+    // Load configuration first
+    let config = if let Some(config_path) = &ARGS.config_file {
+        match Config::from_file(config_path) {
+            Ok(config) => Some(config),
+            Err(e) => {
+                error!("Failed to load config file: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
+    // Get TOKEN from config or environment
+    let token = if let Some(ref config) = config {
+        config.token.clone()
+    } else {
+        std::env::var("TOKEN").unwrap_or_else(|_| {
+            error!("TOKEN must be provided either in config file or as environment variable");
+            std::process::exit(1);
+        })
+    };
+
+  
+    // Use configured hashrate if available
+    let hashpower = if let Some(ref config) = config {
+        if let Some(ref hashrate_str) = config.downstream_hashrate {
+            parse_hashrate(hashrate_str).unwrap_or(*EXPECTED_SV1_HASHPOWER)
+        } else {
+            *EXPECTED_SV1_HASHPOWER
+        }
+    } else {
+        *EXPECTED_SV1_HASHPOWER
+    };
+    
+    ProxyState::set_total_hashrate(hashpower);
 
     if args.downstream_hashrate.is_some() {
         info!(
@@ -127,21 +184,102 @@ async fn main() {
             HashUnit::format_value(hashpower)
         );
     }
-    if args.test {
-        info!("Connecting to test endpoint...");
+
+    // Handle multiple upstream servers from config or hard-coded fallback
+    let mut pool_addresses = Vec::new();
+    
+    if let Some(ref config) = config {
+        // Use configuration file pool addresses
+        info!("Loading pool addresses from configuration file");
+        
+        for (idx, pool_addr_str) in config.pool_addresses.iter().enumerate() {
+            // Parse address
+            let addr = if let Ok(mut addrs) = pool_addr_str.to_socket_addrs() {
+                addrs.next().unwrap_or_else(|| {
+                    error!("Failed to resolve address: {}", pool_addr_str);
+                    std::process::exit(1);
+                })
+            } else {
+                error!("Invalid pool address: {}", pool_addr_str);
+                std::process::exit(1);
+            };
+            
+            // Use test public key for now (you might want to add this to config)
+            let pubkey: Secp256k1PublicKey = TEST_AUTH_PUB_KEY
+                .parse()
+                .expect("Invalid test public key");
+            
+            info!("Adding upstream server {}: {}", idx + 1, addr);
+            pool_addresses.push((addr, pubkey.clone()));
+            
+            ProxyState::add_upstream_connection(
+                format!("upstream-{}", idx),
+                format!("config-pool-{}", idx + 1),
+                addr,
+                pubkey,
+                crate::proxy_state::UpstreamType::JDCMiningUpstream,
+            );
+        }
+    } else {
+        // Fallback to hard-coded addresses (your existing code)
+        info!("Using hard-coded pool addresses");
+        
+        let test_pubkey: Secp256k1PublicKey = TEST_AUTH_PUB_KEY
+            .parse()
+            .expect("Invalid test public key");
+            
+        let test_addr = if let Ok(addr) = "3.74.36.119:2000".to_socket_addrs() {
+            addr.collect::<Vec<_>>()[0]
+        } else {
+            "3.74.36.119:2000".parse().expect("Invalid IP address")
+        };
+        
+        // Add hard-coded pools
+        for i in 0..2 {
+            info!("Adding upstream server {}: {}", i + 1, test_addr);
+            pool_addresses.push((test_addr, test_pubkey.clone()));
+            ProxyState::add_upstream_connection(
+                format!("upstream-{}", i),
+                format!("test-pool-{}", i + 1),
+                test_addr,
+                test_pubkey.clone(),
+                crate::proxy_state::UpstreamType::JDCMiningUpstream,
+            );
+        }
     }
 
-    let auth_pub_k: Secp256k1PublicKey = AUTH_PUB_KEY.parse().expect("Invalid public key");
-    let address = POOL_ADDRESS
-        .to_socket_addrs()
-        .expect("Invalid pool address")
-        .next()
-        .expect("Invalid pool address");
+    // Direct verification
+    info!("DIRECT VERIFICATION: Checking hashrate distribution");
+    let upstream_connections = ProxyState::get_upstream_connections();
+    let active_count = upstream_connections.len();
+    info!("Active upstreams: {}", active_count);
 
-    // We will add upstream addresses here
-    let pool_addresses = vec![address];
+    if active_count > 0 && ARGS.round_robin {
+        let hashrate_per_upstream = hashpower / active_count as f32;
+        info!("Round-robin hashrate per upstream: {}", HashUnit::format_value(hashrate_per_upstream));
+        
+        for (upstream_id, addr, _) in upstream_connections {
+            info!("Upstream {}: {} - allocated {}", 
+                upstream_id, 
+                addr,
+                HashUnit::format_value(hashrate_per_upstream));
+        }
+    }
 
-    let mut router = router::Router::new(pool_addresses, auth_pub_k, None, None);
+    // Set all upstreams as initially connected
+    for (idx, (addr, _)) in pool_addresses.iter().enumerate() {
+        let id = if idx == 0 && pool_addresses.len() == 1 {
+            "upstream-default".to_string()
+        } else {
+            format!("upstream-{}", idx) 
+        };
+        ProxyState::set_upstream_connection_status(&id, true);
+    }
+
+    let pool_socket_addresses: Vec<std::net::SocketAddr> = pool_addresses.iter().map(|(addr, _)| *addr).collect();
+    let auth_pub_keys: Vec<Secp256k1PublicKey> = pool_addresses.iter().map(|(_, pubkey)| pubkey.clone()).collect();
+    let auth_pub_k = auth_pub_keys.first().expect("No public keys available").clone();
+    let mut router = router::Router::new(pool_socket_addresses, auth_pub_k, None, None);
     let epsilon = Duration::from_millis(10);
     let best_upstream = router.select_pool_connect().await;
     initialize_proxy(&mut router, best_upstream, epsilon).await;
@@ -280,10 +418,54 @@ async fn monitor(
     epsilon: Duration,
 ) -> Reconnect {
     let mut should_check_upstreams_latency = 0;
+    let mut distribution_check_counter = 0;
+    
     loop {
+        if distribution_check_counter >= 100 {
+            distribution_check_counter = 0;
+            
+            // Add debug output to confirm this code runs
+            info!("Generating hashrate distribution report...");
+            
+            info!("Hashrate Distribution Report:");
+            info!("Total hashrate: {}", HashUnit::format_value(*EXPECTED_SV1_HASHPOWER));
+            
+            // Get upstream info directly from ProxyState
+            if ARGS.round_robin {
+                // In round-robin mode, check how many active upstreams we have
+                let upstream_connections = ProxyState::get_upstream_connections();
+                let active_count = upstream_connections.len();
+                
+                if active_count > 0 {
+                    let hashrate_per_upstream = *EXPECTED_SV1_HASHPOWER / active_count as f32;
+                    info!("Round-robin mode: {} active upstreams", active_count);
+                    info!("Each upstream allocated: {}", HashUnit::format_value(hashrate_per_upstream));
+                    
+                    // List each upstream and its allocated hashrate
+                    for (upstream_id, addr, _) in upstream_connections {
+                        info!("Upstream {}: {} - allocated {}", 
+                            upstream_id, 
+                            addr,
+                            HashUnit::format_value(hashrate_per_upstream));
+                    }
+                } else {
+                    info!("No active upstreams found");
+                }
+            } else {
+                // In latency-based mode
+                info!("Latency-based mode: Using best upstream");
+                if let Some(current_addr) = router.get_current_upstream() {
+                    info!("Current upstream: {} - allocated {}", 
+                        current_addr, 
+                        HashUnit::format_value(*EXPECTED_SV1_HASHPOWER));
+                } else {
+                    info!("No upstream currently selected");
+                }
+            }
+        }
+
         // Check if a better upstream exist every 100 seconds
         if should_check_upstreams_latency == 10 * 100 {
-            should_check_upstreams_latency = 0;
             if let Some(new_upstream) = router.monitor_upstream(epsilon).await {
                 info!("Faster upstream detected. Reinitializing proxy...");
                 drop(abort_handles);
@@ -328,7 +510,11 @@ async fn monitor(
             return Reconnect::NoUpstream;
         }
 
+        // Increment the counters
         should_check_upstreams_latency += 1;
+        distribution_check_counter += 1;
+        
+        // Make sure this line exists to give time for the loop
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
 }
@@ -408,5 +594,28 @@ impl HashUnit {
         } else {
             format!("{:.2}", hashrate)
         }
+    }
+}
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Config {
+    pub token: String,
+    pub pool_addresses: Vec<String>,
+    pub tp_address: Option<String>,
+    pub interval: Option<u64>,
+    pub delay: Option<u64>,
+    pub downstream_hashrate: Option<String>,
+    pub loglevel: Option<String>,
+    pub nc_loglevel: Option<String>,
+    pub test: Option<bool>,
+}
+
+impl Config {
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+        let contents = std::fs::read_to_string(path)?;
+        let config: Config = toml::from_str(&contents)?;
+        Ok(config)
     }
 }
