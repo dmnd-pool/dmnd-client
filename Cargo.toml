@@ -23,6 +23,7 @@ axum = {version = "0.8.1"}
 serde = { version = "1.0.219", features = ["derive"] }  
 sysinfo = {version = "0.33.1"}
 primitive-types = { version = "0.13.1" }
+toml = "0.8"
 #roles_logic_sv2 = "1.2.1"
 #sv1_api = "1.0.1"
 #demand-sv2-connection = "0.0.3"
