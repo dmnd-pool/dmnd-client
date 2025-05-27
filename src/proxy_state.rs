@@ -88,6 +88,7 @@ pub enum UpstreamType {
 }
 
 /// Create an UpstreamConnection struct to store connection info
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct UpstreamConnection {
     pub url: String,
@@ -380,13 +381,15 @@ impl ProxyState {
     }
 
     /// Get the next upstream in round-robin fashion
-    pub fn get_next_upstream() -> Option<(String, std::net::SocketAddr, key_utils::Secp256k1PublicKey)> {
+    pub fn get_next_upstream(
+    ) -> Option<(String, std::net::SocketAddr, key_utils::Secp256k1PublicKey)> {
         let mut result = None;
 
         if PROXY_STATE
             .safe_lock(|state| {
                 // Get IDs of all connected upstreams
-                let active_upstreams: Vec<&String> = state.upstream_connections
+                let active_upstreams: Vec<&String> = state
+                    .upstream_connections
                     .iter()
                     .filter(|(_, conn)| conn.is_connected)
                     .map(|(id, _)| id)
@@ -403,15 +406,12 @@ impl ProxyState {
 
                 let id = active_upstreams[state.current_upstream_index].clone();
                 if let Some(conn) = state.upstream_connections.get(&id) {
-                    result = Some((
-                        id.clone(),
-                        conn.address,
-                        conn.auth_key.clone()
-                    ));
+                    result = Some((id.clone(), conn.address, conn.auth_key));
                 }
 
                 // Update index for next call
-                state.current_upstream_index = (state.current_upstream_index + 1) % active_upstreams.len();
+                state.current_upstream_index =
+                    (state.current_upstream_index + 1) % active_upstreams.len();
             })
             .is_err()
         {
@@ -423,13 +423,15 @@ impl ProxyState {
     }
 
     /// Get the hashrate for a specific upstream (equal distribution)
+    #[allow(dead_code)]
     pub fn get_hashrate_for_upstream(id: Option<&str>) -> f32 {
         let mut hashrate = 0.0;
 
         if PROXY_STATE
             .safe_lock(|state| {
                 // Count active connections
-                let active_count = state.upstream_connections
+                let active_count = state
+                    .upstream_connections
                     .values()
                     .filter(|conn| conn.is_connected)
                     .count();
@@ -462,6 +464,7 @@ impl ProxyState {
     }
 
     /// Record a share submission to an upstream
+    #[allow(dead_code)]
     pub fn record_share_submission(upstream_id: &str) {
         if PROXY_STATE
             .safe_lock(|state| {
@@ -478,6 +481,7 @@ impl ProxyState {
     }
 
     /// Record a share acceptance from an upstream
+    #[allow(dead_code)]
     pub fn record_share_acceptance(upstream_id: &str) {
         if PROXY_STATE
             .safe_lock(|state| {
@@ -493,15 +497,17 @@ impl ProxyState {
     }
 
     /// Get all upstream connections
-    pub fn get_upstream_connections() -> Vec<(String, std::net::SocketAddr, key_utils::Secp256k1PublicKey)> {
+    pub fn get_upstream_connections(
+    ) -> Vec<(String, std::net::SocketAddr, key_utils::Secp256k1PublicKey)> {
         let mut connections = Vec::new();
 
         if PROXY_STATE
             .safe_lock(|state| {
-                connections = state.upstream_connections
+                connections = state
+                    .upstream_connections
                     .iter()
                     .filter(|(_, conn)| conn.is_connected)
-                    .map(|(id, conn)| (id.clone(), conn.address, conn.auth_key.clone()))
+                    .map(|(id, conn)| (id.clone(), conn.address, conn.auth_key))
                     .collect();
             })
             .is_err()

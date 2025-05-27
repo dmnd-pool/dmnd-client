@@ -291,6 +291,14 @@ fn diff_to_sv1_message(diff: f64) -> ProxyResult<'static, (json_rpc::Message, [u
     Ok((message, target))
 }
 
+pub fn nearest_power_of_10(x: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.001;
+    }
+    let exponent = x.log10().round() as i32;
+    10f32.powi(exponent)
+}
+
 #[cfg(test)]
 mod test {
     use super::super::super::upstream::diff_management::UpstreamDifficultyConfig;
@@ -314,7 +322,7 @@ mod test {
         let initial_nominal_hashrate = dbg!(measure_hashrate(10));
         let target = match roles_logic_sv2::utils::hash_rate_to_target(
             initial_nominal_hashrate,
-            expected_shares_per_minute.into(),
+            expected_shares_per_minute,
         ) {
             Ok(target) => target,
             Err(_) => panic!(),
@@ -334,7 +342,7 @@ mod test {
         let calculated_share_per_min = count as f32 / (elapsed.as_secs_f32() / 60.0);
         // This is the error margin for a confidence of 99% given the expect number of shares per
         // minute TODO the review the math under it
-        let error_margin = get_error(expected_shares_per_minute.into());
+        let error_margin = get_error(expected_shares_per_minute);
         let error =
             (dbg!(calculated_share_per_min) - dbg!(expected_shares_per_minute as f32)).abs();
         assert!(
@@ -371,8 +379,8 @@ mod test {
 
         let elapsed_secs = start_time.elapsed().as_secs_f64();
         let hashrate = hashes as f64 / elapsed_secs;
-        let nominal_hash_rate = hashrate;
-        nominal_hash_rate
+
+        hashrate
     }
 
     fn hash(share: &mut [u8; 80]) -> Target {
@@ -491,12 +499,4 @@ mod test {
     // TODO make a test where unknown donwstream is simulated and we do not wait for it to produce
     // a share but we try to updated the estimated hash power every 2 seconds and updated the
     // target consequentially this shuold start to provide shares within a normal amount of time
-}
-
-pub fn nearest_power_of_10(x: f32) -> f32 {
-    if x <= 0.0 {
-        return 0.001;
-    }
-    let exponent = x.log10().round() as i32;
-    10f32.powi(exponent)
 }
