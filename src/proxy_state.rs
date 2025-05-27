@@ -101,7 +101,7 @@ pub struct UpstreamConnection {
 }
 
 /// Represents global proxy state
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct ProxyState {
     pub pool: PoolState,
     pub tp: TpState,

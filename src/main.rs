@@ -14,6 +14,7 @@ use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
 use std::{net::ToSocketAddrs, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{error, info, warn};
+use std::net::SocketAddr;
 mod api;
 mod ingress;
 pub mod jd_client;
@@ -262,10 +263,13 @@ async fn main() {
         let hashrate_per_upstream = hashpower / active_count as f32;
         info!("Round-robin hashrate per upstream: {}", HashUnit::format_value(hashrate_per_upstream));
         
-        for (upstream_id, addr, _) in upstream_connections {
+        let upstream_connections: Vec<(String, std::net::SocketAddr, key_utils::Secp256k1PublicKey)> = ProxyState::get_upstream_connections();
+
+        // And update the usage in the loop below:
+        for (upstream_id, addr, _auth_key) in upstream_connections {
             info!("Upstream {}: {} - allocated {}", 
                 upstream_id, 
-                addr,
+                addr, 
                 HashUnit::format_value(hashrate_per_upstream));
         }
     }
@@ -283,7 +287,34 @@ async fn main() {
     let pool_socket_addresses: Vec<std::net::SocketAddr> = pool_addresses.iter().map(|(addr, _)| *addr).collect();
     let auth_pub_keys: Vec<Secp256k1PublicKey> = pool_addresses.iter().map(|(_, pubkey)| pubkey.clone()).collect();
     let auth_pub_k = auth_pub_keys.first().expect("No public keys available").clone();
-    let mut router = router::Router::new(pool_socket_addresses, auth_pub_k, None, None);
+    // Create the router based on whether we're using round-robin or not
+let mut router = if !pool_addresses.is_empty() && pool_addresses.len() > 1 {
+    // Multiple upstreams - use new_multi
+    match router::Router::new_multi(
+        pool_addresses.clone(),
+        None, // setup_connection_msg
+        None, // timer  
+        ARGS.round_robin
+    ) {
+        Ok(router) => router,
+        Err(e) => {
+            error!("Failed to create multi-upstream router: {}", e);
+            std::process::exit(1);
+        }
+    }
+} else {
+    // Single upstream - use regular constructor
+    let pool_socket_addresses: Vec<std::net::SocketAddr> = pool_addresses.iter().map(|(addr, _)| *addr).collect();
+    let auth_pub_k = pool_addresses.first().expect("No pool addresses available").1.clone();
+    
+    router::Router::new(
+        pool_socket_addresses,
+        auth_pub_k,
+        None, // setup_connection_msg
+        None  // timer
+    )
+};
+
     let epsilon = Duration::from_millis(10);
     let best_upstream = router.select_pool_connect().await;
     initialize_proxy(&mut router, best_upstream, epsilon).await;
@@ -451,10 +482,10 @@ async fn monitor(
                     info!("Each upstream allocated: {}", HashUnit::format_value(hashrate_per_upstream));
                     
                     // List each upstream and its allocated hashrate
-                    for (upstream_id, addr, _) in upstream_connections {
+                    for (upstream_id, addr, _auth_key) in upstream_connections {
                         info!("Upstream {}: {} - allocated {}", 
                             upstream_id, 
-                            addr,
+                            addr, 
                             HashUnit::format_value(hashrate_per_upstream));
                     }
                 } else {
@@ -532,6 +563,7 @@ async fn monitor(
     }
 }
 
+
 /// Parses a hashrate string (e.g., "10T", "2.5P", "500E") into an f32 value in h/s.
 fn parse_hashrate(hashrate_str: &str) -> Result<f32, String> {
     let hashrate_str = hashrate_str.trim();
@@ -564,6 +596,8 @@ fn parse_hashrate(hashrate_str: &str) -> Result<f32, String> {
 
     Ok(hashrate)
 }
+
+
 
 pub enum Reconnect {
     NewUpstream(std::net::SocketAddr), // Reconnecting with a new upstream

@@ -17,7 +17,7 @@ use tokio::{
         watch,
     },
 };
-use tracing::{error, info};
+use tracing::{error, info,warn};
 
 use crate::{
     minin_pool_connection::{self, get_mining_setup_connection_msg, mining_setup_connection},
@@ -36,7 +36,6 @@ pub struct Router {
     timer: Option<Duration>,
     latency_tx: watch::Sender<Option<Duration>>,
     pub latency_rx: watch::Receiver<Option<Duration>>,
-    timer: Option<Duration>,
     use_round_robin: bool, // Add flag to control selection strategy
 }
 
@@ -80,6 +79,7 @@ impl Router {
             return Err("Cannot create router with empty pool_address_keys");
         }
         
+        let (latency_tx, latency_rx) = watch::channel(None);
         let mut addresses = Vec::new();
         let mut keys = Vec::new();
         
@@ -108,11 +108,11 @@ impl Router {
             auth_keys: keys,
             current_pool: None,
             auth_pub_k: default_key,
-              setup_connection_msg,
+            setup_connection_msg,
             timer,
             latency_tx,
             latency_rx,
-            use_round_robin: false, // Default to latency-based selection
+            use_round_robin,
         })
     }
     
