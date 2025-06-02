@@ -66,26 +66,37 @@ impl Api {
 
     // Retrieves the current pool information
     pub async fn get_pool_info(State(state): State<AppState>) -> impl IntoResponse {
-        let current_pool_address = state.router.current_pool;
-        let latency = *state.router.latency_rx.borrow();
+        if let Some(router) = state.router {
+            let current_pool_address = router.current_pool;
+            let latency = *router.latency_rx.borrow();
 
-        match (current_pool_address, latency) {
-            (Some(address), Some(latency)) => {
-                let response_data = serde_json::json!({
-                    "address": address.to_string(),
-                    "latency": latency.as_millis().to_string()
-                });
-                (
-                    StatusCode::OK,
-                    Json(APIResponse::success(Some(response_data))),
-                )
+            match (current_pool_address, latency) {
+                (Some(address), Some(latency)) => {
+                    let response_data = serde_json::json!({
+                        "address": address.to_string(),
+                        "latency": latency.as_millis().to_string()
+                    });
+                    (
+                        StatusCode::OK,
+                        Json(APIResponse::success(Some(response_data))),
+                    )
+                }
+                (_, _) => (
+                    StatusCode::NOT_FOUND,
+                    Json(APIResponse::error(Some(
+                        "Pool information unavailable".to_string(),
+                    ))),
+                ),
             }
-            (_, _) => (
-                StatusCode::NOT_FOUND,
-                Json(APIResponse::error(Some(
-                    "Pool information unavailable".to_string(),
-                ))),
-            ),
+        } else {
+            let response_data = serde_json::json!({
+                "pool": "Not connected to pool. Mining solo :)".to_string(),
+
+            });
+            (
+                StatusCode::OK,
+                Json(APIResponse::success(Some(response_data))),
+            )
         }
     }
 

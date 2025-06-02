@@ -58,3 +58,76 @@ impl Display for UserId {
         write!(f, "{}", self.0)
     }
 }
+
+/// Parses a hashrate string (e.g., "10T", "2.5P", "500E") into an f32 value in h/s.
+pub fn parse_hashrate(hashrate_str: &str) -> Result<f32, String> {
+    let hashrate_str = hashrate_str.trim();
+    if hashrate_str.is_empty() {
+        return Err("Hashrate cannot be empty. Expected format: '<number><unit>' (e.g., '10T', '2.5P', '5E'".to_string());
+    }
+
+    let unit = hashrate_str.chars().last().unwrap_or(' ').to_string();
+    let num = &hashrate_str[..hashrate_str.len().saturating_sub(1)];
+
+    let num: f32 = num.parse().map_err(|_| {
+        format!(
+            "Invalid number '{}'. Expected format: '<number><unit>' (e.g., '10T', '2.5P', '5E')",
+            num
+        )
+    })?;
+
+    let multiplier = HashUnit::from_str(&unit)
+        .map(|unit| unit.multiplier())
+        .ok_or_else(|| format!(
+            "Invalid unit '{}'. Expected 'T' (Terahash), 'P' (Petahash), or 'E' (Exahash). Example: '10T', '2.5P', '5E'",
+            unit
+        ))?;
+
+    let hashrate = num * multiplier;
+
+    if hashrate.is_infinite() || hashrate.is_nan() {
+        return Err("Hashrate too large or invalid".to_string());
+    }
+
+    Ok(hashrate)
+}
+
+pub enum HashUnit {
+    Tera,
+    Peta,
+    Exa,
+}
+
+impl HashUnit {
+    /// Returns the multiplier for each unit in h/s
+    fn multiplier(&self) -> f32 {
+        match self {
+            HashUnit::Tera => 1e12,
+            HashUnit::Peta => 1e15,
+            HashUnit::Exa => 1e18,
+        }
+    }
+
+    // Converts a unit string (e.g., "T") to a HashUnit variant
+    fn from_str(s: &str) -> Option<Self> {
+        match s.to_uppercase().as_str() {
+            "T" => Some(HashUnit::Tera),
+            "P" => Some(HashUnit::Peta),
+            "E" => Some(HashUnit::Exa),
+            _ => None,
+        }
+    }
+
+    /// Formats a hashrate value (f32) into a string with the appropriate unit
+    pub fn format_value(hashrate: f32) -> String {
+        if hashrate >= 1e18 {
+            format!("{:.2}E", hashrate / 1e18)
+        } else if hashrate >= 1e15 {
+            format!("{:.2}P", hashrate / 1e15)
+        } else if hashrate >= 1e12 {
+            format!("{:.2}T", hashrate / 1e12)
+        } else {
+            format!("{:.2}", hashrate)
+        }
+    }
+}

@@ -1,4 +1,4 @@
-name: Build demand-cli binaries for Linux and macOS 
+name: Build demand-cli binaries
 
 on:
   push:

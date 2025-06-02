@@ -47,6 +47,10 @@ pub enum Error {
     TemplateRxMutexCorrupted,
     TemplateRxTaskManagerFailed,
     TpMissing,
+    // Payout address & network spepcif errors (solo mining)
+    InvalidAddress(String),
+    NetworkMismatch(String),
+    InvalidNetwork(String),
 }
 
 impl fmt::Display for Error {
@@ -94,6 +98,9 @@ impl fmt::Display for Error {
                 write!(f, "Failed to add Task in TemplateRx TaskManager")
             }
             TpMissing => write!(f, "Failed to connect to TP"),
+            InvalidAddress(ref e) => write!(f, "Invalid Bitcoin address: {}", e),
+            NetworkMismatch(ref e) => write!(f, "Network mismatch: {}", e),
+            InvalidNetwork(ref e) => write!(f, "Invalid network specified: {}", e),
         }
     }
 }

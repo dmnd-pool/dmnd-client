@@ -374,17 +374,15 @@ impl DownstreamMiningNode {
         let to_send = to_send.into_values();
         for message in to_send {
             let message = if let Mining::NewExtendedMiningJob(job) = message {
-                let jd = self_mutex
+                if let Some(jd) = self_mutex
                     .safe_lock(|s| s.jd.clone())
                     .map_err(|_| JdClientError::JobDeclaratorMutexCorrupted)?
-                    .ok_or({
-                        // Propagate error. The caller will restart proxy
-                        JdClientError::JdMissing
-                    })?;
-                jd.safe_lock(|jd| jd.coinbase_tx_prefix = job.coinbase_tx_prefix.clone())
-                    .map_err(|_| JdClientError::JobDeclaratorMutexCorrupted)?;
-                jd.safe_lock(|jd| jd.coinbase_tx_suffix = job.coinbase_tx_suffix.clone())
-                    .map_err(|_| JdClientError::JobDeclaratorMutexCorrupted)?;
+                {
+                    jd.safe_lock(|jd| jd.coinbase_tx_prefix = job.coinbase_tx_prefix.clone())
+                        .map_err(|_| JdClientError::JobDeclaratorMutexCorrupted)?;
+                    jd.safe_lock(|jd| jd.coinbase_tx_suffix = job.coinbase_tx_suffix.clone())
+                        .map_err(|_| JdClientError::JobDeclaratorMutexCorrupted)?;
+                }
 
                 Mining::NewExtendedMiningJob(job)
             } else {
@@ -497,7 +495,7 @@ impl
             // The channel factory is created here so that we are sure that if we have a channel
             // open we have a factory and if we have a factory we have a channel open. This allowto
             // not change the semantic of Status beween solo and pooled modes
-            let extranonce_len = 32;
+            let extranonce_len = 28; // 28 + 4 (additional_coinbase_script_data) = 32 (max allowed)
             let range_0 = std::ops::Range { start: 0, end: 0 };
             let range_1 = std::ops::Range { start: 0, end: 16 };
             let range_2 = std::ops::Range {
@@ -555,8 +553,7 @@ impl
                     .ok_or(Error::NoUpstreamsConnected)?,
             ))
         } else {
-            error!("Solo Mining currently Unsupported");
-            std::process::exit(1)
+            Ok(SendTo::None(None))
         }
     }
 

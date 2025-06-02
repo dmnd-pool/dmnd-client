@@ -1,6 +1,6 @@
 [package]
 name = "demand-cli"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 
 [dependencies]
@@ -18,29 +18,12 @@ tracing-subscriber = { version = "*", features = ["env-filter"]}
 tokio = {version="^1.36.0",features = ["full","tracing", "macros","rt-multi-thread"]}
 key-utils = "1.0.0"
 pid = { version = "4.0.0"}
-clap = {version = "4.5.31", features = ["derive"]}
-axum = {version = "0.8.1"}
+clap = { version = "4.5.31", features = ["derive"]}
+axum = { version = "0.8.1"}
 serde = { version = "1.0.219", features = ["derive"] }  
 sysinfo = {version = "0.33.1"}
 primitive-types = { version = "0.13.1" }
-#roles_logic_sv2 = "1.2.1"
-#sv1_api = "1.0.1"
-#demand-sv2-connection = "0.0.3"
-#framing_sv2 = "^2.0.0"
-#binary_sv2 = "1.1.0"
-#demand-share-accounting-ext = "0.0.10"
-
-#noise_sv2 = "1.1.0"
-#codec_sv2 = { version = "1.2.1", features = ["noise_sv2","with_buffer_pool"]}
-
-#demand-share-accounting-ext = {path = "../demand-share-accounting-ext"}
-#demand-sv2-connection = { path = "../demand-sv2-connection"}
-#roles_logic_sv2 = { path = "../stratum/protocols/v2/roles-logic-sv2"}
-#framing_sv2 = { path = "../stratum/protocols/v2/framing-sv2"}
-#binary_sv2 = { path = "../stratum/protocols/v2/binary-sv2/binary-sv2"}
-#noise_sv2 = {path ="../stratum/protocols/v2/noise-sv2"}
-#codec_sv2 = {features = ["noise_sv2","with_buffer_pool"], path = "../stratum/protocols/v2/codec-sv2" }
-#sv1_api = {path = "../stratum/protocols/v1" }
+toml = { version = "0.8" }
 
 demand-share-accounting-ext = { git = "https://github.com/demand-open-source/share-accounting-ext"}
 demand-sv2-connection = {git = "https://github.com/demand-open-source/demand-sv2-connection"}
@@ -50,9 +33,6 @@ binary_sv2 = { git = "https://github.com/demand-open-source/stratum", branch ="I
 noise_sv2 = { git = "https://github.com/demand-open-source/stratum", branch="ImproveCoinbase",subdirectory = "protocols/v2/noise-sv2"}
 codec_sv2 = { git = "https://github.com/demand-open-source/stratum", branch="ImproveCoinbase",subdirectory = "protocols/v2/codec-sv2", features = ["noise_sv2","with_buffer_pool"]}
 sv1_api = { git = "https://github.com/demand-open-source/stratum", branch = "ImproveCoinbase",subdirectory = "protocols/v1"}
-
-
-
 
 
 [dev-dependencies]

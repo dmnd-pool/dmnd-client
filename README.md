@@ -3,15 +3,17 @@
 [![Forks](https://img.shields.io/github/forks/demand-open-source/demand-cli?style=social)](https://github.com/demand-open-source/demand-cli)
 ![Release](https://img.shields.io/github/v/release/demand-open-source/demand-cli)
 
-**Demand CLI** is a proxy that let miners to connect to and mine with [Demand Pool](https://dmnd.work). It serves two primary purposes: 
+**Demand CLI** is a proxy that let miners to connect to and mine with [Demand Pool](https://dmnd.work). It serves three primary purposes: 
   1. Translation: Enables miners using StratumV1 to connect to the Demand Pool without requiring firmware updates. Sv1 messages gets translated to Sv2.
   2. Job Declaration (JD): Allows miners to declare custom jobs to the pool using StratumV2.
+  3. Solo Mining: Skip pool entirely and mine solo
 
 
 ## Features
 - **Stratum V2 Support**: Uses the secure and efficient Stratum V2 protocol for communication with the pool.
 - **Job Declaration**: Enables miners to propose custom block templates to the pool. This helps make mining more decentralized by allowing miners to pick the transactions they want to include in a block.
 - **Stratum V1 Translation**: Acts as a bridge, allowing StratumV1 miners to connect to the Demand Pool without firmware updates.
+- **Solo Mining Mode**: Allows miners to mine independently without a pool. 
 - **Flexible Configuration**: Provides options for customization. This allows users to optimize the tool for their specific mining environment.
 - **Monitoring API**: Provides HTTP endpoints to monitor proxy health, pool connectivity, miner performace, and system resource usage in real-time.
 
@@ -64,10 +66,24 @@ Before running the CLI, set up the necessary environment variables.
   ```
 Note: if `TP_ADDRESS` id not set, job declaration is disabled, and the proxy uses  templates provided by the pool.
 
+### Config File (for Solo Mining)
+Create config.toml with payout address, network and withhold.
+  Example config file:
+  ```toml
+  payout_address = "bc1qn2ckg6c2329e3g7w8sqlwqrg7f0hgcrv2fp2hv"
+  withhold = false
+  network = "bitcoin"
+  ```
+  - payout_address: Bitcoin address for coinbase output (where your reward will be sent)
+  - withhold:  specifies whether or not to withhold mining rewards (default: false). 
+  - network <NETWORK>: Bitcoin network (bitcoin, testnet, regtest, signet; default: bitcoin)
+
+  These can also be passed as CLI args. Supported script types include P2PKH, P2SH, P2WPKH, P2WSH,  and P2TR
+  
 ## Running the CLI
 
 Depending on whether you built from source or downloaded a binary, the command to run the proxy is slightly different. There are also different options you can use. 
-Below are two example setups to get you started.
+Below are 3 example setups to get you started.
 
 #### Example 1: Built from Source with Job Declaration
 
@@ -75,7 +91,7 @@ This example assumes you’ve built `demand-cli` from source and want to enable 
 
    ```bash
    export TOKEN=abc123xyz
-   export TP_ADDRESS=192.168.1.100:8442
+   export TP_ADDRESS=127.0.0.1:8442
    ./target/release/demand-cli -d 100T --loglevel debug --nc on
   ```
 
@@ -92,6 +108,15 @@ Set Environment Variable:
 
 Point your Stratum V1 miners  to <your_proxy_ip>:32767.
 
+#### Example 3: Solo Mining (No Pool, No TOKEN)
+```bash
+ export TP_ADDRESS=127.0.0.1:8442
+./demand-cli-linux-x64 --solo --payout_address bc1qn2ckg6c2329e3g7w8sqlwqrg7f0hgcrv2fp2hv --network bitcoin
+```
+This runs in solo mode, you can specify the payout_address and network in `toml` file  as pass its path with `-c path/to/config.toml`. if `config.toml` is the directory as your binary `-c` is not required. Ensure Bitcoin node is running.
+
+Point your Stratum V1 miners  to <your_proxy_ip>:32767
+
 ### Options
 
   - **`--test`**: Connects to test endpoint
@@ -99,13 +124,15 @@ Point your Stratum V1 miners  to <your_proxy_ip>:32767.
     This helps the pool adjust to your hashrate.
   - **`--loglevel`**: Logging verbosity (`info`, `debug`, `error`, `warn`). Default is `info`.
   - **`--nc`**: Noise connection logging verbosity (`info`, `debug`, `error`, `warn`). Default is `off`.
+  - **`--solo`**: Enable solo mining mode. Requires `TP_ADDRESS` and a config file.
+  - **`-c, --config`**: Path to your solo mining config.toml. Default is config.toml
 
 
 ## Monitoring API:
 
-  The proxy exposes REST API enspoints to monitor its health, pool connectivity, connected mining devices performance and system resource usage. All endpoints are served on `http://0.0.0.0:3001` and return JSON responses in the format:
+  The proxy exposes REST API enspoints to monitor its health, pool connectivity, connected mining devices performance and system resource usage. All endpoints are served on `http://0.0.0.0:3001` by default and return JSON responses in the format:
 
-  ```json
+  ```
   {
     "success": boolean,
     "message": string | null,
@@ -153,6 +180,15 @@ Point your Stratum V1 miners  to <your_proxy_ip>:32767.
       "data": {
         "address": "<pool_address>",
         "latency": "5072"
+      }
+    }
+    ```
+  - **200 OK** (Solo mining):
+    ```json
+    {
+      "success": true,
+      "data": {
+        "pool": "Not connected to pool. Mining solo :)",
       }
     }
     ```

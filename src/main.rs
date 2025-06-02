@@ -2,6 +2,7 @@ use clap::Parser;
 #[cfg(not(target_os = "windows"))]
 use jemallocator::Jemalloc;
 use router::Router;
+use shared::utils::HashUnit;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[cfg(not(target_os = "windows"))]
 #[global_allocator]
@@ -41,17 +42,13 @@ const TEST_AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:32767";
 
 lazy_static! {
+    static ref ARGS: Args = Args::parse();
     static ref SV1_DOWN_LISTEN_ADDR: String =
         std::env::var("SV1_DOWN_LISTEN_ADDR").unwrap_or(DEFAULT_LISTEN_ADDRESS.to_string());
     static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<String>> =
         roles_logic_sv2::utils::Mutex::new(std::env::var("TP_ADDRESS").ok());
-    static ref EXPECTED_SV1_HASHPOWER: f32 = Args::parse()
-        .downstream_hashrate
-        .unwrap_or(DEFAULT_SV1_HASHPOWER);
-}
-
-lazy_static! {
-    static ref ARGS: Args = Args::parse();
+    static ref EXPECTED_SV1_HASHPOWER: f32 =
+        ARGS.downstream_hashrate.unwrap_or(DEFAULT_SV1_HASHPOWER);
     pub static ref POOL_ADDRESS: &'static str = if ARGS.test {
         TEST_POOL_ADDRESS
     } else {
@@ -68,7 +65,7 @@ struct Args {
     // Use test enpoint if test flag is provided
     #[clap(long)]
     test: bool,
-    #[clap(long ="d", short ='d', value_parser = parse_hashrate)]
+    #[clap(long ="d", short ='d', value_parser = shared::utils::parse_hashrate)]
     downstream_hashrate: Option<f32>,
     #[clap(long = "loglevel", short = 'l', default_value = "info")]
     loglevel: String,
@@ -78,6 +75,16 @@ struct Args {
     delay: u64,
     #[clap(long = "interval", short = 'i', default_value = "120000")]
     adjustment_interval: u64,
+    #[clap(long = "solo", short = 's')]
+    solo: bool,
+    #[arg(short = 'c', long, default_value = "config.toml")]
+    config: std::path::PathBuf,
+    #[clap(long)]
+    payout_address: Option<String>,
+    #[clap(long)]
+    withhold: Option<bool>,
+    #[clap(long, help = "Bitcoin network (bitcoin, testnet, regtest, signet)")]
+    network: Option<String>,
 }
 
 #[tokio::main]
@@ -116,41 +123,46 @@ async fn main() {
             log_level, noise_connection_log_level
         )))
         .init();
-    std::env::var("TOKEN").expect("Missing TOKEN environment variable");
 
-    let hashpower = *EXPECTED_SV1_HASHPOWER;
-
-    if args.downstream_hashrate.is_some() {
-        info!(
-            "Using downstream hashrate: {}h/s",
-            HashUnit::format_value(hashpower)
-        );
+    if args.solo {
+        initialize_proxy_solo(args.config).await;
     } else {
-        warn!(
-            "No downstream hashrate provided, using default value: {}h/s",
-            HashUnit::format_value(hashpower)
-        );
+        std::env::var("TOKEN").expect("Missing TOKEN environment variable");
+
+        let hashpower = *EXPECTED_SV1_HASHPOWER;
+
+        if args.downstream_hashrate.is_some() {
+            info!(
+                "Using downstream hashrate: {}h/s",
+                HashUnit::format_value(hashpower)
+            );
+        } else {
+            warn!(
+                "No downstream hashrate provided, using default value: {}h/s",
+                HashUnit::format_value(hashpower)
+            );
+        }
+        if args.test {
+            info!("Connecting to test endpoint...");
+        }
+
+        let auth_pub_k: Secp256k1PublicKey = AUTH_PUB_KEY.parse().expect("Invalid public key");
+        let address = POOL_ADDRESS
+            .to_socket_addrs()
+            .expect("Invalid pool address")
+            .next()
+            .expect("Invalid pool address");
+
+        // We will add upstream addresses here
+        let pool_addresses = vec![address];
+
+        let mut router = router::Router::new(pool_addresses, auth_pub_k, None, None);
+        let epsilon = Duration::from_millis(10);
+        let best_upstream = router.select_pool_connect().await;
+        initialize_proxy(&mut router, best_upstream, epsilon).await;
+        info!("exiting");
+        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
     }
-    if args.test {
-        info!("Connecting to test endpoint...");
-    }
-
-    let auth_pub_k: Secp256k1PublicKey = AUTH_PUB_KEY.parse().expect("Invalid public key");
-    let address = POOL_ADDRESS
-        .to_socket_addrs()
-        .expect("Invalid pool address")
-        .next()
-        .expect("Invalid pool address");
-
-    // We will add upstream addresses here
-    let pool_addresses = vec![address];
-
-    let mut router = router::Router::new(pool_addresses, auth_pub_k, None, None);
-    let epsilon = Duration::from_millis(10);
-    let best_upstream = router.select_pool_connect().await;
-    initialize_proxy(&mut router, best_upstream, epsilon).await;
-    info!("exiting");
-    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
 }
 
 async fn initialize_proxy(
@@ -266,8 +278,8 @@ async fn initialize_proxy(
         if let Some(jdc_handle) = jdc_abortable {
             abort_handles.push((jdc_handle, "jdc".to_string()));
         }
-        let server_handle = tokio::spawn(api::start(router.clone(), stats_sender));
-        match monitor(router, abort_handles, epsilon, server_handle).await {
+        let server_handle = tokio::spawn(api::start(Some(router.clone()), stats_sender));
+        match monitor(Some(router), abort_handles, Some(epsilon), server_handle).await {
             Reconnect::NewUpstream(new_pool_addr) => {
                 ProxyState::update_proxy_state_up();
                 pool_addr = Some(new_pool_addr);
@@ -282,10 +294,63 @@ async fn initialize_proxy(
     }
 }
 
+async fn initialize_proxy_solo(config: std::path::PathBuf) {
+    loop {
+        let (downs_sv1_tx, downs_sv1_rx) = channel(10);
+        let sv1_ingress_abortable = ingress::sv1_ingress::start_listen_for_downstream(downs_sv1_tx);
+        let stats_sender = api::stats::StatsSender::new();
+        let (translator_up_tx, mut translator_up_rx) = channel(10);
+        let translator_abortable =
+            match translator::start(downs_sv1_rx, translator_up_tx, stats_sender.clone()).await {
+                Ok(abortable) => abortable,
+                Err(e) => {
+                    error!("Impossible to initialize translator: {e}");
+                    ProxyState::update_translator_state(TranslatorState::Down);
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    continue;
+                }
+            };
+
+        let (jdc_to_translator_sender, jdc_from_translator_receiver, _) = translator_up_rx
+            .recv()
+            .await
+            .expect("Translator failed before initialization");
+
+        let jdc_abortable = match jd_client::initialize_jd_as_solo_miner(
+            jdc_from_translator_receiver,
+            jdc_to_translator_sender,
+            config.clone(),
+        )
+        .await
+        {
+            Some(abortable) => abortable,
+            None => {
+                error!("Impossible to initialize JDC");
+                ProxyState::update_tp_state(TpState::Down);
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                continue;
+            }
+        };
+
+        let abort_handles = vec![
+            (sv1_ingress_abortable, "sv1_ingress".to_string()),
+            (translator_abortable, "translator".to_string()),
+            (jdc_abortable, "jdc".to_string()),
+        ];
+
+        let server_handle = tokio::spawn(api::start(None, stats_sender));
+        if monitor(None, abort_handles, None, server_handle).await == Reconnect::NoUpstream {
+            ProxyState::update_proxy_state_up();
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            continue;
+        }
+    }
+}
+
 async fn monitor(
-    router: &mut Router,
+    mut router: Option<&mut Router>,
     abort_handles: Vec<(AbortOnDrop, std::string::String)>,
-    epsilon: Duration,
+    epsilon: Option<Duration>,
     server_handle: tokio::task::JoinHandle<()>,
 ) -> Reconnect {
     let mut should_check_upstreams_latency = 0;
@@ -293,14 +358,16 @@ async fn monitor(
         // Check if a better upstream exist every 100 seconds
         if should_check_upstreams_latency == 10 * 100 {
             should_check_upstreams_latency = 0;
-            if let Some(new_upstream) = router.monitor_upstream(epsilon).await {
-                info!("Faster upstream detected. Reinitializing proxy...");
-                drop(abort_handles);
-                server_handle.abort(); // abort server
+            if let (Some(router), Some(epsilon)) = (router.as_mut(), epsilon) {
+                if let Some(new_upstream) = router.monitor_upstream(epsilon).await {
+                    info!("Faster upstream detected. Reinitializing proxy...");
+                    drop(abort_handles);
+                    server_handle.abort(); // abort server
 
-                // Needs a little to time to drop
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                return Reconnect::NewUpstream(new_upstream);
+                    // Needs a little to time to drop
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    return Reconnect::NewUpstream(new_upstream);
+                }
             }
         }
 
@@ -346,80 +413,8 @@ async fn monitor(
     }
 }
 
-/// Parses a hashrate string (e.g., "10T", "2.5P", "500E") into an f32 value in h/s.
-fn parse_hashrate(hashrate_str: &str) -> Result<f32, String> {
-    let hashrate_str = hashrate_str.trim();
-    if hashrate_str.is_empty() {
-        return Err("Hashrate cannot be empty. Expected format: '<number><unit>' (e.g., '10T', '2.5P', '5E'".to_string());
-    }
-
-    let unit = hashrate_str.chars().last().unwrap_or(' ').to_string();
-    let num = &hashrate_str[..hashrate_str.len().saturating_sub(1)];
-
-    let num: f32 = num.parse().map_err(|_| {
-        format!(
-            "Invalid number '{}'. Expected format: '<number><unit>' (e.g., '10T', '2.5P', '5E')",
-            num
-        )
-    })?;
-
-    let multiplier = HashUnit::from_str(&unit)
-        .map(|unit| unit.multiplier())
-        .ok_or_else(|| format!(
-            "Invalid unit '{}'. Expected 'T' (Terahash), 'P' (Petahash), or 'E' (Exahash). Example: '10T', '2.5P', '5E'",
-            unit
-        ))?;
-
-    let hashrate = num * multiplier;
-
-    if hashrate.is_infinite() || hashrate.is_nan() {
-        return Err("Hashrate too large or invalid".to_string());
-    }
-
-    Ok(hashrate)
-}
-
+#[derive(PartialEq)]
 pub enum Reconnect {
     NewUpstream(std::net::SocketAddr), // Reconnecting with a new upstream
     NoUpstream,                        // Reconnecting without upstream
-}
-
-enum HashUnit {
-    Tera,
-    Peta,
-    Exa,
-}
-
-impl HashUnit {
-    /// Returns the multiplier for each unit in h/s
-    fn multiplier(&self) -> f32 {
-        match self {
-            HashUnit::Tera => 1e12,
-            HashUnit::Peta => 1e15,
-            HashUnit::Exa => 1e18,
-        }
-    }
-
-    // Converts a unit string (e.g., "T") to a HashUnit variant
-    fn from_str(s: &str) -> Option<Self> {
-        match s.to_uppercase().as_str() {
-            "T" => Some(HashUnit::Tera),
-            "P" => Some(HashUnit::Peta),
-            "E" => Some(HashUnit::Exa),
-            _ => None,
-        }
-    }
-
-    /// Formats a hashrate value (f32) into a string with the appropriate unit
-    fn format_value(hashrate: f32) -> String {
-        if hashrate >= 1e18 {
-            format!("{:.2}E", hashrate / 1e18)
-        } else if hashrate >= 1e15 {
-            format!("{:.2}P", hashrate / 1e15)
-        } else if hashrate >= 1e12 {
-            format!("{:.2}T", hashrate / 1e12)
-        } else {
-            format!("{:.2}", hashrate)
-        }
-    }
 }

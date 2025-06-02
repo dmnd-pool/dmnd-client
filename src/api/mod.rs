@@ -9,11 +9,11 @@ use stats::StatsSender;
 // Holds shared state (like the router) that so that it can be accessed in all routes.
 #[derive(Clone)]
 pub struct AppState {
-    router: Router,
+    router: Option<Router>,
     stats_sender: StatsSender,
 }
 
-pub(crate) async fn start(router: Router, stats_sender: StatsSender) {
+pub(crate) async fn start(router: Option<Router>, stats_sender: StatsSender) {
     let state = AppState {
         router,
         stats_sender,
