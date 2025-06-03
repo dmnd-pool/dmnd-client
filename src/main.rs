@@ -343,6 +343,49 @@ async fn main() {
     // Always use multi-upstream mode
     initialize_proxy(&mut router, None, epsilon).await;
     
+    // Wait a moment for connections to establish
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    
+    // Show immediate hashrate distribution with network verification
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    
+    info!("🔍 VERIFYING NETWORK CONNECTIONS:");
+    
+    // Check network connections
+    let output = std::process::Command::new("ss")
+        .args(&["-tn"])
+        .output();
+        
+    if let Ok(output) = output {
+        let connections = String::from_utf8_lossy(&output.stdout);
+        let pool_connections: Vec<&str> = connections
+            .lines()
+            .filter(|line| line.contains("18.193.252.132:2000") || line.contains("3.74.36.119:2000"))
+            .collect();
+            
+        info!("📡 Active pool connections: {}", pool_connections.len());
+        for conn in pool_connections {
+            info!("  🔗 {}", conn.trim());
+        }
+    }
+    
+    // Show hashrate distribution
+    let total_hashrate = ProxyState::get_total_hashrate();
+    let detailed_stats = router.get_detailed_connection_stats().await;
+    
+    info!("🚀 === INITIAL HASHRATE DISTRIBUTION ===");
+    info!("🔋 Total configured hashrate: {}", HashUnit::format_value(total_hashrate));
+    info!("🌐 Mode: Parallel (each upstream gets full hashrate)");
+    
+    for (upstream_id, is_active, hashrate) in detailed_stats {
+        if is_active {
+            info!("  ✅ {}: receiving {} (100% of total)", upstream_id, HashUnit::format_value(hashrate));
+        } else {
+            info!("  ❌ {}: {} (INACTIVE)", upstream_id, HashUnit::format_value(hashrate));
+        }
+    }
+    info!("========================================");
+    
     // Start monitoring task for multi-upstream
     let router_clone = router.clone();
     tokio::spawn(async move {
@@ -419,38 +462,44 @@ async fn initialize_proxy(
     std::process::exit(1);
 }
 
-async fn monitor_multi_upstream(router: Router, _epsilon: Duration) { // Remove mut
+async fn monitor_multi_upstream(router: Router, _epsilon: Duration) {
     let mut distribution_check_counter = 0;
     
     loop {
         tokio::time::sleep(Duration::from_secs(10)).await;
         distribution_check_counter += 1;
         
-        if distribution_check_counter >= 10 { // Every 100 seconds
+        // Show report every 30 seconds
+        if distribution_check_counter >= 3 {
             distribution_check_counter = 0;
             
             let total_hashrate = ProxyState::get_total_hashrate();
+            let detailed_stats = router.get_detailed_connection_stats().await;
             
-            info!("=== Hashrate Distribution Report ===");
-            info!("Total hashrate: {}", HashUnit::format_value(total_hashrate));
+            info!("📊 === HASHRATE DISTRIBUTION REPORT ===");
+            info!("🔋 Total configured hashrate: {}", HashUnit::format_value(total_hashrate));
+            info!("🌐 Parallel mode: Each upstream receives FULL hashrate");
+            info!("📡 Upstream details:");
             
-            let (total_connections, active_connections) = router.get_connection_stats().await;
-            info!("Multi-upstream mode: {} total, {} active connections", total_connections, active_connections);
-            
-            if active_connections > 0 {
-                info!("Parallel mode: Using ALL upstreams simultaneously");
-                info!("Total hashrate distributed across {} upstreams: {}", 
-                      active_connections, HashUnit::format_value(total_hashrate));
-                
-                let active_upstreams = router.get_active_upstreams().await;
-                for upstream_id in active_upstreams {
-                    info!("Upstream {}: receiving full hashrate {}", 
-                          upstream_id, HashUnit::format_value(total_hashrate));
+            let mut active_count = 0;
+            for (upstream_id, is_active, hashrate) in detailed_stats {
+                if is_active {
+                    active_count += 1;
+                    info!("  ✅ {}: {} (ACTIVE)", upstream_id, HashUnit::format_value(hashrate));
+                } else {
+                    info!("  ❌ {}: {} (INACTIVE)", upstream_id, HashUnit::format_value(hashrate));
                 }
-            } else {
-                warn!("No active upstream connections!");
             }
-            info!("=====================================");
+            
+            if active_count > 0 {
+                let total_distributed = total_hashrate * active_count as f32;
+                info!("🚀 Total hashrate being sent: {} across {} upstreams", 
+                      HashUnit::format_value(total_distributed), active_count);
+                info!("💡 Note: In parallel mode, each upstream receives the full hashrate simultaneously");
+            } else {
+                warn!("⚠️  WARNING: No active upstream connections!");
+            }
+            info!("==========================================");
         }
     }
 }

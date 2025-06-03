@@ -461,6 +461,30 @@ impl Router {
 
         best_pool.map(|pool| (pool, best_latency))
     }
+
+    /// Get detailed connection statistics with individual upstream info
+    pub async fn get_detailed_connection_stats(&self) -> Vec<(String, bool, f32)> {
+        let mut results = Vec::new();
+        
+        if let Some(ref manager) = self.upstream_manager {
+            let upstreams = manager.get_upstreams().await;
+            let total_hashrate = crate::proxy_state::ProxyState::get_total_hashrate();
+            
+            for (id, upstream) in upstreams {
+                // In parallel mode, each upstream gets the full hashrate
+                let hashrate = if upstream.is_active { total_hashrate } else { 0.0 };
+                results.push((id, upstream.is_active, hashrate));
+            }
+        } else {
+            // Single upstream mode
+            if let Some(current) = self.current_pool {
+                let total_hashrate = crate::proxy_state::ProxyState::get_total_hashrate();
+                results.push(("upstream-0".to_string(), true, total_hashrate));
+            }
+        }
+        
+        results
+    }
 }
 
 /// Track latencies for various stages of pool connection setup.
