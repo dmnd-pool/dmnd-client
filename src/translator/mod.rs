@@ -1,7 +1,7 @@
 mod downstream;
 
 mod error;
-pub mod proxy;    // Make public
+pub mod proxy; // Make public
 pub mod upstream; // Make public
 mod utils;
 

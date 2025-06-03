@@ -297,8 +297,6 @@ impl ProxyState {
         }
     }
 
-
-
     /// Set the total hashrate to be distributed among upstreams
     pub fn set_total_hashrate(hashrate: f32) {
         info!("Setting total hashrate to: {} h/s", hashrate);
@@ -444,7 +442,6 @@ impl ProxyState {
         }
     }
 
-
     /// Update connection status for an upstream with timestamp
     pub fn set_upstream_connection_status(id: &str, connected: bool) {
         if PROXY_STATE
@@ -489,7 +486,8 @@ impl ProxyState {
 
         if PROXY_STATE
             .safe_lock(|state| {
-                count = state.upstream_connections
+                count = state
+                    .upstream_connections
                     .values()
                     .filter(|conn| conn.is_connected)
                     .count();
@@ -535,7 +533,7 @@ impl ProxyState {
         }
     }
 
-    /// Check if proxy is down 
+    /// Check if proxy is down
     pub fn is_proxy_down() -> (bool, Option<String>) {
         let errors = Self::get_errors();
         if errors.is_ok() && errors.as_ref().unwrap().is_empty() {
@@ -547,7 +545,7 @@ impl ProxyState {
         }
     }
 
-     pub fn get_errors() -> Result<Vec<ProxyStates>, ()> {
+    pub fn get_errors() -> Result<Vec<ProxyStates>, ()> {
         let mut errors = Vec::new();
         if PROXY_STATE
             .safe_lock(|state| {
@@ -585,17 +583,22 @@ impl ProxyState {
         }
     }
 
-
     /// Get upstream statistics
     pub fn get_upstream_stats() -> Vec<(String, bool, u64, u64)> {
         let mut stats = Vec::new();
 
         if PROXY_STATE
             .safe_lock(|state| {
-                stats = state.upstream_connections
+                stats = state
+                    .upstream_connections
                     .iter()
                     .map(|(id, conn)| {
-                        (id.clone(), conn.is_connected, conn.shares_submitted, conn.shares_accepted)
+                        (
+                            id.clone(),
+                            conn.is_connected,
+                            conn.shares_submitted,
+                            conn.shares_accepted,
+                        )
                     })
                     .collect();
             })
@@ -609,7 +612,12 @@ impl ProxyState {
     }
 
     /// Get all upstream connections (including inactive ones)
-    pub fn get_all_upstream_connections() -> Vec<(String, std::net::SocketAddr, key_utils::Secp256k1PublicKey, bool)> {
+    pub fn get_all_upstream_connections() -> Vec<(
+        String,
+        std::net::SocketAddr,
+        key_utils::Secp256k1PublicKey,
+        bool,
+    )> {
         let mut connections = Vec::new();
 
         if PROXY_STATE
@@ -630,7 +638,8 @@ impl ProxyState {
     }
 
     /// Get only active upstream connections (existing method is fine)
-    pub fn get_upstream_connections() -> Vec<(String, std::net::SocketAddr, key_utils::Secp256k1PublicKey)> {
+    pub fn get_upstream_connections(
+    ) -> Vec<(String, std::net::SocketAddr, key_utils::Secp256k1PublicKey)> {
         let mut connections = Vec::new();
 
         if PROXY_STATE
@@ -658,7 +667,8 @@ impl ProxyState {
 
     /// Get best upstream based on latency or other criteria
     /// For now, just returns the first active upstream
-    pub fn get_best_upstream() -> Option<(String, std::net::SocketAddr, key_utils::Secp256k1PublicKey)> {
+    pub fn get_best_upstream(
+    ) -> Option<(String, std::net::SocketAddr, key_utils::Secp256k1PublicKey)> {
         let mut result = None;
 
         if PROXY_STATE

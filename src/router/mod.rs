@@ -36,14 +36,13 @@ pub struct Router {
     pub current_pool: Option<SocketAddr>,
     pub upstream_manager: Option<MultiUpstreamManager>,
     pub aggregated_receiver: Option<tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>>,
-    
+
     // Keep these fields for backward compatibility with single upstream mode
     pub auth_pub_k: Secp256k1PublicKey,
     pub setup_connection_msg: Option<SetupConnection<'static>>,
     pub timer: Option<Duration>,
     pub latency_tx: tokio::sync::watch::Sender<Option<Duration>>,
     pub latency_rx: tokio::sync::watch::Receiver<Option<Duration>>,
-    
     // Remove round-robin fields entirely
     // use_round_robin: bool,
     // use_parallel: bool, // This will be determined by presence of upstream_manager
@@ -73,10 +72,10 @@ impl Router {
         auth_pub_k: Secp256k1PublicKey,
         setup_connection_msg: Option<SetupConnection<'static>>,
         timer: Option<Duration>,
-    ) -> Self{
+    ) -> Self {
         let (latency_tx, latency_rx) = watch::channel(None);
         let auth_keys = vec![auth_pub_k; pool_addresses.len()];
-        
+
         Self {
             pool_socket_addresses: pool_addresses,
             keys: auth_keys,
@@ -90,23 +89,26 @@ impl Router {
             latency_rx,
         }
     }
-    
 
     /// Creates a new Router with multiple upstream addresses and auth keys
-     pub async fn new_multi(
+    pub async fn new_multi(
         pool_address_keys: Vec<(SocketAddr, Secp256k1PublicKey)>,
         setup_connection_msg: Option<SetupConnection<'static>>,
         timer: Option<Duration>,
         _use_parallel: bool, // Parameter kept for compatibility but always use parallel
     ) -> Result<Self, &'static str> {
-        let pool_socket_addresses: Vec<SocketAddr> = pool_address_keys.iter().map(|(addr, _)| *addr).collect();
+        let pool_socket_addresses: Vec<SocketAddr> =
+            pool_address_keys.iter().map(|(addr, _)| *addr).collect();
         let keys: Vec<Secp256k1PublicKey> = pool_address_keys.iter().map(|(_, key)| *key).collect();
 
         // Create with parallel mode enabled
         let (upstream_manager, aggregated_receiver) = MultiUpstreamManager::new(true);
-        
+
         // Use first key as default auth key for backward compatibility
-            let auth_pub_k = keys.first().copied().ok_or("No authentication keys provided")?;
+        let auth_pub_k = keys
+            .first()
+            .copied()
+            .ok_or("No authentication keys provided")?;
 
         let (latency_tx, latency_rx) = watch::channel(None);
 
@@ -123,7 +125,7 @@ impl Router {
             latency_rx,
         })
     }
-    
+
     // Remove round-robin methods
     // pub fn set_round_robin(&mut self, enabled: bool) { ... }
 
@@ -131,7 +133,7 @@ impl Router {
     pub fn is_multi_upstream_enabled(&self) -> bool {
         self.upstream_manager.is_some()
     }
-    
+
     /// Check if the router is using parallel mode - true when MultiUpstreamManager is present
     pub fn is_parallel_mode(&self) -> bool {
         self.upstream_manager.is_some()
@@ -145,7 +147,7 @@ impl Router {
             // All upstreams are used simultaneously
             return None;
         }
-        
+
         // For single upstream mode, check for better latency
         if let Some(best_pool) = self.select_pool_monitor(epsilon).await {
             if Some(best_pool) != self.current_pool {
@@ -223,11 +225,12 @@ impl Router {
         info!("Upstream {:?} selected", pool);
 
         // Find the matching auth key for this address - fix field name
-        let auth_key = if let Some(index) = self.pool_socket_addresses.iter().position(|&a| a == pool) {
-            self.keys[index]
-        } else {
-            self.auth_pub_k
-        };
+        let auth_key =
+            if let Some(index) = self.pool_socket_addresses.iter().position(|&a| a == pool) {
+                self.keys[index]
+            } else {
+                self.auth_pub_k
+            };
 
         match minin_pool_connection::connect_pool(
             pool,
@@ -270,12 +273,15 @@ impl Router {
     /// Returns the sum all the latencies for a given upstream
     async fn get_latency(&self, pool_address: SocketAddr) -> Result<Duration, ()> {
         // Find the auth key for this address - fix field names
-        let auth_pub_key =
-            if let Some(index) = self.pool_socket_addresses.iter().position(|&a| a == pool_address) {
-                self.keys[index]
-            } else {
-                self.auth_pub_k
-            };
+        let auth_pub_key = if let Some(index) = self
+            .pool_socket_addresses
+            .iter()
+            .position(|&a| a == pool_address)
+        {
+            self.keys[index]
+        } else {
+            self.auth_pub_k
+        };
 
         let mut pool = PoolLatency::new(pool_address);
         let setup_connection_msg = self.setup_connection_msg.as_ref();
@@ -337,42 +343,60 @@ impl Router {
         self.current_pool
     }
 
-     /// Initialize upstream connections for the manager
+    /// Initialize upstream connections for the manager
     pub async fn initialize_upstream_connections(&mut self) -> Result<(), String> {
         if let Some(ref manager) = self.upstream_manager {
-            info!("Initializing {} upstream connections", self.pool_socket_addresses.len());
-            
+            info!(
+                "Initializing {} upstream connections",
+                self.pool_socket_addresses.len()
+            );
+
             // Add each unique upstream only once - fix field names
-            for (idx, (addr, key)) in self.pool_socket_addresses.iter().zip(self.keys.iter()).enumerate() {
+            for (idx, (addr, key)) in self
+                .pool_socket_addresses
+                .iter()
+                .zip(self.keys.iter())
+                .enumerate()
+            {
                 let id = format!("upstream-{}", idx);
-                
+
                 info!("Adding upstream {}: {} ({})", id, addr, key);
-                
-                if let Err(e) = manager.add_upstream(
-                    id.clone(),
-                    *addr,
-                    *key,
-                    self.setup_connection_msg.clone(),
-                    self.timer,
-                ).await {
+
+                if let Err(e) = manager
+                    .add_upstream(
+                        id.clone(),
+                        *addr,
+                        *key,
+                        self.setup_connection_msg.clone(),
+                        self.timer,
+                    )
+                    .await
+                {
                     error!("Failed to initialize upstream {}: {}", addr, e);
                     // Continue with other upstreams even if one fails
                 } else {
                     info!("Successfully initialized upstream {}: {}", id, addr);
                 }
             }
-            
+
             // Wait a moment for connections to stabilize
             tokio::time::sleep(Duration::from_millis(100)).await;
-            
+
             let (total, active) = self.get_connection_stats().await;
-            info!("Initialized {} upstream connections ({} active)", total, active);
+            info!(
+                "Initialized {} upstream connections ({} active)",
+                total, active
+            );
         }
         Ok(())
     }
 
     /// Send a message to a specific upstream using the manager
-    pub async fn send_to_upstream(&self, upstream_id: &str, message: PoolExtMessages<'static>) -> Result<(), String> {
+    pub async fn send_to_upstream(
+        &self,
+        upstream_id: &str,
+        message: PoolExtMessages<'static>,
+    ) -> Result<(), String> {
         if let Some(ref manager) = self.upstream_manager {
             manager.send_to_upstream(upstream_id, message).await
         } else {
@@ -381,7 +405,10 @@ impl Router {
     }
 
     /// Send a message to the next upstream (round-robin or best available)
-    pub async fn send_to_next_upstream(&self, message: PoolExtMessages<'static>) -> Result<(), String> {
+    pub async fn send_to_next_upstream(
+        &self,
+        message: PoolExtMessages<'static>,
+    ) -> Result<(), String> {
         if let Some(ref manager) = self.upstream_manager {
             manager.send_to_next_upstream(message).await
         } else {
@@ -390,7 +417,10 @@ impl Router {
     }
 
     /// Broadcast a message to all active upstreams
-    pub async fn broadcast_to_all_upstreams(&self, message: PoolExtMessages<'static>) -> Vec<String> {
+    pub async fn broadcast_to_all_upstreams(
+        &self,
+        message: PoolExtMessages<'static>,
+    ) -> Vec<String> {
         if let Some(ref manager) = self.upstream_manager {
             manager.broadcast(message).await
         } else {
@@ -399,10 +429,12 @@ impl Router {
     }
 
     /// Get aggregated receiver for multi-upstream mode
-    pub fn get_aggregated_receiver(&mut self) -> Option<tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>> {
+    pub fn get_aggregated_receiver(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>> {
         self.aggregated_receiver.take()
     }
-    
+
     /// Get connection statistics for multi-upstream mode
     pub async fn get_connection_stats(&self) -> (usize, usize) {
         if let Some(ref manager) = self.upstream_manager {
@@ -415,7 +447,7 @@ impl Router {
             (self.pool_socket_addresses.len(), 1) // Single upstream mode
         }
     }
-    
+
     /// Get list of active upstream IDs
     pub async fn get_active_upstreams(&self) -> Vec<String> {
         if let Some(ref manager) = self.upstream_manager {
@@ -428,11 +460,13 @@ impl Router {
     /// Switch to a specific upstream by ID
     pub async fn switch_to_upstream(&mut self, upstream_id: &str) -> Result<(), String> {
         // Find the upstream address by ID
-        if let Ok(idx) = upstream_id.strip_prefix("upstream-")
+        if let Ok(idx) = upstream_id
+            .strip_prefix("upstream-")
             .and_then(|s| s.parse::<usize>().ok())
-            .ok_or("Invalid upstream ID format".to_string()) 
+            .ok_or("Invalid upstream ID format".to_string())
         {
-            if idx < self.pool_socket_addresses.len() { // Fix field name
+            if idx < self.pool_socket_addresses.len() {
+                // Fix field name
                 let addr = self.pool_socket_addresses[idx]; // Fix field name
                 self.current_pool = Some(addr);
                 info!("Switched to upstream {}: {:?}", upstream_id, addr);
@@ -462,7 +496,7 @@ impl Router {
         best_pool.map(|pool| (pool, best_latency))
     }
 
-    /// Get detailed connection statistics with individual upstream info
+    /// Get detailed connection statistics with equal distribution
     pub async fn get_detailed_connection_stats(&self) -> Vec<(String, bool, f32)> {
         let mut results = Vec::new();
         
@@ -470,13 +504,23 @@ impl Router {
             let upstreams = manager.get_upstreams().await;
             let total_hashrate = crate::proxy_state::ProxyState::get_total_hashrate();
             
+            // Count active upstreams first
+            let active_count = upstreams.values().filter(|upstream| upstream.is_active).count();
+            
+            // Calculate hashrate per upstream (equal distribution)
+            let hashrate_per_upstream = if active_count > 0 {
+                total_hashrate / active_count as f32
+            } else {
+                0.0
+            };
+            
             for (id, upstream) in upstreams {
-                // In parallel mode, each upstream gets the full hashrate
-                let hashrate = if upstream.is_active { total_hashrate } else { 0.0 };
+                // Each active upstream gets an equal share
+                let hashrate = if upstream.is_active { hashrate_per_upstream } else { 0.0 };
                 results.push((id, upstream.is_active, hashrate));
             }
         } else {
-            // Single upstream mode
+            // Single upstream mode (fallback)
             if let Some(current) = self.current_pool {
                 let total_hashrate = crate::proxy_state::ProxyState::get_total_hashrate();
                 results.push(("upstream-0".to_string(), true, total_hashrate));
