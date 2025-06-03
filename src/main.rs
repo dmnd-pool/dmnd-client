@@ -3,14 +3,17 @@ use clap::{ArgAction, Parser};
 use jemallocator::Jemalloc;
 use router::Router;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-#[cfg(not(target_os = "windows"))]
+// Add these missing imports
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
 use crate::shared::utils::AbortOnDrop;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
-use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
+use proxy_state::{PoolState, ProxyState};
 use std::{net::ToSocketAddrs, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{error, info, warn};
@@ -91,15 +94,38 @@ pub struct Args {
     adjustment_interval: u64,
     // New argument for multiple upstream servers
     #[clap(long = "upstream", short = 'u', action = ArgAction::Append)]
-    upstream_servers: Option<Vec<String>>,
-    // Option to enable round-robin distribution
-    #[clap(long = "round-robin", short = 'r')]
-    round_robin: bool,
+   
     // In Args struct
-    #[clap(long = "monitor-hashrate", short = 'm')]
-    monitor_hashrate: bool,
+    // #[clap(long = "monitor-hashrate", short = 'm')]
+    // monitor_hashrate: bool,
     #[clap(long = "config", short = 'c')]
     pub config_file: Option<String>,
+ 
+
+    /// Enable parallel upstream usage (sends to all upstreams simultaneously)
+    #[clap(long = "parallel", short = 'p')]
+    pub parallel: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Config {
+    pub token: String,
+    pub pool_addresses: Vec<String>,
+    pub tp_address: Option<String>,
+    pub interval: Option<u64>,
+    pub delay: Option<u64>,
+    pub downstream_hashrate: Option<String>,
+    pub loglevel: Option<String>,
+    pub nc_loglevel: Option<String>,
+    pub test: Option<bool>,
+}
+
+impl Config {
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+        let contents = std::fs::read_to_string(path)?;
+        let config: Config = toml::from_str(&contents)?;
+        Ok(config)
+    }
 }
 
 #[tokio::main]
@@ -150,9 +176,9 @@ async fn main() {
             }
         }
     } else {
+        info!("No config file provided, using default settings");
         None
     };
-
     // Get TOKEN from config or environment
     let _token = if let Some(ref config) = config {
         config.token.clone()
@@ -207,13 +233,13 @@ async fn main() {
                 std::process::exit(1);
             };
 
-            // Use test public key for now (you might want to add this to config)
             let pubkey: Secp256k1PublicKey =
                 TEST_AUTH_PUB_KEY.parse().expect("Invalid test public key");
 
             info!("Adding upstream server {}: {}", idx + 1, addr);
             pool_addresses.push((addr, pubkey));
 
+            // ONLY add to ProxyState, don't create connections yet
             ProxyState::add_upstream_connection(
                 format!("upstream-{}", idx),
                 format!("config-pool-{}", idx + 1),
@@ -222,32 +248,38 @@ async fn main() {
                 crate::proxy_state::UpstreamType::JDCMiningUpstream,
             );
         }
-    } else {
-        // Fallback to hard-coded addresses (your existing code)
-        info!("Using hard-coded pool addresses");
+    }     
+     else {
+        // Fallback to hard-coded address
+        info!("Using hard-coded fallback pool address");
 
-        let test_pubkey: Secp256k1PublicKey =
-            TEST_AUTH_PUB_KEY.parse().expect("Invalid test public key");
-
-        let test_addr = if let Ok(addr) = "3.74.36.119:2000".to_socket_addrs() {
-            addr.collect::<Vec<_>>()[0]
-        } else {
-            "3.74.36.119:2000".parse().expect("Invalid IP address")
+        let test_addr = match "3.74.36.119:2000".to_socket_addrs() {
+            Ok(mut addrs) => addrs.next().unwrap_or_else(|| {
+                error!("Failed to resolve fallback pool address");
+                std::process::exit(1);
+            }),
+            Err(_) => {
+                error!("Invalid fallback pool address format");
+                std::process::exit(1);
+            }
         };
 
-        // Add hard-coded pools
-        for i in 0..2 {
-            info!("Adding upstream server {}: {}", i + 1, test_addr);
-            pool_addresses.push((test_addr, test_pubkey));
-            ProxyState::add_upstream_connection(
-                format!("upstream-{}", i),
-                format!("test-pool-{}", i + 1),
-                test_addr,
-                test_pubkey,
-                crate::proxy_state::UpstreamType::JDCMiningUpstream,
-            );
-        }
+        let test_pubkey: Secp256k1PublicKey = TEST_AUTH_PUB_KEY
+            .parse()
+            .expect("Invalid fallback public key");
+
+        info!("Adding fallback upstream server: {}", test_addr);
+        pool_addresses.push((test_addr, test_pubkey));
+
+        ProxyState::add_upstream_connection(
+            "upstream-0".to_string(),
+            "fallback-pool-1".to_string(),
+            test_addr,
+            test_pubkey,
+            crate::proxy_state::UpstreamType::JDCMiningUpstream
+        );
     }
+
 
     // Direct verification
     info!("DIRECT VERIFICATION: Checking hashrate distribution");
@@ -255,330 +287,212 @@ async fn main() {
     let active_count = upstream_connections.len();
     info!("Active upstreams: {}", active_count);
 
-    if active_count > 0 && ARGS.round_robin {
-        let hashrate_per_upstream = hashpower / active_count as f32;
-        info!(
-            "Round-robin hashrate per upstream: {}",
-            HashUnit::format_value(hashrate_per_upstream)
-        );
-
-        let upstream_connections: Vec<(
-            String,
-            std::net::SocketAddr,
-            key_utils::Secp256k1PublicKey,
-        )> = ProxyState::get_upstream_connections();
-
-        // And update the usage in the loop below:
-        for (upstream_id, addr, _auth_key) in upstream_connections {
-            info!(
-                "Upstream {}: {} - allocated {}",
-                upstream_id,
-                addr,
-                HashUnit::format_value(hashrate_per_upstream)
-            );
-        }
-    }
-
-    // Set all upstreams as initially connected
-    for (idx, (_addr, _)) in pool_addresses.iter().enumerate() {
-        let id = if idx == 0 && pool_addresses.len() == 1 {
-            "upstream-default".to_string()
-        } else {
-            format!("upstream-{}", idx)
-        };
-        ProxyState::set_upstream_connection_status(&id, true);
-    }
-
-    // Create the router based on whether we're using round-robin or not
-    let mut router = if !pool_addresses.is_empty() && pool_addresses.len() > 1 {
-        // Multiple upstreams - use new_multi
+    // Remove round-robin hashrate calculation
+    // if active_count > 0 && ARGS.round_robin {
+    //     let hashrate_per_upstream = hashpower / active_count as f32;
+    //     info!(
+    //         "Round-robin hashrate per upstream: {}",
+    //         HashUnit::format_value(hashrate_per_upstream)
+    //     );
+    //
+    //     let upstream_connections: Vec<(
+    //         String,
+    //         std::net::SocketAddr,
+    //         key_utils::Secp256k1PublicKey,
+    //     )> = ProxyState::get_upstream_connections();
+    //
+    //     // And update the usage in the loop below:
+    //     for (upstream_id, addr, _auth_key) in upstream_connections {
+    //         info!(
+    //             "Upstream {}: {} - allocated {}",
+    //             upstream_id,
+    //             addr,
+    //             HashUnit::format_value(hashrate_per_upstream)
+    //         );
+    //     }
+    // }
+    
+    // Create the router - always use multi upstream with parallel mode
+    let mut router = if !pool_addresses.is_empty() {
+        // Always use multi-upstream mode (even for single upstream)
         match router::Router::new_multi(
             pool_addresses.clone(),
             None, // setup_connection_msg
             None, // timer
-            ARGS.round_robin,
-        ) {
-            Ok(router) => router,
+            true, // Always enable parallel mode
+        ).await {
+            Ok(mut router) => {
+                if let Err(e) = router.initialize_upstream_connections().await {
+                    error!("Failed to initialize upstream connections: {}", e);
+                    std::process::exit(1);
+                }
+                router
+            },
             Err(e) => {
                 error!("Failed to create multi-upstream router: {}", e);
                 std::process::exit(1);
             }
         }
     } else {
-        // Single upstream - use regular constructor
-        let pool_socket_addresses: Vec<std::net::SocketAddr> =
-            pool_addresses.iter().map(|(addr, _)| *addr).collect();
-        let auth_pub_k = pool_addresses
-            .first()
-            .expect("No pool addresses available")
-            .1;
-
-        router::Router::new(
-            pool_socket_addresses,
-            auth_pub_k,
-            None, // setup_connection_msg
-            None, // timer
-        )
+        error!("No pool addresses configured. Please provide pool addresses via config file.");
+        std::process::exit(1);
     };
 
-    let epsilon = Duration::from_millis(10);
-    let best_upstream = router.select_pool_connect().await;
-    initialize_proxy(&mut router, best_upstream, epsilon).await;
-    info!("exiting");
-    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+    let epsilon = Duration::from_millis(100);
+
+    // Always use multi-upstream mode
+    initialize_proxy(&mut router, None, epsilon).await;
+    
+    // Start monitoring task for multi-upstream
+    let router_clone = router.clone();
+    tokio::spawn(async move {
+        monitor_multi_upstream(router_clone, epsilon).await;
+    });
+    
+    // Keep main thread alive
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        info!("Multi-upstream proxy running...");
+    }
 }
 
 async fn initialize_proxy(
     router: &mut Router,
-    mut pool_addr: Option<std::net::SocketAddr>,
-    epsilon: Duration,
+    mut _pool_addr: Option<std::net::SocketAddr>, // Add underscore to indicate unused
+    _epsilon: Duration, // Add underscore to indicate unused
 ) {
-    loop {
-        // Initial setup for the proxy
-        let stats_sender = api::stats::StatsSender::new();
-
-        let (send_to_pool, recv_from_pool, pool_connection_abortable) =
-            match router.connect_pool(pool_addr).await {
-                Ok(connection) => connection,
-                Err(_) => {
-                    error!("No upstream available. Retrying...");
-                    warn!("Are you using the correct TOKEN??");
-                    let mut secs = 10;
-                    while secs > 0 {
-                        tracing::warn!("Retrying in {} seconds...", secs);
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        secs -= 1;
-                    }
-                    // Restart loop, esentially restarting proxy
-                    continue;
+    // Add a static flag to prevent multiple downstream listeners
+    static DOWNSTREAM_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    
+    // For multi-upstream mode, don't loop - just set up and wait
+    if router.is_multi_upstream_enabled() {
+        info!("Multi-upstream mode: using aggregated message handling");
+        
+        // Only start downstream listener once
+        if !DOWNSTREAM_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            info!("Starting downstream listener (multi-upstream mode)");
+            
+            // Create channel for downstream connections
+            let (downstreams_tx, mut downstreams_rx) = tokio::sync::mpsc::channel(10);
+            
+            // Start the downstream listener
+            let _abort_handle = ingress::sv1_ingress::start_listen_for_downstream(downstreams_tx);
+            
+            // Handle incoming downstream connections
+            tokio::spawn(async move {
+                while let Some((send_to_downstream, recv_from_downstream, client_addr)) = downstreams_rx.recv().await {
+                    info!("New downstream client connected: {}", client_addr);
+                    
+                    // Here you would typically start the translator for this downstream connection
+                    // For now, we'll just log the connection
+                    tokio::spawn(async move {
+                        // Handle this specific downstream connection
+                        // You'll need to integrate this with your translator logic
+                        let mut recv = recv_from_downstream;
+                        while let Some(message) = recv.recv().await {
+                            info!("Received from downstream {}: {}", client_addr, message);
+                            // Process the message and potentially send to upstreams
+                        }
+                        info!("Downstream client {} disconnected", client_addr);
+                    });
                 }
-            };
-
-        let (downs_sv1_tx, downs_sv1_rx) = channel(10);
-        let sv1_ingress_abortable = ingress::sv1_ingress::start_listen_for_downstream(downs_sv1_tx);
-
-        let (translator_up_tx, mut translator_up_rx) = channel(10);
-        let translator_abortable =
-            match translator::start(downs_sv1_rx, translator_up_tx, stats_sender.clone()).await {
-                Ok(abortable) => abortable,
-                Err(e) => {
-                    error!("Impossible to initialize translator: {e}");
-                    // Impossible to start the proxy so we restart proxy
-                    ProxyState::update_translator_state(TranslatorState::Down);
-                    ProxyState::update_tp_state(TpState::Down);
-                    return;
-                }
-            };
-
-        let (from_jdc_to_share_accounter_send, from_jdc_to_share_accounter_recv) = channel(10);
-        let (from_share_accounter_to_jdc_send, from_share_accounter_to_jdc_recv) = channel(10);
-        let (jdc_to_translator_sender, jdc_from_translator_receiver, _) = translator_up_rx
-            .recv()
-            .await
-            .expect("Translator failed before initialization");
-
-        let jdc_abortable: Option<AbortOnDrop>;
-        let share_accounter_abortable;
-        let tp = match TP_ADDRESS.safe_lock(|tp| tp.clone()) {
-            Ok(tp) => tp,
-            Err(e) => {
-                error!("TP_ADDRESS Mutex Corrupted: {e}");
-                return;
-            }
-        };
-
-        if let Some(_tp_addr) = tp {
-            jdc_abortable = jd_client::start(
-                jdc_from_translator_receiver,
-                jdc_to_translator_sender,
-                from_share_accounter_to_jdc_recv,
-                from_jdc_to_share_accounter_send,
-            )
-            .await;
-            if jdc_abortable.is_none() {
-                ProxyState::update_tp_state(TpState::Down);
-            };
-            share_accounter_abortable = match share_accounter::start(
-                from_jdc_to_share_accounter_recv,
-                from_share_accounter_to_jdc_send,
-                recv_from_pool,
-                send_to_pool,
-            )
-            .await
-            {
-                Ok(abortable) => abortable,
-                Err(_) => {
-                    error!("Failed to start share_accounter");
-                    return;
-                }
-            }
-        } else {
-            jdc_abortable = None;
-
-            share_accounter_abortable = match share_accounter::start(
-                jdc_from_translator_receiver,
-                jdc_to_translator_sender,
-                recv_from_pool,
-                send_to_pool,
-            )
-            .await
-            {
-                Ok(abortable) => abortable,
-                Err(_) => {
-                    error!("Failed to start share_accounter");
-                    return;
-                }
-            };
-        };
-
-        // Collecting all abort handles
-        let mut abort_handles = vec![
-            (pool_connection_abortable, "pool_connection".to_string()),
-            (sv1_ingress_abortable, "sv1_ingress".to_string()),
-            (translator_abortable, "translator".to_string()),
-            (share_accounter_abortable, "share_accounter".to_string()),
-        ];
-        if let Some(jdc_handle) = jdc_abortable {
-            abort_handles.push((jdc_handle, "jdc".to_string()));
+            });
         }
-        let server_handle = tokio::spawn(api::start(router.clone(), stats_sender));
-        match monitor(router, abort_handles, epsilon, server_handle).await {
-            Reconnect::NewUpstream(new_pool_addr) => {
-                ProxyState::update_proxy_state_up();
-                pool_addr = Some(new_pool_addr);
-                continue;
-            }
-            Reconnect::NoUpstream => {
-                ProxyState::update_proxy_state_up();
-                pool_addr = None;
-                continue;
-            }
-        };
+        
+        // Get aggregated receiver if available
+        if let Some(aggregated_receiver) = router.get_aggregated_receiver() {
+            tokio::spawn(async move {
+                let mut receiver = aggregated_receiver;
+                while let Some(message) = receiver.recv().await {
+                    info!("Received aggregated message from upstream: {:?}", message);
+                }
+            });
+        }
+        
+        // Instead of looping, just wait indefinitely
+        info!("Multi-upstream proxy initialized successfully");
+        return; // Exit the function, don't loop
     }
+    
+    // For single upstream mode - just log and exit since we're not supporting it
+    error!("Single upstream mode is not supported in this version. Please use multi-upstream mode with --config option.");
+    std::process::exit(1);
 }
 
+async fn monitor_multi_upstream(router: Router, _epsilon: Duration) { // Remove mut
+    let mut distribution_check_counter = 0;
+    
+    loop {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        distribution_check_counter += 1;
+        
+        if distribution_check_counter >= 10 { // Every 100 seconds
+            distribution_check_counter = 0;
+            
+            let total_hashrate = ProxyState::get_total_hashrate();
+            
+            info!("=== Hashrate Distribution Report ===");
+            info!("Total hashrate: {}", HashUnit::format_value(total_hashrate));
+            
+            let (total_connections, active_connections) = router.get_connection_stats().await;
+            info!("Multi-upstream mode: {} total, {} active connections", total_connections, active_connections);
+            
+            if active_connections > 0 {
+                info!("Parallel mode: Using ALL upstreams simultaneously");
+                info!("Total hashrate distributed across {} upstreams: {}", 
+                      active_connections, HashUnit::format_value(total_hashrate));
+                
+                let active_upstreams = router.get_active_upstreams().await;
+                for upstream_id in active_upstreams {
+                    info!("Upstream {}: receiving full hashrate {}", 
+                          upstream_id, HashUnit::format_value(total_hashrate));
+                }
+            } else {
+                warn!("No active upstream connections!");
+            }
+            info!("=====================================");
+        }
+    }
+}
 async fn monitor(
     router: &mut Router,
     abort_handles: Vec<(AbortOnDrop, std::string::String)>,
     epsilon: Duration,
     server_handle: tokio::task::JoinHandle<()>,
 ) -> Reconnect {
-    let mut should_check_upstreams_latency = 0;
-    let mut distribution_check_counter = 0;
-
+    // Since we only support multi-upstream mode now, this monitor function
+    // is simplified to just handle multi-upstream monitoring
     loop {
-        if distribution_check_counter >= 100 {
-            distribution_check_counter = 0;
+        tokio::time::sleep(Duration::from_secs(30)).await;
 
-            // Add debug output to confirm this code runs
-            info!("Generating hashrate distribution report...");
-
-            info!("Hashrate Distribution Report:");
+        // Generate periodic reports for multi-upstream
+        let (total_connections, active_connections) = router.get_connection_stats().await;
+        let total_hashrate = ProxyState::get_total_hashrate();
+        
+        info!("Multi-upstream mode: {} total, {} active connections", total_connections, active_connections);
+        
+        if active_connections > 0 {
+            info!("Parallel mode: Using ALL upstreams simultaneously");
             info!(
-                "Total hashrate: {}",
-                HashUnit::format_value(*EXPECTED_SV1_HASHPOWER)
+                "Total hashrate distributed across {} upstreams: {}",
+                active_connections,
+                HashUnit::format_value(total_hashrate)
             );
-
-            // Get upstream info directly from ProxyState
-            if ARGS.round_robin {
-                // In round-robin mode, check how many active upstreams we have
-                let upstream_connections = ProxyState::get_upstream_connections();
-                let active_count = upstream_connections.len();
-
-                if active_count > 0 {
-                    let hashrate_per_upstream = *EXPECTED_SV1_HASHPOWER / active_count as f32;
-                    info!("Round-robin mode: {} active upstreams", active_count);
-                    info!(
-                        "Each upstream allocated: {}",
-                        HashUnit::format_value(hashrate_per_upstream)
-                    );
-
-                    // List each upstream and its allocated hashrate
-                    for (upstream_id, addr, _auth_key) in upstream_connections {
-                        info!(
-                            "Upstream {}: {} - allocated {}",
-                            upstream_id,
-                            addr,
-                            HashUnit::format_value(hashrate_per_upstream)
-                        );
-                    }
-                } else {
-                    info!("No active upstreams found");
-                }
-            } else {
-                // In latency-based mode
-                info!("Latency-based mode: Using best upstream");
-                if let Some(current_addr) = router.get_current_upstream() {
-                    info!(
-                        "Current upstream: {} - allocated {}",
-                        current_addr,
-                        HashUnit::format_value(*EXPECTED_SV1_HASHPOWER)
-                    );
-                } else {
-                    info!("No upstream currently selected");
-                }
-            }
-        }
-
-        // Check if a better upstream exist every 100 seconds
-        if should_check_upstreams_latency == 10 * 100 {
-            if let Some(new_upstream) = router.monitor_upstream(epsilon).await {
-                info!("Faster upstream detected. Reinitializing proxy...");
-                drop(abort_handles);
-                server_handle.abort(); // abort server
-
-                // Needs a little to time to drop
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                return Reconnect::NewUpstream(new_upstream);
-            }
-        }
-
-        // Monitor finished tasks
-        if let Some((_handle, name)) = abort_handles
-            .iter()
-            .find(|(handle, _name)| handle.is_finished())
-        {
-            error!("Task {:?} finished, Closing connection", name);
-            for (handle, _name) in abort_handles {
-                drop(handle);
-            }
-            server_handle.abort(); // abort server
-
-            // Check if the proxy state is down, and if so, reinitialize the proxy.
-            let is_proxy_down = ProxyState::is_proxy_down();
-            if is_proxy_down.0 {
-                error!(
-                    "Status: {:?}. Reinitializing proxy...",
-                    is_proxy_down.1.unwrap_or("Proxy".to_string())
+            
+            let active_upstreams = router.get_active_upstreams().await;
+            for upstream_id in active_upstreams {
+                info!(
+                    "Upstream {}: receiving full hashrate {}",
+                    upstream_id,
+                    HashUnit::format_value(total_hashrate)
                 );
-                return Reconnect::NoUpstream;
-            } else {
-                return Reconnect::NoUpstream;
             }
+        } else {
+            warn!("No active upstream connections!");
+            // In a real implementation, you might want to try reconnecting here
         }
-
-        // Check if the proxy state is down, and if so, reinitialize the proxy.
-        let is_proxy_down = ProxyState::is_proxy_down();
-        if is_proxy_down.0 {
-            error!(
-                "{:?} is DOWN. Reinitializing proxy...",
-                is_proxy_down.1.unwrap_or("Proxy".to_string())
-            );
-            drop(abort_handles); // Drop all abort handles
-            server_handle.abort(); // abort server
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await; // Needs a little to time to drop
-            return Reconnect::NoUpstream;
-        }
-
-        // Increment the counters
-        should_check_upstreams_latency += 1;
-        distribution_check_counter += 1;
-
-        // Make sure this line exists to give time for the loop
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
 }
-
 /// Parses a hashrate string (e.g., "10T", "2.5P", "500E") into an f32 value in h/s.
 fn parse_hashrate(hashrate_str: &str) -> Result<f32, String> {
     let hashrate_str = hashrate_str.trim();
@@ -656,26 +570,5 @@ impl HashUnit {
         }
     }
 }
-use serde::{Deserialize, Serialize};
-use std::path::Path;
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct Config {
-    pub token: String,
-    pub pool_addresses: Vec<String>,
-    pub tp_address: Option<String>,
-    pub interval: Option<u64>,
-    pub delay: Option<u64>,
-    pub downstream_hashrate: Option<String>,
-    pub loglevel: Option<String>,
-    pub nc_loglevel: Option<String>,
-    pub test: Option<bool>,
-}
 
-impl Config {
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
-        let contents = std::fs::read_to_string(path)?;
-        let config: Config = toml::from_str(&contents)?;
-        Ok(config)
-    }
-}

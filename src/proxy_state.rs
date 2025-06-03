@@ -265,55 +265,6 @@ impl ProxyState {
         }
     }
 
-    pub fn is_proxy_down() -> (bool, Option<String>) {
-        let errors = Self::get_errors();
-        if errors.is_ok() && errors.as_ref().unwrap().is_empty() {
-            (false, None)
-        } else {
-            let error_descriptions: Vec<String> =
-                errors.iter().map(|e| format!("{:?}", e)).collect();
-            (true, Some(error_descriptions.join(", ")))
-        }
-    }
-
-    pub fn get_errors() -> Result<Vec<ProxyStates>, ()> {
-        let mut errors = Vec::new();
-        if PROXY_STATE
-            .safe_lock(|state| {
-                if state.pool == PoolState::Down {
-                    errors.push(ProxyStates::Pool(state.pool));
-                }
-                if state.tp == TpState::Down {
-                    errors.push(ProxyStates::Tp(state.tp));
-                }
-                if state.jd == JdState::Down {
-                    errors.push(ProxyStates::Jd(state.jd));
-                }
-                if state.share_accounter == ShareAccounterState::Down {
-                    errors.push(ProxyStates::ShareAccounter(state.share_accounter));
-                }
-                if state.translator == TranslatorState::Down {
-                    errors.push(ProxyStates::Translator(state.translator));
-                }
-                if let Some(inconsistency) = state.inconsistency {
-                    errors.push(ProxyStates::InternalInconsistency(inconsistency));
-                }
-                if matches!(state.downstream, DownstreamState::Down(_)) {
-                    errors.push(ProxyStates::Downstream(state.downstream.clone()));
-                }
-                if matches!(state.upstream, UpstreamState::Down(_)) {
-                    errors.push(ProxyStates::Upstream(state.upstream.clone()));
-                }
-            })
-            .is_err()
-        {
-            error!("Global Proxy Mutex Corrupted");
-            std::process::exit(1);
-        } else {
-            Ok(errors)
-        }
-    }
-
     /// Add a new upstream connection
     pub fn add_upstream_connection(
         id: String,
@@ -346,25 +297,7 @@ impl ProxyState {
         }
     }
 
-    /// Update connection status for an upstream
-    pub fn set_upstream_connection_status(id: &str, connected: bool) {
-        if PROXY_STATE
-            .safe_lock(|state| {
-                if let Some(conn) = state.upstream_connections.get_mut(id) {
-                    conn.is_connected = connected;
-                    if connected {
-                        info!("Upstream {} is now connected", id);
-                    } else {
-                        info!("Upstream {} is now disconnected", id);
-                    }
-                }
-            })
-            .is_err()
-        {
-            error!("Global Proxy Mutex Corrupted");
-            std::process::exit(1);
-        }
-    }
+
 
     /// Set the total hashrate to be distributed among upstreams
     pub fn set_total_hashrate(hashrate: f32) {
@@ -378,6 +311,21 @@ impl ProxyState {
             error!("Global Proxy Mutex Corrupted");
             std::process::exit(1);
         }
+    }
+
+    /// Get the total hashrate
+    pub fn get_total_hashrate() -> f32 {
+        let mut hashrate = 0.0;
+        if PROXY_STATE
+            .safe_lock(|state| {
+                hashrate = state.total_hashrate;
+            })
+            .is_err()
+        {
+            error!("Global Proxy Mutex Corrupted");
+            std::process::exit(1);
+        }
+        hashrate
     }
 
     /// Get the next upstream in round-robin fashion
@@ -496,9 +444,193 @@ impl ProxyState {
         }
     }
 
-    /// Get all upstream connections
-    pub fn get_upstream_connections(
-    ) -> Vec<(String, std::net::SocketAddr, key_utils::Secp256k1PublicKey)> {
+
+    /// Update connection status for an upstream with timestamp
+    pub fn set_upstream_connection_status(id: &str, connected: bool) {
+        if PROXY_STATE
+            .safe_lock(|state| {
+                if let Some(conn) = state.upstream_connections.get_mut(id) {
+                    conn.is_connected = connected;
+                    if connected {
+                        conn.last_used = Instant::now();
+                        info!("Upstream {} is now connected", id);
+                    } else {
+                        info!("Upstream {} is now disconnected", id);
+                    }
+                }
+            })
+            .is_err()
+        {
+            error!("Global Proxy Mutex Corrupted");
+            std::process::exit(1);
+        }
+    }
+
+    /// Get connection count
+    pub fn get_upstream_connection_count() -> usize {
+        let mut count = 0;
+
+        if PROXY_STATE
+            .safe_lock(|state| {
+                count = state.upstream_connections.len();
+            })
+            .is_err()
+        {
+            error!("Global Proxy Mutex Corrupted");
+            std::process::exit(1);
+        }
+
+        count
+    }
+
+    /// Get active connection count
+    pub fn get_active_upstream_count() -> usize {
+        let mut count = 0;
+
+        if PROXY_STATE
+            .safe_lock(|state| {
+                count = state.upstream_connections
+                    .values()
+                    .filter(|conn| conn.is_connected)
+                    .count();
+            })
+            .is_err()
+        {
+            error!("Global Proxy Mutex Corrupted");
+            std::process::exit(1);
+        }
+
+        count
+    }
+
+    /// Update upstream shares
+    pub fn update_upstream_shares(upstream_id: &str, submitted: u64, accepted: u64) {
+        if PROXY_STATE
+            .safe_lock(|state| {
+                if let Some(conn) = state.upstream_connections.get_mut(upstream_id) {
+                    conn.shares_submitted += submitted;
+                    conn.shares_accepted += accepted;
+                    conn.last_used = Instant::now();
+                }
+            })
+            .is_err()
+        {
+            error!("Global Proxy Mutex Corrupted");
+            std::process::exit(1);
+        }
+    }
+
+    /// Remove an upstream connection
+    pub fn remove_upstream_connection(upstream_id: &str) {
+        info!("Removing upstream connection: {}", upstream_id);
+
+        if PROXY_STATE
+            .safe_lock(|state| {
+                state.upstream_connections.remove(upstream_id);
+            })
+            .is_err()
+        {
+            error!("Global Proxy Mutex Corrupted");
+            std::process::exit(1);
+        }
+    }
+
+    /// Check if proxy is down 
+    pub fn is_proxy_down() -> (bool, Option<String>) {
+        let errors = Self::get_errors();
+        if errors.is_ok() && errors.as_ref().unwrap().is_empty() {
+            (false, None)
+        } else {
+            let error_descriptions: Vec<String> =
+                errors.iter().map(|e| format!("{:?}", e)).collect();
+            (true, Some(error_descriptions.join(", ")))
+        }
+    }
+
+     pub fn get_errors() -> Result<Vec<ProxyStates>, ()> {
+        let mut errors = Vec::new();
+        if PROXY_STATE
+            .safe_lock(|state| {
+                if state.pool == PoolState::Down {
+                    errors.push(ProxyStates::Pool(state.pool));
+                }
+                if state.tp == TpState::Down {
+                    errors.push(ProxyStates::Tp(state.tp));
+                }
+                if state.jd == JdState::Down {
+                    errors.push(ProxyStates::Jd(state.jd));
+                }
+                if state.share_accounter == ShareAccounterState::Down {
+                    errors.push(ProxyStates::ShareAccounter(state.share_accounter));
+                }
+                if state.translator == TranslatorState::Down {
+                    errors.push(ProxyStates::Translator(state.translator));
+                }
+                if let Some(inconsistency) = state.inconsistency {
+                    errors.push(ProxyStates::InternalInconsistency(inconsistency));
+                }
+                if matches!(state.downstream, DownstreamState::Down(_)) {
+                    errors.push(ProxyStates::Downstream(state.downstream.clone()));
+                }
+                if matches!(state.upstream, UpstreamState::Down(_)) {
+                    errors.push(ProxyStates::Upstream(state.upstream.clone()));
+                }
+            })
+            .is_err()
+        {
+            error!("Global Proxy Mutex Corrupted");
+            std::process::exit(1);
+        } else {
+            Ok(errors)
+        }
+    }
+
+
+    /// Get upstream statistics
+    pub fn get_upstream_stats() -> Vec<(String, bool, u64, u64)> {
+        let mut stats = Vec::new();
+
+        if PROXY_STATE
+            .safe_lock(|state| {
+                stats = state.upstream_connections
+                    .iter()
+                    .map(|(id, conn)| {
+                        (id.clone(), conn.is_connected, conn.shares_submitted, conn.shares_accepted)
+                    })
+                    .collect();
+            })
+            .is_err()
+        {
+            error!("Global Proxy Mutex Corrupted");
+            std::process::exit(1);
+        }
+
+        stats
+    }
+
+    /// Get all upstream connections (including inactive ones)
+    pub fn get_all_upstream_connections() -> Vec<(String, std::net::SocketAddr, key_utils::Secp256k1PublicKey, bool)> {
+        let mut connections = Vec::new();
+
+        if PROXY_STATE
+            .safe_lock(|state| {
+                connections = state
+                    .upstream_connections
+                    .iter()
+                    .map(|(id, conn)| (id.clone(), conn.address, conn.auth_key, conn.is_connected))
+                    .collect();
+            })
+            .is_err()
+        {
+            error!("Global Proxy Mutex Corrupted");
+            std::process::exit(1);
+        }
+
+        connections
+    }
+
+    /// Get only active upstream connections (existing method is fine)
+    pub fn get_upstream_connections() -> Vec<(String, std::net::SocketAddr, key_utils::Secp256k1PublicKey)> {
         let mut connections = Vec::new();
 
         if PROXY_STATE
@@ -517,5 +649,34 @@ impl ProxyState {
         }
 
         connections
+    }
+
+    /// Mark an upstream as inactive (disconnect it)
+    pub fn mark_upstream_inactive(upstream_id: &str) {
+        Self::set_upstream_connection_status(upstream_id, false);
+    }
+
+    /// Get best upstream based on latency or other criteria
+    /// For now, just returns the first active upstream
+    pub fn get_best_upstream() -> Option<(String, std::net::SocketAddr, key_utils::Secp256k1PublicKey)> {
+        let mut result = None;
+
+        if PROXY_STATE
+            .safe_lock(|state| {
+                // Find the first active upstream
+                for (id, conn) in &state.upstream_connections {
+                    if conn.is_connected {
+                        result = Some((id.clone(), conn.address, conn.auth_key));
+                        break;
+                    }
+                }
+            })
+            .is_err()
+        {
+            error!("Global Proxy Mutex Corrupted");
+            std::process::exit(1);
+        }
+
+        result
     }
 }

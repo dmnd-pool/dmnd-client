@@ -1,8 +1,8 @@
 mod downstream;
 
 mod error;
-mod proxy;
-mod upstream;
+pub mod proxy;    // Make public
+pub mod upstream; // Make public
 mod utils;
 
 use bitcoin::Address;

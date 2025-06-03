@@ -8,6 +8,13 @@ use tokio::task::JoinHandle;
 pub struct AbortOnDrop {
     abort_handle: AbortHandle,
 }
+impl Clone for AbortOnDrop {
+    fn clone(&self) -> Self {
+        Self {
+            abort_handle: self.abort_handle.clone(),
+        }
+    }
+}
 
 impl AbortOnDrop {
     pub fn new<T: Send + 'static>(handle: JoinHandle<T>) -> Self {

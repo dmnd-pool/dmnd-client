@@ -21,22 +21,49 @@ use tracing::{error, info};
 
 use crate::{
     minin_pool_connection::{self, get_mining_setup_connection_msg, mining_setup_connection},
-    proxy_state::ProxyState, // Add ProxyState import
+    proxy_state::ProxyState,
     shared::utils::AbortOnDrop,
 };
 
+// Add the new module
+pub mod multi_upstream_manager;
+use multi_upstream_manager::MultiUpstreamManager;
+
 /// Router handles connection to Multiple upstreams.
-#[derive(Clone)]
 pub struct Router {
-    pool_addresses: Vec<SocketAddr>,
-    auth_keys: Vec<Secp256k1PublicKey>, // Store auth keys separately to map to addresses
+    pub pool_socket_addresses: Vec<SocketAddr>,
+    pub keys: Vec<Secp256k1PublicKey>,
     pub current_pool: Option<SocketAddr>,
-    auth_pub_k: Secp256k1PublicKey,
-    setup_connection_msg: Option<SetupConnection<'static>>,
-    timer: Option<Duration>,
-    latency_tx: watch::Sender<Option<Duration>>,
-    pub latency_rx: watch::Receiver<Option<Duration>>,
-    use_round_robin: bool, // Add flag to control selection strategy
+    pub upstream_manager: Option<MultiUpstreamManager>,
+    pub aggregated_receiver: Option<tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>>,
+    
+    // Keep these fields for backward compatibility with single upstream mode
+    pub auth_pub_k: Secp256k1PublicKey,
+    pub setup_connection_msg: Option<SetupConnection<'static>>,
+    pub timer: Option<Duration>,
+    pub latency_tx: tokio::sync::watch::Sender<Option<Duration>>,
+    pub latency_rx: tokio::sync::watch::Receiver<Option<Duration>>,
+    
+    // Remove round-robin fields entirely
+    // use_round_robin: bool,
+    // use_parallel: bool, // This will be determined by presence of upstream_manager
+}
+// Remove Clone derive since Receiver can't be cloned
+impl Clone for Router {
+    fn clone(&self) -> Self {
+        Self {
+            pool_socket_addresses: self.pool_socket_addresses.clone(),
+            keys: self.keys.clone(),
+            current_pool: self.current_pool,
+            upstream_manager: self.upstream_manager.clone(),
+            aggregated_receiver: None, // Can't clone receiver
+            auth_pub_k: self.auth_pub_k,
+            setup_connection_msg: self.setup_connection_msg.clone(),
+            timer: self.timer,
+            latency_tx: self.latency_tx.clone(),
+            latency_rx: self.latency_rx.clone(),
+        }
+    }
 }
 
 impl Router {
@@ -44,208 +71,127 @@ impl Router {
     pub fn new(
         pool_addresses: Vec<SocketAddr>,
         auth_pub_k: Secp256k1PublicKey,
-        // Configuration msg used to setup connection between client and pool
-        // If not, present `get_mining_setup_connection_msg()` is called to generated default values
         setup_connection_msg: Option<SetupConnection<'static>>,
-        // Max duration for pool setup after which it times out.
-        // If None, default time of 5s is used.
         timer: Option<Duration>,
-    ) -> Self {
+    ) -> Self{
         let (latency_tx, latency_rx) = watch::channel(None);
-        // Create auth_keys vector with the same key for all addresses
         let auth_keys = vec![auth_pub_k; pool_addresses.len()];
-
+        
         Self {
-            pool_addresses,
-            auth_keys,
+            pool_socket_addresses: pool_addresses,
+            keys: auth_keys,
             current_pool: None,
+            upstream_manager: None,
+            aggregated_receiver: None,
             auth_pub_k,
             setup_connection_msg,
             timer,
             latency_tx,
             latency_rx,
-            use_round_robin: false, // Default to latency-based selection
         }
     }
+    
 
     /// Creates a new Router with multiple upstream addresses and auth keys
-    pub fn new_multi(
+     pub async fn new_multi(
         pool_address_keys: Vec<(SocketAddr, Secp256k1PublicKey)>,
         setup_connection_msg: Option<SetupConnection<'static>>,
         timer: Option<Duration>,
-        use_round_robin: bool,
+        _use_parallel: bool, // Parameter kept for compatibility but always use parallel
     ) -> Result<Self, &'static str> {
-        if pool_address_keys.is_empty() {
-            return Err("Cannot create router with empty pool_address_keys");
-        }
+        let pool_socket_addresses: Vec<SocketAddr> = pool_address_keys.iter().map(|(addr, _)| *addr).collect();
+        let keys: Vec<Secp256k1PublicKey> = pool_address_keys.iter().map(|(_, key)| *key).collect();
+
+        // Create with parallel mode enabled
+        let (upstream_manager, aggregated_receiver) = MultiUpstreamManager::new(true);
+        
+        // Use first key as default auth key for backward compatibility
+            let auth_pub_k = keys.first().copied().ok_or("No authentication keys provided")?;
 
         let (latency_tx, latency_rx) = watch::channel(None);
-        let mut addresses = Vec::new();
-        let mut keys = Vec::new();
-
-        for (addr, key) in &pool_address_keys {
-            addresses.push(*addr);
-            keys.push(*key);
-        }
-
-        // Use the first key as the default auth_pub_k
-        let default_key = pool_address_keys[0].1;
-
-        // Register all upstreams in the ProxyState
-        for (idx, (addr, key)) in pool_address_keys.iter().enumerate() {
-            let id = format!("upstream-{}", idx);
-            ProxyState::add_upstream_connection(
-                id.clone(),
-                format!("{:?}", addr),
-                *addr,
-                *key,
-                crate::proxy_state::UpstreamType::JDCMiningUpstream,
-            );
-        }
 
         Ok(Self {
-            pool_addresses: addresses,
-            auth_keys: keys,
+            pool_socket_addresses,
+            keys,
             current_pool: None,
-            auth_pub_k: default_key,
+            upstream_manager: Some(upstream_manager),
+            aggregated_receiver: Some(aggregated_receiver),
+            auth_pub_k,
             setup_connection_msg,
             timer,
             latency_tx,
             latency_rx,
-            use_round_robin,
         })
     }
+    
+    // Remove round-robin methods
+    // pub fn set_round_robin(&mut self, enabled: bool) { ... }
 
-    /// Enable or disable round-robin upstream selection
-    #[allow(dead_code)]
-    pub fn set_round_robin(&mut self, enabled: bool) {
-        self.use_round_robin = enabled;
+    /// Check if the router is using the MultiUpstreamManager
+    pub fn is_multi_upstream_enabled(&self) -> bool {
+        self.upstream_manager.is_some()
+    }
+    
+    /// Check if the router is using parallel mode - true when MultiUpstreamManager is present
+    pub fn is_parallel_mode(&self) -> bool {
+        self.upstream_manager.is_some()
     }
 
-    // For compatibility with existing code
-    #[allow(dead_code)]
-    pub fn is_current_upstream(&self, addr: &std::net::SocketAddr) -> bool {
-        if let Some(current) = self.current_pool {
-            return current == *addr;
+    /// Checks for faster upstream and switches to it if found
+    pub async fn monitor_upstream(&mut self, epsilon: Duration) -> Option<SocketAddr> {
+        // For multi-upstream mode, we don't switch since we use all simultaneously
+        if self.is_multi_upstream_enabled() {
+            // In parallel mode, we don't need to switch upstreams
+            // All upstreams are used simultaneously
+            return None;
         }
-        false
-    }
-
-    /// Internal function to select pool with the least latency.
-    async fn select_pool(&self) -> Option<(SocketAddr, Duration)> {
-        // If round-robin is enabled, use ProxyState to get the next upstream
-        if self.use_round_robin {
-            if let Some((id, addr, _)) = ProxyState::get_next_upstream() {
-                info!("Round-robin selected upstream {}: {:?}", id, addr);
-                // Return with a dummy zero latency
-                return Some((addr, Duration::from_millis(0)));
+        
+        // For single upstream mode, check for better latency
+        if let Some(best_pool) = self.select_pool_monitor(epsilon).await {
+            if Some(best_pool) != self.current_pool {
+                info!("Switching to faster upstream {:?}", best_pool);
+                return Some(best_pool);
             }
         }
+        None
+    }
 
-        // Fall back to latency-based selection
-        let mut best_pool = None;
-        let mut least_latency = Duration::MAX;
-
-        for &pool_addr in &self.pool_addresses {
-            if let Ok(latency) = self.get_latency(pool_addr).await {
-                if latency < least_latency {
-                    least_latency = latency;
-                    best_pool = Some(pool_addr)
+    /// Select the best pool for monitoring (checks latency differences)
+    async fn select_pool_monitor(&self, epsilon: Duration) -> Option<SocketAddr> {
+        if let Some(current_pool) = self.current_pool {
+            if let Ok(current_latency) = self.get_latency(current_pool).await {
+                // Check if there's a significantly better pool
+                for &pool_addr in &self.pool_socket_addresses {
+                    if pool_addr != current_pool {
+                        if let Ok(pool_latency) = self.get_latency(pool_addr).await {
+                            // Switch if the new pool is significantly faster
+                            if current_latency > pool_latency + epsilon {
+                                info!(
+                                    "Found faster upstream: {:?} (latency: {:?}) vs current {:?} (latency: {:?})",
+                                    pool_addr, pool_latency, current_pool, current_latency
+                                );
+                                return Some(pool_addr);
+                            }
+                        }
+                    }
                 }
             }
         }
-
-        best_pool.map(|pool| (pool, least_latency))
+        None
     }
 
     /// Select the best pool for connection
     pub async fn select_pool_connect(&mut self) -> Option<SocketAddr> {
         info!("Selecting the best upstream");
 
-        if self.use_round_robin {
-            // Check if we have any registered upstreams in ProxyState
-            if let Some((id, addr, _)) = ProxyState::get_next_upstream() {
-                info!("Round-robin selected upstream {}: {:?}", id, addr);
-                return Some(addr);
-            }
-
-            // If no upstreams registered in ProxyState yet, register them now
-            if !self.pool_addresses.is_empty() {
-                for (idx, (addr, key)) in self
-                    .pool_addresses
-                    .iter()
-                    .zip(self.auth_keys.iter())
-                    .enumerate()
-                {
-                    let id = format!("upstream-{}", idx);
-                    ProxyState::add_upstream_connection(
-                        id,
-                        format!("{:?}", addr),
-                        *addr,
-                        *key,
-                        crate::proxy_state::UpstreamType::JDCMiningUpstream,
-                    );
-                    // Mark all as initially connected
-                    ProxyState::set_upstream_connection_status(&format!("upstream-{}", idx), true);
-                }
-
-                // Now try again to get a round-robin selection
-                if let Some((_, addr, _)) = ProxyState::get_next_upstream() {
-                    return Some(addr);
-                }
-            }
-        }
-
-        // Fall back to latency-based selection
+        // Remove round-robin logic - only use latency-based selection
         if let Some((pool, latency)) = self.select_pool().await {
             info!("Latency for upstream {:?} is {:?}", pool, latency);
-            self.latency_tx.send_replace(Some(latency)); // update latency
+            self.latency_tx.send_replace(Some(latency));
             Some(pool)
         } else {
             None
         }
-    }
-
-    /// Select the best pool for monitoring
-    async fn select_pool_monitor(&self, epsilon: Duration) -> Option<SocketAddr> {
-        // If using round-robin, just get the next upstream
-        if self.use_round_robin {
-            if let Some((_, addr, _)) = ProxyState::get_next_upstream() {
-                // Only switch if it's different from the current one
-                if Some(addr) != self.current_pool {
-                    return Some(addr);
-                }
-                return None;
-            }
-        }
-
-        // Otherwise use latency-based selection
-        if let Some((best_pool, best_pool_latency)) = self.select_pool().await {
-            if let Some(current_pool) = self.current_pool {
-                if best_pool == current_pool {
-                    return None;
-                }
-                let current_latency = match self.get_latency(current_pool).await {
-                    Ok(latency) => latency,
-                    Err(e) => {
-                        error!("Failed to get latency: {:?}", e);
-                        return None;
-                    }
-                };
-                if best_pool_latency < (current_latency - epsilon) {
-                    info!(
-                        "Found faster pool: {:?} with latency {:?}",
-                        best_pool, best_pool_latency
-                    );
-                    return Some(best_pool);
-                } else {
-                    return None;
-                }
-            } else {
-                return Some(best_pool);
-            }
-        }
-        None
     }
 
     /// Selects the best upstream and connects to.
@@ -276,9 +222,9 @@ impl Router {
 
         info!("Upstream {:?} selected", pool);
 
-        // Find the matching auth key for this address
-        let auth_key = if let Some(index) = self.pool_addresses.iter().position(|&a| a == pool) {
-            self.auth_keys[index]
+        // Find the matching auth key for this address - fix field name
+        let auth_key = if let Some(index) = self.pool_socket_addresses.iter().position(|&a| a == pool) {
+            self.keys[index]
         } else {
             self.auth_pub_k
         };
@@ -295,7 +241,7 @@ impl Router {
                 // Update ProxyState with successful connection
                 let upstream_id = format!(
                     "upstream-{}",
-                    self.pool_addresses
+                    self.pool_socket_addresses
                         .iter()
                         .position(|&a| a == pool)
                         .unwrap_or(0)
@@ -309,7 +255,7 @@ impl Router {
                 // Update ProxyState with failed connection
                 let upstream_id = format!(
                     "upstream-{}",
-                    self.pool_addresses
+                    self.pool_socket_addresses
                         .iter()
                         .position(|&a| a == pool)
                         .unwrap_or(0)
@@ -323,10 +269,10 @@ impl Router {
 
     /// Returns the sum all the latencies for a given upstream
     async fn get_latency(&self, pool_address: SocketAddr) -> Result<Duration, ()> {
-        // Find the auth key for this address
+        // Find the auth key for this address - fix field names
         let auth_pub_key =
-            if let Some(index) = self.pool_addresses.iter().position(|&a| a == pool_address) {
-                self.auth_keys[index]
+            if let Some(index) = self.pool_socket_addresses.iter().position(|&a| a == pool_address) {
+                self.keys[index]
             } else {
                 self.auth_pub_k
             };
@@ -387,33 +333,133 @@ impl Router {
         Ok(sum_of_latencies)
     }
 
-    /// Checks for faster upstream switch to it if found
-    pub async fn monitor_upstream(&mut self, epsilon: Duration) -> Option<SocketAddr> {
-        // If using round-robin, just get the next upstream
-        if self.use_round_robin {
-            if let Some((_, addr, _)) = ProxyState::get_next_upstream() {
-                if Some(addr) != self.current_pool {
-                    info!("Switching to next round-robin upstream {:?}", addr);
-                    return Some(addr);
-                }
-                return None;
-            }
-        }
-
-        // Otherwise use latency-based selection
-        if let Some(best_pool) = self.select_pool_monitor(epsilon).await {
-            if Some(best_pool) != self.current_pool {
-                info!("Switching to faster upstream {:?}", best_pool);
-                return Some(best_pool);
-            } else {
-                return None;
-            }
-        }
-        None
-    }
-
     pub fn get_current_upstream(&self) -> Option<std::net::SocketAddr> {
         self.current_pool
+    }
+
+     /// Initialize upstream connections for the manager
+    pub async fn initialize_upstream_connections(&mut self) -> Result<(), String> {
+        if let Some(ref manager) = self.upstream_manager {
+            info!("Initializing {} upstream connections", self.pool_socket_addresses.len());
+            
+            // Add each unique upstream only once - fix field names
+            for (idx, (addr, key)) in self.pool_socket_addresses.iter().zip(self.keys.iter()).enumerate() {
+                let id = format!("upstream-{}", idx);
+                
+                info!("Adding upstream {}: {} ({})", id, addr, key);
+                
+                if let Err(e) = manager.add_upstream(
+                    id.clone(),
+                    *addr,
+                    *key,
+                    self.setup_connection_msg.clone(),
+                    self.timer,
+                ).await {
+                    error!("Failed to initialize upstream {}: {}", addr, e);
+                    // Continue with other upstreams even if one fails
+                } else {
+                    info!("Successfully initialized upstream {}: {}", id, addr);
+                }
+            }
+            
+            // Wait a moment for connections to stabilize
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            
+            let (total, active) = self.get_connection_stats().await;
+            info!("Initialized {} upstream connections ({} active)", total, active);
+        }
+        Ok(())
+    }
+
+    /// Send a message to a specific upstream using the manager
+    pub async fn send_to_upstream(&self, upstream_id: &str, message: PoolExtMessages<'static>) -> Result<(), String> {
+        if let Some(ref manager) = self.upstream_manager {
+            manager.send_to_upstream(upstream_id, message).await
+        } else {
+            Err("MultiUpstreamManager not initialized".to_string())
+        }
+    }
+
+    /// Send a message to the next upstream (round-robin or best available)
+    pub async fn send_to_next_upstream(&self, message: PoolExtMessages<'static>) -> Result<(), String> {
+        if let Some(ref manager) = self.upstream_manager {
+            manager.send_to_next_upstream(message).await
+        } else {
+            Err("MultiUpstreamManager not initialized".to_string())
+        }
+    }
+
+    /// Broadcast a message to all active upstreams
+    pub async fn broadcast_to_all_upstreams(&self, message: PoolExtMessages<'static>) -> Vec<String> {
+        if let Some(ref manager) = self.upstream_manager {
+            manager.broadcast(message).await
+        } else {
+            vec!["MultiUpstreamManager not initialized".to_string()]
+        }
+    }
+
+    /// Get aggregated receiver for multi-upstream mode
+    pub fn get_aggregated_receiver(&mut self) -> Option<tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>> {
+        self.aggregated_receiver.take()
+    }
+    
+    /// Get connection statistics for multi-upstream mode
+    pub async fn get_connection_stats(&self) -> (usize, usize) {
+        if let Some(ref manager) = self.upstream_manager {
+            // Get stats from the manager
+            let upstreams = manager.get_upstreams().await;
+            let total = upstreams.len();
+            let active = upstreams.values().filter(|u| u.is_active).count();
+            (total, active)
+        } else {
+            (self.pool_socket_addresses.len(), 1) // Single upstream mode
+        }
+    }
+    
+    /// Get list of active upstream IDs
+    pub async fn get_active_upstreams(&self) -> Vec<String> {
+        if let Some(ref manager) = self.upstream_manager {
+            manager.get_active_upstream_ids().await
+        } else {
+            vec!["upstream-0".to_string()] // Single upstream mode
+        }
+    }
+
+    /// Switch to a specific upstream by ID
+    pub async fn switch_to_upstream(&mut self, upstream_id: &str) -> Result<(), String> {
+        // Find the upstream address by ID
+        if let Ok(idx) = upstream_id.strip_prefix("upstream-")
+            .and_then(|s| s.parse::<usize>().ok())
+            .ok_or("Invalid upstream ID format".to_string()) 
+        {
+            if idx < self.pool_socket_addresses.len() { // Fix field name
+                let addr = self.pool_socket_addresses[idx]; // Fix field name
+                self.current_pool = Some(addr);
+                info!("Switched to upstream {}: {:?}", upstream_id, addr);
+                Ok(())
+            } else {
+                Err(format!("Upstream index {} out of range", idx))
+            }
+        } else {
+            Err("Invalid upstream ID format".to_string())
+        }
+    }
+
+    /// Select the best pool based on latency
+    async fn select_pool(&mut self) -> Option<(SocketAddr, Duration)> {
+        let mut best_pool = None;
+        let mut best_latency = Duration::from_secs(u64::MAX);
+
+        for &pool_addr in &self.pool_socket_addresses {
+            if let Ok(latency) = self.get_latency(pool_addr).await {
+                if latency < best_latency {
+                    best_latency = latency;
+                    best_pool = Some(pool_addr);
+                }
+            }
+        }
+
+        best_pool.map(|pool| (pool, best_latency))
     }
 }
 
