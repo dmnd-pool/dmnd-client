@@ -40,7 +40,7 @@ pub async fn start_receive_downstream(
                 // Message received could not be converted to rpc message
                 error!(
                     "{}",
-                    Error::V1Protocol(sv1_api::error::Error::InvalidJsonRpcMessageKind,)
+                    Error::V1Protocol(Box::new(sv1_api::error::Error::InvalidJsonRpcMessageKind))
                 );
                 return;
             }

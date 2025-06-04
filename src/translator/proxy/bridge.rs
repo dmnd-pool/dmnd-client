@@ -351,7 +351,11 @@ impl Bridge {
             // regarding version masking see https://github.com/slushpool/stratumprotocol/blob/master/stratum-extensions.mediawiki#changes-in-request-miningsubmit
             (Some(vb), Some(mask)) => (last_version & !mask.0) | (vb.0 & mask.0),
             (None, None) => last_version,
-            _ => return Err(Error::V1Protocol(sv1_api::error::Error::InvalidSubmission)),
+            _ => {
+                return Err(Error::V1Protocol(Box::new(
+                    sv1_api::error::Error::InvalidSubmission,
+                )))
+            }
         };
         let mining_device_extranonce: Vec<u8> = sv1_submit.extra_nonce2.into();
         let extranonce2 = mining_device_extranonce;

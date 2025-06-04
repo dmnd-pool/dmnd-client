@@ -80,6 +80,8 @@ jobs:
     name: Create GitHub Release and Upload Binaries
     needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
+    # Only run this job for push events to master or manual workflow dispatch
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout code
         uses: actions/checkout@v3

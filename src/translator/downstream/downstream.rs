@@ -291,7 +291,7 @@ impl Downstream {
             }
             Err(e) => {
                 error!("{e}");
-                Err(Error::V1Protocol(e))
+                Err(Error::V1Protocol(Box::new(e)))
             }
         }
     }
@@ -332,6 +332,7 @@ impl Downstream {
         }
     }
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         connection_id: u32,
         authorized_names: Vec<String>,

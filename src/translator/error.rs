@@ -8,7 +8,7 @@ pub enum Error<'a> {
     InvalidExtranonce(String),
     /// Errors from `roles_logic_sv2` crate.
     RolesSv2Logic(roles_logic_sv2::errors::Error),
-    V1Protocol(sv1_api::error::Error<'a>),
+    V1Protocol(Box<sv1_api::error::Error<'a>>),
     // Locking Errors
     PoisonLock,
     TranslatorUpstreamMutexPoisoned,
@@ -76,5 +76,11 @@ impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error<'_> {
 impl From<roles_logic_sv2::Error> for Error<'_> {
     fn from(value: roles_logic_sv2::Error) -> Self {
         Self::RolesSv2Logic(value)
+    }
+}
+
+impl<'a> From<sv1_api::error::Error<'a>> for Error<'a> {
+    fn from(value: sv1_api::error::Error<'a>) -> Self {
+        Self::V1Protocol(Box::new(value))
     }
 }
