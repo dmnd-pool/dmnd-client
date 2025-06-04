@@ -27,7 +27,7 @@ use crate::{
 
 // Add the new module
 pub mod multi_upstream_manager;
-use multi_upstream_manager::MultiUpstreamManager;
+pub use multi_upstream_manager::MultiUpstreamManager;
 
 /// Router handles connection to Multiple upstreams.
 pub struct Router {
@@ -95,14 +95,14 @@ impl Router {
         pool_address_keys: Vec<(SocketAddr, Secp256k1PublicKey)>,
         setup_connection_msg: Option<SetupConnection<'static>>,
         timer: Option<Duration>,
-        _use_parallel: bool, // Parameter kept for compatibility but always use parallel
+        use_parallel: bool,
     ) -> Result<Self, &'static str> {
         let pool_socket_addresses: Vec<SocketAddr> =
             pool_address_keys.iter().map(|(addr, _)| *addr).collect();
         let keys: Vec<Secp256k1PublicKey> = pool_address_keys.iter().map(|(_, key)| *key).collect();
 
         // Create with parallel mode enabled
-        let (upstream_manager, aggregated_receiver) = MultiUpstreamManager::new(true);
+        let (upstream_manager, aggregated_receiver) = MultiUpstreamManager::new(use_parallel);
 
         // Use first key as default auth key for backward compatibility
         let auth_pub_k = keys
@@ -126,9 +126,74 @@ impl Router {
         })
     }
 
-    // Remove round-robin methods
-    // pub fn set_round_robin(&mut self, enabled: bool) { ... }
+    /// Get aggregated receiver for multi-upstream mode
+    pub async fn get_aggregated_receiver(&self) -> Option<tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>> {
+        if let Some(ref manager) = self.upstream_manager {
+            manager.get_aggregated_receiver().await
+        } else {
+            None
+        }
+    }
+    
+    /// Set hashrate distribution for multi-upstream mode
+    pub async fn set_hashrate_distribution(&self, distribution: Vec<f32>) -> Result<(), String> {
+        if let Some(ref manager) = self.upstream_manager {
+            manager.set_hashrate_distribution(distribution).await;
+            Ok(())
+        } else {
+            Err("Multi-upstream manager not available".to_string())
+        }
+    }
+    
+    /// Get detailed connection statistics with custom distribution
+    pub async fn get_detailed_connection_stats(&self) -> Vec<(String, bool, f32)> {
+        let mut results = Vec::new();
+        
+        if let Some(ref manager) = self.upstream_manager {
+            let upstreams = manager.get_upstreams().await;
+            let total_hashrate = crate::proxy_state::ProxyState::get_total_hashrate();
+            let distribution = manager.get_hashrate_distribution().await;
+            
+            // Check if we have custom distribution
+            if distribution.len() == upstreams.len() && !distribution.is_empty() {
+                // Use custom distribution
+                let upstream_ids: Vec<String> = upstreams.keys().cloned().collect();
+                for (idx, (id, upstream)) in upstreams.iter().enumerate() {
+                    let percentage = distribution.get(idx).copied().unwrap_or(0.0);
+                    let hashrate = if upstream.is_active { 
+                        total_hashrate * (percentage / 100.0) 
+                    } else { 
+                        0.0 
+                    };
+                    results.push((id.clone(), upstream.is_active, hashrate));
+                }
+            } else {
+                // Fall back to equal distribution
+                let active_count = upstreams.values().filter(|upstream| upstream.is_active).count();
+                let hashrate_per_upstream = if active_count > 0 {
+                    total_hashrate / active_count as f32
+                } else {
+                    0.0
+                };
+                
+                for (id, upstream) in upstreams {
+                    let hashrate = if upstream.is_active { hashrate_per_upstream } else { 0.0 };
+                    results.push((id, upstream.is_active, hashrate));
+                }
+            }
+        } else {
+            // Single upstream mode (fallback)
+            if let Some(current) = self.current_pool {
+                let total_hashrate = crate::proxy_state::ProxyState::get_total_hashrate();
+                results.push(("upstream-0".to_string(), true, total_hashrate));
+            }
+        }
+        
+        results
+    }
 
+ 
+    
     /// Check if the router is using the MultiUpstreamManager
     pub fn is_multi_upstream_enabled(&self) -> bool {
         self.upstream_manager.is_some()
@@ -213,7 +278,7 @@ impl Router {
             Some(addr) => addr,
             None => match self.select_pool_connect().await {
                 Some(addr) => addr,
-                // Called when we initialize the proxy, without a valid pool we can not start mine and we
+                // Called when we initialize
                 // return Err
                 None => {
                     return Err(minin_pool_connection::errors::Error::Unrecoverable);
@@ -372,73 +437,24 @@ impl Router {
                     )
                     .await
                 {
-                    error!("Failed to initialize upstream {}: {}", addr, e);
-                    // Continue with other upstreams even if one fails
-                } else {
-                    info!("Successfully initialized upstream {}: {}", id, addr);
+                    error!("Failed to add upstream {}: {:?}", id, e);
                 }
             }
 
-            // Wait a moment for connections to stabilize
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Start the manager after adding all upstreams
+            // manager.start().await?;
+            // If MultiUpstreamManager requires initialization, call it here. Otherwise, remove this.
 
-            let (total, active) = self.get_connection_stats().await;
-            info!(
-                "Initialized {} upstream connections ({} active)",
-                total, active
-            );
-        }
-        Ok(())
-    }
-
-    /// Send a message to a specific upstream using the manager
-    pub async fn send_to_upstream(
-        &self,
-        upstream_id: &str,
-        message: PoolExtMessages<'static>,
-    ) -> Result<(), String> {
-        if let Some(ref manager) = self.upstream_manager {
-            manager.send_to_upstream(upstream_id, message).await
+            info!("Upstream connections initialized");
+            Ok(())
         } else {
-            Err("MultiUpstreamManager not initialized".to_string())
+            Err("No upstream manager available".to_string())
         }
     }
 
-    /// Send a message to the next upstream (round-robin or best available)
-    pub async fn send_to_next_upstream(
-        &self,
-        message: PoolExtMessages<'static>,
-    ) -> Result<(), String> {
+    /// Get count of total and active upstreams
+    pub async fn get_upstream_counts(&self) -> (usize, usize) {
         if let Some(ref manager) = self.upstream_manager {
-            manager.send_to_next_upstream(message).await
-        } else {
-            Err("MultiUpstreamManager not initialized".to_string())
-        }
-    }
-
-    /// Broadcast a message to all active upstreams
-    pub async fn broadcast_to_all_upstreams(
-        &self,
-        message: PoolExtMessages<'static>,
-    ) -> Vec<String> {
-        if let Some(ref manager) = self.upstream_manager {
-            manager.broadcast(message).await
-        } else {
-            vec!["MultiUpstreamManager not initialized".to_string()]
-        }
-    }
-
-    /// Get aggregated receiver for multi-upstream mode
-    pub fn get_aggregated_receiver(
-        &mut self,
-    ) -> Option<tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>> {
-        self.aggregated_receiver.take()
-    }
-
-    /// Get connection statistics for multi-upstream mode
-    pub async fn get_connection_stats(&self) -> (usize, usize) {
-        if let Some(ref manager) = self.upstream_manager {
-            // Get stats from the manager
             let upstreams = manager.get_upstreams().await;
             let total = upstreams.len();
             let active = upstreams.values().filter(|u| u.is_active).count();
@@ -496,39 +512,9 @@ impl Router {
         best_pool.map(|pool| (pool, best_latency))
     }
 
-    /// Get detailed connection statistics with equal distribution
-    pub async fn get_detailed_connection_stats(&self) -> Vec<(String, bool, f32)> {
-        let mut results = Vec::new();
-        
-        if let Some(ref manager) = self.upstream_manager {
-            let upstreams = manager.get_upstreams().await;
-            let total_hashrate = crate::proxy_state::ProxyState::get_total_hashrate();
-            
-            // Count active upstreams first
-            let active_count = upstreams.values().filter(|upstream| upstream.is_active).count();
-            
-            // Calculate hashrate per upstream (equal distribution)
-            let hashrate_per_upstream = if active_count > 0 {
-                total_hashrate / active_count as f32
-            } else {
-                0.0
-            };
-            
-            for (id, upstream) in upstreams {
-                // Each active upstream gets an equal share
-                let hashrate = if upstream.is_active { hashrate_per_upstream } else { 0.0 };
-                results.push((id, upstream.is_active, hashrate));
-            }
-        } else {
-            // Single upstream mode (fallback)
-            if let Some(current) = self.current_pool {
-                let total_hashrate = crate::proxy_state::ProxyState::get_total_hashrate();
-                results.push(("upstream-0".to_string(), true, total_hashrate));
-            }
-        }
-        
-        results
-    }
+   
+
+  
 }
 
 /// Track latencies for various stages of pool connection setup.

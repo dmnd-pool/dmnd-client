@@ -20,27 +20,34 @@ pub struct UpstreamConnection {
 pub struct MultiUpstreamManager {
     upstreams: Arc<Mutex<HashMap<String, UpstreamConnection>>>,
     aggregated_sender: tokio::sync::mpsc::Sender<PoolExtMessages<'static>>,
-    // Remove round-robin fields
-    // current_index: Arc<Mutex<usize>>,
-    // use_round_robin: bool,
+    aggregated_receiver: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>>>>,
+    // New field for custom hashrate distribution
+    hashrate_distribution: Arc<Mutex<Vec<f32>>>,
 }
 
 impl MultiUpstreamManager {
-    pub fn new(
-        _use_parallel: bool, // Parameter kept for compatibility but always use parallel
-    ) -> (Self, tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>) {
+    pub fn new(use_parallel: bool) -> (Self, tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>) {
         let (sender, receiver) = tokio::sync::mpsc::channel(1000);
+        let manager = Self {
+            upstreams: Arc::new(Mutex::new(HashMap::new())),
+            aggregated_sender: sender,
+            aggregated_receiver: Arc::new(Mutex::new(None)), // Start with None
+            hashrate_distribution: Arc::new(Mutex::new(Vec::new())), // Initialize empty
+        };
+        
+        (manager, receiver)
+    }
 
-        (
-            Self {
-                upstreams: Arc::new(Mutex::new(HashMap::new())),
-                aggregated_sender: sender,
-                // Remove round-robin fields
-                // current_index: Arc::new(Mutex::new(0)),
-                // use_round_robin: false, // Always use parallel
-            },
-            receiver,
-        )
+    /// Get the aggregated receiver (for use in the main loop)
+    pub async fn get_aggregated_receiver(&self) -> Option<tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>> {
+        let mut rx = self.aggregated_receiver.lock().await;
+        rx.take()
+    }
+    
+    /// Set the aggregated receiver (if needed to put it back)
+    pub async fn set_aggregated_receiver(&self, receiver: tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>) {
+        let mut rx = self.aggregated_receiver.lock().await;
+        *rx = Some(receiver);
     }
 
     /// Add a new upstream connection
@@ -223,20 +230,6 @@ impl MultiUpstreamManager {
         }
     }
 
-    // Remove round-robin send method
-    // async fn send_round_robin(&self, message: PoolExtMessages<'static>) -> Result<(), String> { ... }
-
-    // /// Send to the best upstream (first active one for now)
-    // async fn send_to_best_upstream(&self, message: PoolExtMessages<'static>) -> Result<(), String> {
-    //     let connections = self.upstreams.lock().await;
-    //     for connection in connections.values() {
-    //         if connection.is_active {
-    //             return connection.sender.send(message).await
-    //                 .map_err(|e| format!("Failed to send to upstream {}: {}", connection.id, e));
-    //         }
-    //     }
-    //     Err("No active upstreams available".to_string())
-    // }
     /// Connect to upstream with retry logic
     async fn connect_upstream_with_retry(
         upstreams: Arc<Mutex<HashMap<String, UpstreamConnection>>>,
@@ -398,5 +391,43 @@ impl MultiUpstreamManager {
     pub async fn active_connection_count(&self) -> usize {
         let connections = self.upstreams.lock().await;
         connections.values().filter(|conn| conn.is_active).count()
+    }
+
+    /// Set custom hashrate distribution percentages
+    pub async fn set_hashrate_distribution(&self, distribution: Vec<f32>) {
+        let mut dist = self.hashrate_distribution.lock().await;
+        *dist = distribution;
+        info!("Set custom hashrate distribution: {:?}", *dist);
+    }
+    
+    /// Get current hashrate distribution
+    pub async fn get_hashrate_distribution(&self) -> Vec<f32> {
+        self.hashrate_distribution.lock().await.clone()
+    }
+    
+    /// Validate that distribution percentages add up to 100%
+    pub fn validate_distribution(distribution: &[f32]) -> Result<(), String> {
+        if distribution.is_empty() {
+            return Err("Distribution cannot be empty".to_string());
+        }
+        
+        let total: f32 = distribution.iter().sum();
+        if (total - 100.0).abs() > 0.1 { // Allow small floating point errors
+            return Err(format!(
+                "Distribution percentages must add up to 100%, got {:.1}%", 
+                total
+            ));
+        }
+        
+        for (idx, &percentage) in distribution.iter().enumerate() {
+            if percentage < 0.0 || percentage > 100.0 {
+                return Err(format!(
+                    "Invalid percentage at index {}: {:.1}%. Must be between 0% and 100%", 
+                    idx, percentage
+                ));
+            }
+        }
+        
+        Ok(())
     }
 }

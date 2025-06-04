@@ -10,7 +10,6 @@ use std::path::Path;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-use crate::shared::utils::AbortOnDrop;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState};
@@ -115,6 +114,8 @@ pub struct Config {
     pub loglevel: Option<String>,
     pub nc_loglevel: Option<String>,
     pub test: Option<bool>,
+    pub hashrate_distribution: Option<Vec<f32>>, // Array of percentages for each upstream
+
 }
 
 impl Config {
@@ -213,10 +214,24 @@ async fn main() {
 
     // Handle multiple upstream servers from config or hard-coded fallback
     let mut pool_addresses = Vec::new();
+    let mut custom_distribution: Option<Vec<f32>> = None;
 
-    if let Some(ref config) = config {
+     if let Some(ref config) = config {
         // Use configuration file pool addresses
         info!("Loading pool addresses from configuration file");
+        
+        // Load custom distribution if provided
+        if let Some(ref distribution) = config.hashrate_distribution {
+            info!("Found custom hashrate distribution in config: {:?}", distribution);
+            
+            // Validate the distribution
+            if let Err(e) = router::MultiUpstreamManager::validate_distribution(distribution) {
+                error!("Invalid hashrate distribution in config: {}", e);
+                std::process::exit(1);
+            }
+            
+            custom_distribution = Some(distribution.clone());
+        }
 
         for (idx, pool_addr_str) in config.pool_addresses.iter().enumerate() {
             // Parse address
@@ -245,6 +260,19 @@ async fn main() {
                 crate::proxy_state::UpstreamType::JDCMiningUpstream,
             );
         }
+        
+        // Validate that distribution count matches pool count
+        if let Some(ref distribution) = custom_distribution {
+            if distribution.len() != pool_addresses.len() {
+                error!(
+                    "Hashrate distribution count ({}) doesn't match pool addresses count ({})",
+                    distribution.len(),
+                    pool_addresses.len()
+                );
+                std::process::exit(1);
+            }
+        }
+
     } else {
         // Fallback to hard-coded address
         info!("Using hard-coded fallback pool address");
@@ -307,18 +335,27 @@ async fn main() {
     //     }
     // }
 
-    // Create the router - always use multi upstream with equal distribution mode
+    // Create the router - always use multi upstream with custom distribution mode
     let mut router = if !pool_addresses.is_empty() {
         // Always use multi-upstream mode (even for single upstream)
         match router::Router::new_multi(
             pool_addresses.clone(),
             None, // setup_connection_msg
             None, // timer
-            false, // Changed from true to false - disable parallel mode for equal distribution
+            false, // Changed from true to false - disable parallel mode for custom distribution
         )
         .await
         {
             Ok(mut router) => {
+                // Set custom distribution if provided
+                if let Some(distribution) = custom_distribution {
+                    info!("Setting custom hashrate distribution: {:?}", distribution);
+                    if let Err(e) = router.set_hashrate_distribution(distribution).await {
+                        error!("Failed to set custom hashrate distribution: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+                
                 if let Err(e) = router.initialize_upstream_connections().await {
                     error!("Failed to initialize upstream connections: {}", e);
                     std::process::exit(1);
@@ -378,16 +415,33 @@ async fn main() {
     let active_count = detailed_stats.iter().filter(|(_, is_active, _)| *is_active).count();
     
     if active_count > 0 {
-        let percentage_per_upstream = 100.0 / active_count as f32;
-        info!("🌐 Mode: Equal Distribution ({:.1}% per upstream)", percentage_per_upstream);
+        // Check if using custom distribution
+        let mut is_custom_distribution = false;
+        for (_, is_active, hashrate) in &detailed_stats {
+            if *is_active {
+                let percentage = (*hashrate / total_hashrate) * 100.0;
+                if (percentage - (100.0 / active_count as f32)).abs() > 1.0 {
+                    is_custom_distribution = true;
+                    break;
+                }
+            }
+        }
+        
+        if is_custom_distribution {
+            info!("🎯 Mode: Custom Distribution (from config)");
+        } else {
+            let percentage_per_upstream = 100.0 / active_count as f32;
+            info!("🌐 Mode: Equal Distribution ({:.1}% per upstream)", percentage_per_upstream);
+        }
 
         for (upstream_id, is_active, hashrate) in detailed_stats {
             if is_active {
+                let percentage = (hashrate / total_hashrate) * 100.0;
                 info!(
                     "  ✅ {}: receiving {} ({:.1}% of total)",
                     upstream_id,
                     HashUnit::format_value(hashrate),
-                    percentage_per_upstream
+                    percentage
                 );
             } else {
                 info!(
@@ -461,7 +515,7 @@ async fn initialize_proxy(
         }
 
         // Get aggregated receiver if available
-        if let Some(aggregated_receiver) = router.get_aggregated_receiver() {
+        if let Some(aggregated_receiver) = router.get_aggregated_receiver().await {
             tokio::spawn(async move {
                 let mut receiver = aggregated_receiver;
                 while let Some(message) = receiver.recv().await {
@@ -503,17 +557,35 @@ async fn monitor_multi_upstream(router: Router, _epsilon: Duration) {
             let active_count = detailed_stats.iter().filter(|(_, is_active, _)| *is_active).count();
             
             if active_count > 0 {
-                let percentage_per_upstream = 100.0 / active_count as f32;
-                info!("🌐 Equal Distribution mode: Each upstream gets {:.1}% of total hashrate", percentage_per_upstream);
+                // Check if using custom distribution
+                let mut is_custom_distribution = false;
+                
+                for (_, is_active, hashrate) in &detailed_stats {
+                    if *is_active {
+                        let percentage = (*hashrate / total_hashrate) * 100.0;
+                        if (percentage - (100.0 / active_count as f32)).abs() > 1.0 {
+                            is_custom_distribution = true;
+                        }
+                    }
+                }
+                
+                if is_custom_distribution {
+                    info!("🎯 Custom Distribution mode: Using configured percentages");
+                } else {
+                    let percentage_per_upstream = 100.0 / active_count as f32;
+                    info!("🌐 Equal Distribution mode: Each upstream gets {:.1}% of total hashrate", percentage_per_upstream);
+                }
+                
                 info!("📡 Upstream details:");
 
                 for (upstream_id, is_active, hashrate) in detailed_stats {
                     if is_active {
+                        let percentage = (hashrate / total_hashrate) * 100.0;
                         info!(
                             "  ✅ {}: {} ({:.1}% of total)",
                             upstream_id,
                             HashUnit::format_value(hashrate),
-                            percentage_per_upstream
+                            percentage
                         );
                     } else {
                         info!(
@@ -529,7 +601,12 @@ async fn monitor_multi_upstream(router: Router, _epsilon: Duration) {
                     HashUnit::format_value(total_hashrate),
                     active_count
                 );
-                info!("💡 Note: Hashrate is split equally among all active upstreams");
+                
+                if is_custom_distribution {
+                    info!("💡 Note: Using custom distribution from config file");
+                } else {
+                    info!("💡 Note: Hashrate is split equally among all active upstreams");
+                }
             } else {
                 warn!("⚠️  WARNING: No active upstream connections!");
             }
@@ -539,7 +616,7 @@ async fn monitor_multi_upstream(router: Router, _epsilon: Duration) {
 }
 async fn monitor(
     router: &mut Router,
-    abort_handles: Vec<(AbortOnDrop, std::string::String)>,
+    abort_handles: Vec<(std::string::String)>,
     epsilon: Duration,
     server_handle: tokio::task::JoinHandle<()>,
 ) -> Reconnect {
@@ -549,7 +626,10 @@ async fn monitor(
         tokio::time::sleep(Duration::from_secs(30)).await;
 
         // Generate periodic reports for multi-upstream
-        let (total_connections, active_connections) = router.get_connection_stats().await;
+        // Replace with a method that exists, e.g., get_detailed_connection_stats
+        let detailed_stats = router.get_detailed_connection_stats().await;
+        let total_connections = detailed_stats.len();
+        let active_connections = detailed_stats.iter().filter(|(_, is_active, _)| *is_active).count();
         let total_hashrate = ProxyState::get_total_hashrate();
 
         info!(
@@ -615,8 +695,7 @@ fn parse_hashrate(hashrate_str: &str) -> Result<f32, String> {
 pub enum Reconnect {
     NewUpstream(std::net::SocketAddr), // Reconnecting with a new upstream
     NoUpstream,                        // Reconnecting without upstream
-}
-
+}   
 enum HashUnit {
     Tera,
     Peta,

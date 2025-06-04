@@ -1,9 +1,13 @@
 token="UR01TMkZv6Vs5zbwr0t6"
-pool_addresses=["18.193.252.132:2000", "3.74.36.119:2000"]
+pool_addresses=["18.193.252.132:2000","3.74.36.119:2000"]
 tp_address = "127.0.0.1:8442"
 interval = 120_000
 delay = 540
-downstream_hashrate = "200T"
+downstream_hashrate = "500T"
 loglevel = "info"
 nc_loglevel = "off"
 test = true
+
+# Custom hashrate distribution (percentages for each upstream)
+# This array should match the number of pool_addresses
+hashrate_distribution = [30.0, 70.0]
