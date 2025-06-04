@@ -616,7 +616,7 @@ async fn monitor_multi_upstream(router: Router, _epsilon: Duration) {
 }
 async fn monitor(
     router: &mut Router,
-    abort_handles: Vec<(std::string::String)>,
+    abort_handles: Vec<std::string::String>,
     epsilon: Duration,
     server_handle: tokio::task::JoinHandle<()>,
 ) -> Reconnect {
