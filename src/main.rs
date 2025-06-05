@@ -122,6 +122,9 @@ impl Config {
         let config: Config = toml::from_str(&contents)?;
         Ok(config)
     }
+     pub fn wants_hashrate_distribution(&self) -> bool {
+        self.hashrate_distribution.is_some()
+    }
 }
 
 #[tokio::main]
@@ -230,8 +233,8 @@ async fn main() {
 
     // Determine if we want hashrate distribution
     let wants_distribution = config.as_ref()
-        .and_then(|c| c.hashrate_distribution.as_ref())
-        .is_some() || ARGS.parallel;
+        .map(|c| c.wants_hashrate_distribution())
+        .unwrap_or(false);
 
     // Create router based on configuration
     let mut router = if wants_distribution {
@@ -423,24 +426,23 @@ async fn main() {
             info!("🌐 Mode: Equal Distribution ({:.1}% per upstream)", percentage_per_upstream);
         }
 
-        for (upstream_id, is_active, hashrate) in detailed_stats {
-            if is_active {
-                info!("{} = hashrate", hashrate);
-                let percentage = (hashrate / total_hashrate) * 100.0;
-                info!(
-                    "  ✅ {}: receiving {} ({:.1}% of total)",
-                    upstream_id,
-                    HashUnit::format_value(hashrate),
-                    percentage
-                );
-            } else {
-                info!(
-                    "  ❌ {}: {} (INACTIVE)",
-                    upstream_id,
-                    HashUnit::format_value(hashrate)
-                );
-            }
-        }
+      for (upstream_id, is_active, percentage) in detailed_stats {
+    if is_active {
+        // Calculate actual hashrate from percentage
+        let actual_hashrate = (percentage / 100.0) * total_hashrate;
+        info!(
+            "  ✅ {}: allocated {} ({:.1}% of total)",
+            upstream_id,
+            HashUnit::format_value(actual_hashrate),
+            percentage
+        );
+    } else {
+        info!(
+            "  ❌ {}: 0.00T (INACTIVE - 0.0% of total)",
+            upstream_id
+        );
+    }
+}
         info!("========================================");
         
         // Start monitoring task for multi-upstream

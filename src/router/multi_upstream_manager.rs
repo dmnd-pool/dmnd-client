@@ -143,23 +143,22 @@ impl MultiUpstreamManager {
     pub async fn get_upstreams(&self) -> HashMap<String, UpstreamConnection> {
         self.upstreams.lock().await.clone()
     }
-
-    pub async fn get_detailed_connection_stats(&self) -> Vec<(String, bool, f32)> {
-        let upstreams = self.upstreams.lock().await;
-       
-        upstreams
-            .iter()
-            .map(|(id, conn)| {
-                println!(
-                    "Inside get_detailed_connection_stats Upstream {}: is_active={}, allocated_percentage={:.2}%",
-                    id,
-                    conn.is_active,
-                    conn.allocated_percentage
-                );
-                (id.clone(), conn.is_active, conn.allocated_percentage)
-            })
-            .collect()
-    }
+pub async fn get_detailed_connection_stats(&self) -> Vec<(String, bool, f32)> {
+    let upstreams = self.upstreams.lock().await;
+    
+    upstreams
+        .iter()
+        .map(|(id, conn)| {
+            println!(
+                "Upstream {}: {}% allocation", 
+                id, 
+                conn.allocated_percentage
+            );
+            // Return the percentage, not the hashrate
+            (id.clone(), conn.is_active, conn.allocated_percentage)
+        })
+        .collect()
+}
 
     pub async fn get_hashrate_distribution(&self) -> Vec<f32> {
         let upstreams = self.upstreams.lock().await;
