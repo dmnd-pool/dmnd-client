@@ -17,7 +17,7 @@ use tokio::{
         watch,
     },
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::{
     minin_pool_connection::{self, get_mining_setup_connection_msg, mining_setup_connection},
@@ -67,6 +67,7 @@ impl Clone for Router {
 
 impl Router {
     /// Creates a new `Router` instance with the specified upstream addresses.
+    /// Now supports multiple pools with different auth keys for latency-based selection
     pub fn new(
         pool_addresses: Vec<SocketAddr>,
         auth_pub_k: Secp256k1PublicKey,
@@ -91,20 +92,60 @@ impl Router {
     }
 
     /// Creates a new Router with multiple upstream addresses and auth keys
+    /// Support both latency-based selection and custom distribution
+    pub fn new_with_keys(
+        pool_address_keys: Vec<(SocketAddr, Secp256k1PublicKey)>,
+        setup_connection_msg: Option<SetupConnection<'static>>,
+        timer: Option<Duration>,
+    ) -> Self {
+        let pool_socket_addresses: Vec<SocketAddr> =
+            pool_address_keys.iter().map(|(addr, _)| *addr).collect();
+        let keys: Vec<Secp256k1PublicKey> = pool_address_keys.iter().map(|(_, key)| *key).collect();
+        let auth_pub_k = keys[0]; // Use first key as primary
+
+        let (latency_tx, latency_rx) = watch::channel(None);
+
+        Self {
+            pool_socket_addresses,
+            keys,
+            current_pool: None,
+            upstream_manager: None,
+            aggregated_receiver: None,
+            auth_pub_k,
+            setup_connection_msg,
+            timer,
+            latency_tx,
+            latency_rx,
+        }
+    }
+
+    /// Creates a new Router with multiple upstream addresses and auth keys
+    /// This now supports both latency-based selection and custom distribution
     pub async fn new_multi(
         pool_address_keys: Vec<(SocketAddr, Secp256k1PublicKey)>,
         setup_connection_msg: Option<SetupConnection<'static>>,
         timer: Option<Duration>,
-        use_parallel: bool,
+        use_distribution: bool, // Changed from use_parallel to use_distribution
     ) -> Result<Self, &'static str> {
         let pool_socket_addresses: Vec<SocketAddr> =
             pool_address_keys.iter().map(|(addr, _)| *addr).collect();
         let keys: Vec<Secp256k1PublicKey> = pool_address_keys.iter().map(|(_, key)| *key).collect();
 
-        // Create with parallel mode enabled
-        let (upstream_manager, aggregated_receiver) = MultiUpstreamManager::new(use_parallel);
+        // Create upstream manager only if we want custom distribution
+        let (upstream_manager, aggregated_receiver) = if use_distribution {
+            let manager = MultiUpstreamManager::new(
+                pool_socket_addresses.clone(),
+                keys[0], // or use a key per upstream if needed
+                setup_connection_msg.clone(),
+                timer.clone(),
+            );
+            let receiver = None; // or whatever is appropriate for your design
+            (Some(manager), receiver)
+        } else {
+            (None, None)
+        };
 
-        // Use first key as default auth key for backward compatibility
+        // Use
         let auth_pub_k = keys
             .first()
             .copied()
@@ -116,8 +157,8 @@ impl Router {
             pool_socket_addresses,
             keys,
             current_pool: None,
-            upstream_manager: Some(upstream_manager),
-            aggregated_receiver: Some(aggregated_receiver),
+            upstream_manager,
+            aggregated_receiver,
             auth_pub_k,
             setup_connection_msg,
             timer,
@@ -134,67 +175,39 @@ impl Router {
             None
         }
     }
-    
-    /// Set hashrate distribution for multi-upstream mode
-    pub async fn set_hashrate_distribution(&self, distribution: Vec<f32>) -> Result<(), String> {
+
+    /// Get aggregated sender for multi-upstream mode
+    pub async fn get_aggregated_sender(&self) -> tokio::sync::mpsc::Sender<PoolExtMessages<'static>> {
         if let Some(ref manager) = self.upstream_manager {
-            manager.set_hashrate_distribution(distribution).await;
-            Ok(())
+            manager.get_aggregated_sender().await
         } else {
-            Err("Multi-upstream manager not available".to_string())
+            // Return a dummy sender if no manager exists
+            let (sender, _) = tokio::sync::mpsc::channel(1);
+            sender
         }
-    }
-    
-    /// Get detailed connection statistics with custom distribution
-    pub async fn get_detailed_connection_stats(&self) -> Vec<(String, bool, f32)> {
-        let mut results = Vec::new();
-        
-        if let Some(ref manager) = self.upstream_manager {
-            let upstreams = manager.get_upstreams().await;
-            let total_hashrate = crate::proxy_state::ProxyState::get_total_hashrate();
-            let distribution = manager.get_hashrate_distribution().await;
-            
-            // Check if we have custom distribution
-            if distribution.len() == upstreams.len() && !distribution.is_empty() {
-                // Use custom distribution
-                let upstream_ids: Vec<String> = upstreams.keys().cloned().collect();
-                for (idx, (id, upstream)) in upstreams.iter().enumerate() {
-                    let percentage = distribution.get(idx).copied().unwrap_or(0.0);
-                    let hashrate = if upstream.is_active { 
-                        total_hashrate * (percentage / 100.0) 
-                    } else { 
-                        0.0 
-                    };
-                    results.push((id.clone(), upstream.is_active, hashrate));
-                }
-            } else {
-                // Fall back to equal distribution
-                let active_count = upstreams.values().filter(|upstream| upstream.is_active).count();
-                let hashrate_per_upstream = if active_count > 0 {
-                    total_hashrate / active_count as f32
-                } else {
-                    0.0
-                };
-                
-                for (id, upstream) in upstreams {
-                    let hashrate = if upstream.is_active { hashrate_per_upstream } else { 0.0 };
-                    results.push((id, upstream.is_active, hashrate));
-                }
-            }
-        } else {
-            // Single upstream mode (fallback)
-            if let Some(current) = self.current_pool {
-                let total_hashrate = crate::proxy_state::ProxyState::get_total_hashrate();
-                results.push(("upstream-0".to_string(), true, total_hashrate));
-            }
-        }
-        
-        results
     }
 
- 
-    
-    /// Check if the router is using the MultiUpstreamManager
+   
+
+    /// Get detailed connection statistics
+    pub async fn get_detailed_connection_stats(&self) -> Vec<(String, bool, f32)> {
+        if let Some(ref manager) = self.upstream_manager {
+            manager.get_detailed_connection_stats().await
+        } else {
+            vec![]
+        }
+    }
+
+    /// Get current hashrate distribution
+    pub async fn get_hashrate_distribution(&self) -> Vec<f32> {
+        if let Some(ref manager) = self.upstream_manager {
+            manager.get_hashrate_distribution().await
+        } else {
+            vec![]
+        }
+    }
+
+    /// Check if multi-upstream is enabled
     pub fn is_multi_upstream_enabled(&self) -> bool {
         self.upstream_manager.is_some()
     }
@@ -204,6 +217,29 @@ impl Router {
         self.upstream_manager.is_some()
     }
 
+    /// Check if the router is using custom distribution mode
+    pub fn is_distribution_mode(&self) -> bool {
+        self.upstream_manager.is_some()
+    }
+
+    /// Get the best pools based on latency and desired count
+    pub async fn select_best_pools(&mut self, desired_count: usize) -> Vec<(SocketAddr, Duration)> {
+        let mut pool_latencies = Vec::new();
+
+        // Get latencies for all pools
+        for &pool_addr in &self.pool_socket_addresses {
+            if let Ok(latency) = self.get_latency(pool_addr).await {
+                pool_latencies.push((pool_addr, latency));
+            }
+        }
+
+        // Sort by latency (lowest first)
+        pool_latencies.sort_by_key(|(_, latency)| *latency);
+
+        // Return the best pools up to desired count
+        pool_latencies.into_iter().take(desired_count).collect()
+    }
+    
     /// Checks for faster upstream and switches to it if found
     pub async fn monitor_upstream(&mut self, epsilon: Duration) -> Option<SocketAddr> {
         // For multi-upstream mode, we don't switch since we use all simultaneously
@@ -441,11 +477,11 @@ impl Router {
                 }
             }
 
-            // Start the manager after adding all upstreams
-            // manager.start().await?;
-            // If MultiUpstreamManager requires initialization, call it here. Otherwise, remove this.
+         // IMPORTANT: Initialize connections BEFORE any hashrate distribution is set
+            // This ensures add_upstream() calls are complete and won't overwrite distribution
+            manager.initialize_connections().await;
 
-            info!("Upstream connections initialized");
+            info!("Upstream connections initialized - ready for hashrate distribution");
             Ok(())
         } else {
             Err("No upstream manager available".to_string())
@@ -461,6 +497,20 @@ impl Router {
             (total, active)
         } else {
             (self.pool_socket_addresses.len(), 1) // Single upstream mode
+        }
+    }
+    /// Sets the hashrate distribution for the upstream manager.
+pub async fn set_hashrate_distribution(&self, distribution: Vec<f32>) -> Result<(), &'static str> {
+        info!("🔧 Router::set_hashrate_distribution called with: {:?}", distribution);
+        
+        if let Some(ref manager) = self.upstream_manager {
+            info!("🔧 Calling manager.set_hashrate_distribution");
+            manager.set_hashrate_distribution(distribution).await;
+            info!("🔧 Manager.set_hashrate_distribution returned");
+            Ok(())
+        } else {
+            error!("❌ No upstream manager available");
+            Err("No upstream manager available")
         }
     }
 
@@ -512,9 +562,49 @@ impl Router {
         best_pool.map(|pool| (pool, best_latency))
     }
 
-   
+    /// Select best pools for hashrate distribution based on latency
+    /// This implements condition 2: choose N best pools from available pools
+    pub async fn select_best_pools_for_distribution(&mut self, desired_count: usize) -> Vec<(SocketAddr, Secp256k1PublicKey)> {
+        // If we have exactly the desired count or fewer, use all
+        if self.pool_socket_addresses.len() <= desired_count {
+            info!("Using all {} available pools (desired: {})", self.pool_socket_addresses.len(), desired_count);
+            return self.pool_socket_addresses
+                .iter()
+                .zip(self.keys.iter())
+                .map(|(&addr, &key)| (addr, key))
+                .collect();
+        }
 
-  
+        // Get latencies for all pools
+        let mut pool_latencies = Vec::new();
+        info!("Testing latencies for {} pools to select {} best", self.pool_socket_addresses.len(), desired_count);
+
+        for (i, &pool_addr) in self.pool_socket_addresses.iter().enumerate() {
+            match self.get_latency(pool_addr).await {
+                Ok(latency) => {
+                    info!("Pool {}: latency {:?}", pool_addr, latency);
+                    pool_latencies.push((pool_addr, self.keys[i], latency));
+                }
+                Err(_) => {
+                    warn!("Failed to get latency for pool {}", pool_addr);
+                }
+            }
+        }
+
+        // Sort by latency (lowest first) and take the best ones
+        pool_latencies.sort_by_key(|(_, _, latency)| *latency);
+        let selected: Vec<(SocketAddr, Secp256k1PublicKey)> = pool_latencies
+            .into_iter()
+            .take(desired_count)
+            .map(|(addr, key, latency)| {
+                info!("Selected pool {} with latency {:?}", addr, latency);
+                (addr, key)
+            })
+            .collect();
+
+        info!("Selected {} pools based on latency", selected.len());
+        selected
+    }
 }
 
 /// Track latencies for various stages of pool connection setup.

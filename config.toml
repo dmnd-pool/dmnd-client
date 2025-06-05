@@ -8,6 +8,5 @@ loglevel = "info"
 nc_loglevel = "off"
 test = true
 
-# Custom hashrate distribution (percentages for each upstream)
-# This array should match the number of pool_addresses
-hashrate_distribution = [30.0, 70.0]
+# Uncomment this line to enable hashrate distribution
+#hashrate_distribution = [30.0, 70.0]
