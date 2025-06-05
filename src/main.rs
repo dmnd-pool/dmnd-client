@@ -409,15 +409,14 @@ async fn main() {
     if active_count > 0 {
         // Check if using custom distribution
         let mut is_custom_distribution = false;
-        for (_, is_active, hashrate) in &detailed_stats {
-            if *is_active {
-                let percentage = (*hashrate / total_hashrate) * 100.0;
-                if (percentage - (100.0 / active_count as f32)).abs() > 1.0 {
-                    is_custom_distribution = true;
-                    break;
-                }
-            }
+        for (_, is_active, percentage) in &detailed_stats {
+    if *is_active {
+        if (percentage - (100.0 / active_count as f32)).abs() > 1.0 {
+            is_custom_distribution = true;
+            break;
         }
+    }
+}
         
         if is_custom_distribution {
             info!("🎯 Mode: Custom Distribution (from config)");
@@ -703,23 +702,23 @@ async fn monitor_multi_upstream(router: Router, epsilon: Duration) {
                     info!("⚖️  Distribution mode: Equal (automatic)");
                 }
 
-                for (upstream_id, is_active, hashrate) in detailed_stats {
-                    if is_active {
-                        let percentage = (hashrate / total_hashrate) * 100.0;
-                        info!(
-                            "  ✅ {}: receiving {} ({:.1}% of total)",
-                            upstream_id,
-                            HashUnit::format_value(hashrate),
-                            percentage
-                        );
-                    } else {
-                        info!(
-                            "  ❌ {}: {} (INACTIVE)",
-                            upstream_id,
-                            HashUnit::format_value(hashrate)
-                        );
-                    }
-                }
+               for (upstream_id, is_active, percentage) in detailed_stats {
+    if is_active {
+        // Calculate actual hashrate from percentage
+        let allocated_hashrate = (percentage / 100.0) * total_hashrate;
+        info!(
+            "  ✅ {}: allocated {} ({:.1}% of total)",
+            upstream_id,
+            HashUnit::format_value(allocated_hashrate),
+            percentage
+        );
+    } else {
+        info!(
+            "  ❌ {}: 0.00T (INACTIVE - 0.0% of total)",
+            upstream_id
+        );
+    }
+}
             } else {
                 warn!("❌ No active upstream connections!");
             }
