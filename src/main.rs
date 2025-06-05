@@ -177,7 +177,6 @@ async fn main() {
     } else {
         None
     };
-    println!("Config: {:?}", config);
     
     // Set the total hashrate from config BEFORE creating router
     if let Some(ref config) = config {
