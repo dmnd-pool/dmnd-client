@@ -1,11 +1,14 @@
 use clap::Parser;
 use lazy_static::lazy_static;
+use rand::distributions::{Alphanumeric, DistString};
+use roles_logic_sv2::utils::{Id, Mutex};
 use serde::{Deserialize, Serialize};
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     path::PathBuf,
+    sync::Arc,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{HashUnit, DEFAULT_SV1_HASHPOWER};
 lazy_static! {
@@ -39,6 +42,8 @@ struct Args {
     config_file: Option<PathBuf>,
     #[clap(long = "api-server-port", short = 's')]
     api_server_port: Option<String>,
+    #[clap(long)]
+    device_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -55,6 +60,7 @@ struct ConfigFile {
     test: Option<bool>,
     listening_addr: Option<String>,
     api_server_port: Option<String>,
+    device_id: Option<String>,
 }
 
 pub struct Configuration {
@@ -70,6 +76,8 @@ pub struct Configuration {
     test: bool,
     listening_addr: Option<String>,
     api_server_port: String,
+    device_id: Option<String>,
+    id: Arc<Mutex<Id>>, // Global request ID generator, thread-safe
 }
 impl Configuration {
     pub fn token() -> Option<String> {
@@ -103,6 +111,7 @@ impl Configuration {
     pub fn downstream_listening_addr() -> Option<String> {
         CONFIG.listening_addr.clone()
     }
+
     pub fn api_server_port() -> String {
         CONFIG.api_server_port.clone()
     }
@@ -137,6 +146,27 @@ impl Configuration {
         CONFIG.test
     }
 
+    pub fn device_id(use_random: bool) -> String {
+        if use_random {
+            let random_device_id = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
+            debug!("Using a random device_id: {}", random_device_id);
+            random_device_id
+        } else if let Some(device_id) = CONFIG.device_id.clone() {
+            device_id
+        } else {
+            panic!("No device ID provided. Set via config file, env var (DEVICE_ID), or CLI (--device-id)");
+        }
+    }
+
+    pub fn get_id() -> u32 {
+        if let Ok(id) = CONFIG.id.safe_lock(|id| id.next()) {
+            id
+        } else {
+            error!("Request ID mutex corrupt");
+            0
+        }
+    }
+
     // Loads config from CLI, file, or env vars with precedence: CLI > file > env.
     fn load_config() -> Self {
         let args = Args::parse();
@@ -157,6 +187,7 @@ impl Configuration {
                 test: None,
                 listening_addr: None,
                 api_server_port: None,
+                device_id: None,
             });
 
         let token = args
@@ -286,6 +317,11 @@ impl Configuration {
 
         let test = args.test || config.test.unwrap_or(false) || std::env::var("TEST").is_ok();
 
+        let device_id = args
+            .device_id
+            .or(config.device_id)
+            .or_else(|| std::env::var("DEVICE_ID").ok());
+
         Configuration {
             token,
             tp_address,
@@ -299,6 +335,8 @@ impl Configuration {
             test,
             listening_addr,
             api_server_port,
+            device_id,
+            id: Arc::new(Mutex::new(Id::new())),
         }
     }
 }

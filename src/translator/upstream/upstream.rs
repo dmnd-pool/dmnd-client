@@ -33,6 +33,7 @@ use tracing::{error, info, warn};
 
 use super::task_manager::TaskManager;
 use crate::{
+    config::Configuration,
     proxy_state::{ProxyState, UpstreamType},
     shared::utils::AbortOnDrop,
 };
@@ -171,10 +172,11 @@ impl Upstream {
                     .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)
             })
             .map_err(|_e| Error::TranslatorUpstreamMutexPoisoned)??;
-        let user_identity = "ABC".to_string().try_into().expect("Internal error: this operation can not fail because the string ABC can always be converted into Inner");
+        let device_id = Configuration::device_id(false);
+        let user_identity = device_id.try_into().expect("Internal error: this operation can not fail because the string ABC can always be converted into Inner");
         let open_channel = Mining::OpenExtendedMiningChannel(OpenExtendedMiningChannel {
-            request_id: 0, // TODO
-            user_identity, // TODO
+            request_id: Configuration::get_id(),
+            user_identity,
             nominal_hash_rate,
             max_target: u256_max(),
             min_extranonce_size: crate::MIN_EXTRANONCE2_SIZE,

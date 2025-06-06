@@ -9,7 +9,6 @@ use demand_sv2_connection::noise_connection_tokio::Connection;
 use errors::Error;
 use key_utils::Secp256k1PublicKey;
 use noise_sv2::Initiator;
-use rand::distributions::{Alphanumeric, DistString};
 use roles_logic_sv2::{
     common_messages_sv2::{Protocol, SetupConnection, SetupConnectionSuccess},
     parsers::CommonMessages,
@@ -72,7 +71,7 @@ pub async fn connect_pool(
                 Error::SV2Connection(e)
             })?;
     let setup_connection_msg =
-        setup_connection_msg.unwrap_or(get_mining_setup_connection_msg(true));
+        setup_connection_msg.unwrap_or(get_mining_setup_connection_msg(true, false)); //use device_id set by the user
     match mining_setup_connection(
         &mut receiver,
         &mut sender,
@@ -212,7 +211,10 @@ pub async fn mining_setup_connection(
     }
 }
 
-pub fn get_mining_setup_connection_msg(work_selection: bool) -> SetupConnection<'static> {
+pub fn get_mining_setup_connection_msg(
+    work_selection: bool,
+    use_random_device_id: bool,
+) -> SetupConnection<'static> {
     let endpoint_host = "0.0.0.0".to_string().into_bytes().try_into().expect("Internal error: this operation can not fail because the string 0.0.0.0 can always be converted into Inner");
     let vendor = String::new().try_into().expect("Internal error: this operation can not fail because an empty string can always be converted into Inner");
     let hardware_version = String::new().try_into().expect("Internal error: this operation can not fail because an empty string can always be converted into Inner");
@@ -222,7 +224,7 @@ pub fn get_mining_setup_connection_msg(work_selection: bool) -> SetupConnection<
         true => 0b0000_0000_0000_0000_0000_0000_0000_0110,
     };
     let token = Configuration::token().expect("Checked at initialization");
-    let device_id = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
+    let device_id = Configuration::device_id(use_random_device_id);
     let device_id = format!("{}::POOLED::{}", device_id, token)
         .to_string()
         .try_into()

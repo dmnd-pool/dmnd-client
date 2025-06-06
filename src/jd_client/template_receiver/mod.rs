@@ -183,7 +183,7 @@ impl TemplateRx {
             }
         } else {
             Some(AllocateMiningJobTokenSuccess {
-                request_id: 0,
+                request_id: crate::Configuration::get_id(),
                 mining_job_token: vec![0; 32].try_into().expect("Internal error: this operation can not fail because the vec![0; 32] can always be converted into Inner"),
                 coinbase_output_max_additional_size: 100,
                 coinbase_output: miner_coinbase_output.to_vec().try_into().expect("Internal error: this operation can not fail because the Vec can always be converted into Inner"),

@@ -3,7 +3,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::jd_client::job_declarator::{setup_connection::SetupConnectionHandler, JobDeclarator};
+use crate::{
+    config::Configuration,
+    jd_client::job_declarator::{setup_connection::SetupConnectionHandler, JobDeclarator},
+};
 use codec_sv2::{buffer_sv2::Slice, HandshakeRole};
 use demand_share_accounting_ext::parser::PoolExtMessages;
 use demand_sv2_connection::noise_connection_tokio::Connection;
@@ -395,7 +398,9 @@ impl PoolLatency {
                             }
                         };
                     if let Err(e) =
-                        SetupConnectionHandler::setup(&mut receiver, &mut sender, address).await
+                        SetupConnectionHandler::setup(&mut receiver, &mut sender, address, true)
+                            .await
+                    // use random device_id
                     {
                         error!("Failed to setup connection: {:?}", e);
                         return Err(());
@@ -418,6 +423,7 @@ impl PoolLatency {
                         authority_public_key.into_bytes(),
                         upstream,
                         false,
+                        true,
                     )
                     .await
                     {
@@ -445,13 +451,13 @@ impl PoolLatency {
 
 // Helper functions
 fn open_channel() -> Mining<'static> {
+    let device_id = Configuration::device_id(false);
     roles_logic_sv2::parsers::Mining::OpenExtendedMiningChannel(
         roles_logic_sv2::mining_sv2::OpenExtendedMiningChannel {
-            request_id: 0,
+            request_id: Configuration::get_id(),
             max_target: binary_sv2::u256_from_int(u64::MAX),
             min_extranonce_size: 8,
-            user_identity: "ABC"
-                .to_string()
+            user_identity: device_id
                 .try_into()
                 // This can never fail
                 .expect("Failed to convert user identity to string"),
@@ -484,6 +490,6 @@ async fn initialize_mining_connections(
             }
         };
     let setup_connection_msg =
-        setup_connection_msg.unwrap_or(get_mining_setup_connection_msg(true));
+        setup_connection_msg.unwrap_or(get_mining_setup_connection_msg(true, true)); // use random device_id
     Ok((receiver, sender, setup_connection_msg))
 }

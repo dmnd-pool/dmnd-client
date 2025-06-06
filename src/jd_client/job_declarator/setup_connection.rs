@@ -1,6 +1,5 @@
 use crate::config::Configuration;
 use codec_sv2::{StandardEitherFrame, StandardSv2Frame};
-use rand::distributions::{Alphanumeric, DistString};
 use roles_logic_sv2::{
     common_messages_sv2::{Protocol, SetupConnection},
     handlers::common::{ParseUpstreamCommonMessages, SendTo},
@@ -18,7 +17,10 @@ pub type EitherFrame = StandardEitherFrame<Message>;
 pub struct SetupConnectionHandler {}
 
 impl SetupConnectionHandler {
-    fn get_setup_connection_message(proxy_address: SocketAddr) -> SetupConnection<'static> {
+    fn get_setup_connection_message(
+        proxy_address: SocketAddr,
+        use_random_device_id: bool,
+    ) -> SetupConnection<'static> {
         let endpoint_host = proxy_address
             .ip()
             .to_string()
@@ -29,7 +31,7 @@ impl SetupConnectionHandler {
         let hardware_version = String::new().try_into().expect("Internal error: this operation can not fail because empty string can always be converted into Inner");
         let firmware = String::new().try_into().expect("Internal error: this operation can not fail because empty string can always be converted into Inner");
         let token = Configuration::token().expect("Checked at initialization");
-        let device_id = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
+        let device_id = Configuration::device_id(use_random_device_id);
         let device_id = format!("{}::POOLED::{}", device_id, token)
             .to_string()
             .try_into()
@@ -54,8 +56,10 @@ impl SetupConnectionHandler {
         receiver: &mut TReceiver<EitherFrame>,
         sender: &mut TSender<EitherFrame>,
         proxy_address: SocketAddr,
+        use_random_device_id: bool,
     ) -> Result<(), crate::jd_client::error::Error> {
-        let setup_connection = Self::get_setup_connection_message(proxy_address);
+        let setup_connection =
+            Self::get_setup_connection_message(proxy_address, use_random_device_id);
 
         let sv2_frame: StdFrame = PoolMessages::Common(setup_connection.into()).try_into()?;
         let sv2_frame = sv2_frame.into();

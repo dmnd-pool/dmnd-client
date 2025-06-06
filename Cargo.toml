@@ -1,6 +1,6 @@
 [package]
 name = "demand-cli"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 
 [dependencies]
@@ -45,14 +45,12 @@ toml ={ version = "0.8.22" }
 
 demand-share-accounting-ext = { git = "https://github.com/demand-open-source/share-accounting-ext"}
 demand-sv2-connection = {git = "https://github.com/demand-open-source/demand-sv2-connection"}
-roles_logic_sv2 = { git = "https://github.com/demand-open-source/stratum", branch ="ImproveCoinbase", subdirectory = "protocols/v2/roles-logic-sv2"}
-framing_sv2 = { git = "https://github.com/demand-open-source/stratum", branch = "ImproveCoinbase",subdirectory = "protocols/v2/framing_sv2" }
-binary_sv2 = { git = "https://github.com/demand-open-source/stratum", branch ="ImproveCoinbase",subdirectory = "protocols/v2/binary_sv2"}
-noise_sv2 = { git = "https://github.com/demand-open-source/stratum", branch="ImproveCoinbase",subdirectory = "protocols/v2/noise-sv2"}
-codec_sv2 = { git = "https://github.com/demand-open-source/stratum", branch="ImproveCoinbase",subdirectory = "protocols/v2/codec-sv2", features = ["noise_sv2","with_buffer_pool"]}
-sv1_api = { git = "https://github.com/demand-open-source/stratum", branch = "ImproveCoinbase",subdirectory = "protocols/v1"}
-
-
+roles_logic_sv2 = { git = "https://github.com/demand-open-source/stratum", branch ="ImproveCoinbase"}
+framing_sv2 = { git = "https://github.com/demand-open-source/stratum", branch = "ImproveCoinbase"}
+binary_sv2 = { git = "https://github.com/demand-open-source/stratum", branch ="ImproveCoinbase"}
+noise_sv2 = { git = "https://github.com/demand-open-source/stratum", branch="ImproveCoinbase"}
+codec_sv2 = { git = "https://github.com/demand-open-source/stratum", branch="ImproveCoinbase", features = ["noise_sv2","with_buffer_pool"]}
+sv1_api = { git = "https://github.com/demand-open-source/stratum", branch = "ImproveCoinbase"}
 
 
 

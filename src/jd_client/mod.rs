@@ -123,15 +123,22 @@ async fn initialize_jd(
         }
     };
 
-    let (jd, jd_abortable) =
-        match JobDeclarator::new(address, auth_pub_k.into_bytes(), upstream.clone(), true).await {
-            Ok(c) => c,
-            Err(e) => {
-                error!("Failed to intialize Jd: {e}");
-                drop(abortable);
-                return None;
-            }
-        };
+    let (jd, jd_abortable) = match JobDeclarator::new(
+        address,
+        auth_pub_k.into_bytes(),
+        upstream.clone(),
+        true,
+        false,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to intialize Jd: {e}");
+            drop(abortable);
+            return None;
+        }
+    };
 
     if TaskManager::add_job_declarator_task(task_manager.clone(), jd_abortable)
         .await
