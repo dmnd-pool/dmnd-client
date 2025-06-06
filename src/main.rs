@@ -221,7 +221,7 @@ if wants_distribution {
     // Check network connections
     let output = std::process::Command::new("sh")
         .arg("-c")
-        .arg(&format!("ss -tn | grep -E \"({})\"", 
+        .arg(format!("ss -tn | grep -E \"({})\"", 
             pool_address_keys.iter()
                 .map(|(addr, _)| addr.to_string())
                 .collect::<Vec<_>>()
@@ -262,11 +262,9 @@ if wants_distribution {
         // Check if using custom distribution
         let mut is_custom_distribution = false;
         for (_, is_active, percentage) in &detailed_stats {
-    if *is_active {
-        if (percentage - (100.0 / active_count as f32)).abs() > 1.0 {
-            is_custom_distribution = true;
-            break;
-        }
+    if *is_active && (percentage - (100.0 / active_count as f32)).abs() > 1.0 {
+        is_custom_distribution = true;
+        break;
     }
 }
         
@@ -299,7 +297,7 @@ if wants_distribution {
         // Start monitoring task for multi-upstream
         let router_clone = router.clone();
         tokio::spawn(async move {
-            monitor_multi_upstream(router_clone, epsilon).await;
+            monitor_multi_upstream(router_clone).await;
         });
 
         // Keep main thread alive
@@ -328,7 +326,7 @@ async fn initialize_proxy(
         // Start the monitor task in the background
         let router_clone = router.clone();
         tokio::spawn(async move {
-            monitor_multi_upstream(router_clone, epsilon).await;
+            monitor_multi_upstream(router_clone).await;
         });
 
         info!("✅ Hashrate distribution monitor started");
@@ -523,7 +521,7 @@ async fn monitor(
 }
 
 // Consolidated monitoring function for multi-upstream mode
-async fn monitor_multi_upstream(router: Router, epsilon: Duration) {
+async fn monitor_multi_upstream(router: Router) {
     let mut stats_report_counter = 0;
     
     loop {

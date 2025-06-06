@@ -3,11 +3,9 @@ use tokio::sync::Mutex;
 use tracing::{error, info};
 use crate::{
     minin_pool_connection,
-    shared::utils::AbortOnDrop,
     proxy_state::ProxyState,
     HashUnit,
 };
-use demand_share_accounting_ext::parser::PoolExtMessages;
 use key_utils::Secp256k1PublicKey;
 
 #[derive(Clone)]
@@ -159,33 +157,6 @@ pub async fn get_detailed_connection_stats(&self) -> Vec<(String, bool, f32)> {
         })
         .collect()
 }
-
-    pub async fn get_hashrate_distribution(&self) -> Vec<f32> {
-        let upstreams = self.upstreams.lock().await;
-        upstreams
-            .values()
-            .map(|conn| conn.allocated_percentage)
-            .collect()
-    }
-
-    pub async fn get_active_upstream_ids(&self) -> Vec<String> {
-        let upstreams = self.upstreams.lock().await;
-        upstreams
-            .iter()
-            .filter(|(_, conn)| conn.is_active)
-            .map(|(id, _)| id.clone())
-            .collect()
-    }
-
-    // Dummy implementations for sender/receiver if needed
-    pub async fn get_aggregated_receiver(&self) -> Option<tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>> {
-        None
-    }
-
-    pub async fn get_aggregated_sender(&self) -> tokio::sync::mpsc::Sender<PoolExtMessages<'static>> {
-        let (sender, _) = tokio::sync::mpsc::channel(1);
-        sender
-    }
 
     // Add upstream (called from Router)
  pub async fn add_upstream(

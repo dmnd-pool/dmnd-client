@@ -17,7 +17,7 @@ use tokio::{
         watch,
     },
 };
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::{
     minin_pool_connection::{self, get_mining_setup_connection_msg, mining_setup_connection},
@@ -35,7 +35,6 @@ pub struct Router {
     pub keys: Vec<Secp256k1PublicKey>,
     pub current_pool: Option<SocketAddr>,
     pub upstream_manager: Option<MultiUpstreamManager>,
-    pub aggregated_receiver: Option<tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>>,
 
     // Keep these fields for backward compatibility with single upstream mode
     pub auth_pub_k: Secp256k1PublicKey,
@@ -43,11 +42,7 @@ pub struct Router {
     pub timer: Option<Duration>,
     pub latency_tx: tokio::sync::watch::Sender<Option<Duration>>,
     pub latency_rx: tokio::sync::watch::Receiver<Option<Duration>>,
-    // Remove round-robin fields entirely
-    // use_round_robin: bool,
-    // use_parallel: bool, // This will be determined by presence of upstream_manager
-}
-// Remove Clone derive since Receiver can't be cloned
+ }
 impl Clone for Router {
     fn clone(&self) -> Self {
         Self {
@@ -55,7 +50,6 @@ impl Clone for Router {
             keys: self.keys.clone(),
             current_pool: self.current_pool,
             upstream_manager: self.upstream_manager.clone(),
-            aggregated_receiver: None, // Can't clone receiver
             auth_pub_k: self.auth_pub_k,
             setup_connection_msg: self.setup_connection_msg.clone(),
             timer: self.timer,
@@ -82,7 +76,6 @@ impl Router {
             keys: auth_keys,
             current_pool: None,
             upstream_manager: None,
-            aggregated_receiver: None,
             auth_pub_k,
             setup_connection_msg,
             timer,
@@ -110,7 +103,6 @@ impl Router {
             keys,
             current_pool: None,
             upstream_manager: None,
-            aggregated_receiver: None,
             auth_pub_k,
             setup_connection_msg,
             timer,
@@ -132,17 +124,15 @@ impl Router {
         let keys: Vec<Secp256k1PublicKey> = pool_address_keys.iter().map(|(_, key)| *key).collect();
 
         // Create upstream manager only if we want custom distribution
-        let (upstream_manager, aggregated_receiver) = if use_distribution {
-            let manager = MultiUpstreamManager::new(
+         let upstream_manager = if use_distribution {
+            Some(MultiUpstreamManager::new(
                 pool_socket_addresses.clone(),
-                keys[0], // or use a key per upstream if needed
+                keys[0],
                 setup_connection_msg.clone(),
-                timer.clone(),
-            );
-            let receiver = None; // or whatever is appropriate for your design
-            (Some(manager), receiver)
+                timer,
+            ))
         } else {
-            (None, None)
+            None
         };
 
         // Use
@@ -158,36 +148,13 @@ impl Router {
             keys,
             current_pool: None,
             upstream_manager,
-            aggregated_receiver,
             auth_pub_k,
             setup_connection_msg,
             timer,
             latency_tx,
             latency_rx,
         })
-    }
-
-    /// Get aggregated receiver for multi-upstream mode
-    pub async fn get_aggregated_receiver(&self) -> Option<tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>> {
-        if let Some(ref manager) = self.upstream_manager {
-            manager.get_aggregated_receiver().await
-        } else {
-            None
-        }
-    }
-
-    /// Get aggregated sender for multi-upstream mode
-    pub async fn get_aggregated_sender(&self) -> tokio::sync::mpsc::Sender<PoolExtMessages<'static>> {
-        if let Some(ref manager) = self.upstream_manager {
-            manager.get_aggregated_sender().await
-        } else {
-            // Return a dummy sender if no manager exists
-            let (sender, _) = tokio::sync::mpsc::channel(1);
-            sender
-        }
-    }
-
-   
+    }   
 
     /// Get detailed connection statistics
     pub async fn get_detailed_connection_stats(&self) -> Vec<(String, bool, f32)> {
@@ -198,48 +165,12 @@ impl Router {
         }
     }
 
-    /// Get current hashrate distribution
-    pub async fn get_hashrate_distribution(&self) -> Vec<f32> {
-        if let Some(ref manager) = self.upstream_manager {
-            manager.get_hashrate_distribution().await
-        } else {
-            vec![]
-        }
-    }
-
     /// Check if multi-upstream is enabled
     pub fn is_multi_upstream_enabled(&self) -> bool {
         self.upstream_manager.is_some()
     }
 
-    /// Check if the router is using parallel mode - true when MultiUpstreamManager is present
-    pub fn is_parallel_mode(&self) -> bool {
-        self.upstream_manager.is_some()
-    }
-
-    /// Check if the router is using custom distribution mode
-    pub fn is_distribution_mode(&self) -> bool {
-        self.upstream_manager.is_some()
-    }
-
-    /// Get the best pools based on latency and desired count
-    pub async fn select_best_pools(&mut self, desired_count: usize) -> Vec<(SocketAddr, Duration)> {
-        let mut pool_latencies = Vec::new();
-
-        // Get latencies for all pools
-        for &pool_addr in &self.pool_socket_addresses {
-            if let Ok(latency) = self.get_latency(pool_addr).await {
-                pool_latencies.push((pool_addr, latency));
-            }
-        }
-
-        // Sort by latency (lowest first)
-        pool_latencies.sort_by_key(|(_, latency)| *latency);
-
-        // Return the best pools up to desired count
-        pool_latencies.into_iter().take(desired_count).collect()
-    }
-    
+     
     /// Checks for faster upstream and switches to it if found
     pub async fn monitor_upstream(&mut self, epsilon: Duration) -> Option<SocketAddr> {
         // For multi-upstream mode, we don't switch since we use all simultaneously
@@ -451,9 +382,7 @@ impl Router {
         Ok(sum_of_latencies)
     }
 
-    pub fn get_current_upstream(&self) -> Option<std::net::SocketAddr> {
-        self.current_pool
-    }
+  
 
     /// Initialize upstream connections for the manager
     pub async fn initialize_upstream_connections(&mut self) -> Result<(), String> {
@@ -525,38 +454,7 @@ pub async fn set_hashrate_distribution(&self, distribution: Vec<f32>) -> Result<
         }
     }
 
-    /// Get list of active upstream IDs
-    pub async fn get_active_upstreams(&self) -> Vec<String> {
-        if let Some(ref manager) = self.upstream_manager {
-            manager.get_active_upstream_ids().await
-        } else {
-            vec!["upstream-0".to_string()] // Single upstream mode
-        }
-    }
-
-    /// Switch to a specific upstream by ID
-    pub async fn switch_to_upstream(&mut self, upstream_id: &str) -> Result<(), String> {
-        // Find the upstream address by ID
-        if let Ok(idx) = upstream_id
-            .strip_prefix("upstream-")
-            .and_then(|s| s.parse::<usize>().ok())
-            .ok_or("Invalid upstream ID format".to_string())
-        {
-            if idx < self.pool_socket_addresses.len() {
-                // Fix field name
-                let addr = self.pool_socket_addresses[idx]; // Fix field name
-                self.current_pool = Some(addr);
-                info!("Switched to upstream {}: {:?}", upstream_id, addr);
-                Ok(())
-            } else {
-                Err(format!("Upstream index {} out of range", idx))
-            }
-        } else {
-            Err("Invalid upstream ID format".to_string())
-        }
-    }
-
-    /// Select the best pool based on latency
+/// Select the best pool based on latency
     async fn select_pool(&mut self) -> Option<(SocketAddr, Duration)> {
         let mut best_pool = None;
         let mut best_latency = Duration::from_secs(u64::MAX);
@@ -571,50 +469,6 @@ pub async fn set_hashrate_distribution(&self, distribution: Vec<f32>) -> Result<
         }
 
         best_pool.map(|pool| (pool, best_latency))
-    }
-
-    /// Select best pools for hashrate distribution based on latency
-    /// This implements condition 2: choose N best pools from available pools
-    pub async fn select_best_pools_for_distribution(&mut self, desired_count: usize) -> Vec<(SocketAddr, Secp256k1PublicKey)> {
-        // If we have exactly the desired count or fewer, use all
-        if self.pool_socket_addresses.len() <= desired_count {
-            info!("Using all {} available pools (desired: {})", self.pool_socket_addresses.len(), desired_count);
-            return self.pool_socket_addresses
-                .iter()
-                .zip(self.keys.iter())
-                .map(|(&addr, &key)| (addr, key))
-                .collect();
-        }
-
-        // Get latencies for all pools
-        let mut pool_latencies = Vec::new();
-        info!("Testing latencies for {} pools to select {} best", self.pool_socket_addresses.len(), desired_count);
-
-        for (i, &pool_addr) in self.pool_socket_addresses.iter().enumerate() {
-            match self.get_latency(pool_addr).await {
-                Ok(latency) => {
-                    info!("Pool {}: latency {:?}", pool_addr, latency);
-                    pool_latencies.push((pool_addr, self.keys[i], latency));
-                }
-                Err(_) => {
-                    warn!("Failed to get latency for pool {}", pool_addr);
-                }
-            }
-        }
-
-        // Sort by latency (lowest first) and take the best ones
-        pool_latencies.sort_by_key(|(_, _, latency)| *latency);
-        let selected: Vec<(SocketAddr, Secp256k1PublicKey)> = pool_latencies
-            .into_iter()
-            .take(desired_count)
-            .map(|(addr, key, latency)| {
-                info!("Selected pool {} with latency {:?}", addr, latency);
-                (addr, key)
-            })
-            .collect();
-
-        info!("Selected {} pools based on latency", selected.len());
-        selected
     }
 }
 
