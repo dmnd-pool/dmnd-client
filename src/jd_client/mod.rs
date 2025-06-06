@@ -48,8 +48,6 @@ use std::{
     sync::Arc,
 };
 
-use std::net::ToSocketAddrs;
-
 use crate::shared::utils::AbortOnDrop;
 
 pub async fn start(
@@ -111,10 +109,19 @@ async fn initialize_jd(
     let port_tp = parts.next().expect("The passed value for TP address is not valid. Terminating.... TP_ADDRESS should be in this format `127.0.0.1:8442`").parse::<u16>().expect("This operation should not fail because a valid port_tp should always be converted to U16");
 
     let auth_pub_k: Secp256k1PublicKey = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
-    let address = crate::POOL_ADDRESS
-        .to_socket_addrs()
-        .expect("The passed Pool Address is not valid")
-        .next()?;
+    let address = match crate::POOL_ADDRESS.safe_lock(|address| *address) {
+        Ok(Some(address)) => address,
+        Ok(None) => {
+            error!("Pool address is missing");
+            ProxyState::update_inconsistency(Some(1));
+            return None;
+        }
+        Err(e) => {
+            error!("Pool address mutex is poisoned: {e:?}");
+            ProxyState::update_inconsistency(Some(1));
+            return None;
+        }
+    };
 
     let (jd, jd_abortable) =
         match JobDeclarator::new(address, auth_pub_k.into_bytes(), upstream.clone(), true).await {

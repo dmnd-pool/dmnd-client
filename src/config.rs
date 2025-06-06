@@ -1,6 +1,8 @@
 use clap::Parser;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
+use tracing_subscriber::field::delimited::VisitDelimited;
+use core::hash;
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     path::PathBuf,
@@ -8,54 +10,60 @@ use std::{
 use tracing::{error, info, warn};
 
 use crate::{HashUnit, DEFAULT_SV1_HASHPOWER};
+
 lazy_static! {
     pub static ref CONFIG: Configuration = Configuration::load_config();
 }
+
 #[derive(Parser)]
-struct Args {
+pub struct Args {
     #[clap(long)]
-    test: bool,
+    pub test: bool,
     #[clap(long = "d", short = 'd', value_parser = parse_hashrate)]
-    downstream_hashrate: Option<f32>,
+    pub downstream_hashrate: Option<f32>,
     #[clap(long = "loglevel", short = 'l')]
-    loglevel: Option<String>,
+    pub loglevel: Option<String>,
     #[clap(long = "nc", short = 'n')]
-    noise_connection_log: Option<String>,
+    pub noise_connection_log: Option<String>,
     #[clap(long = "delay")]
-    delay: Option<u64>,
+    pub delay: Option<u64>,
     #[clap(long = "interval", short = 'i')]
-    adjustment_interval: Option<u64>,
+    pub adjustment_interval: Option<u64>,
     #[clap(long = "pool", short = 'p', value_delimiter = ',')]
-    pool_addresses: Option<Vec<String>>,
+    pub pool_addresses: Option<Vec<String>>,
     #[clap(long = "test-pool", value_delimiter = ',')]
-    test_pool_addresses: Option<Vec<String>>,
+    pub test_pool_addresses: Option<Vec<String>>,
     #[clap(long)]
-    token: Option<String>,
+    pub token: Option<String>,
     #[clap(long)]
-    tp_address: Option<String>,
+    pub tp_address: Option<String>,
     #[clap(long)]
-    listening_addr: Option<String>,
+    pub listening_addr: Option<String>,
     #[clap(long = "config", short = 'c')]
-    config_file: Option<PathBuf>,
+    pub config_file: Option<PathBuf>,
     #[clap(long = "api-server-port", short = 's')]
-    api_server_port: Option<String>,
+    pub api_server_port: Option<String>,
+    #[clap(long = "hashrate-distribution", value_delimiter = ',')]
+    pub hashrate_distribution: Option<Vec<f32>>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct ConfigFile {
-    token: Option<String>,
-    tp_address: Option<String>,
-    pool_addresses: Option<Vec<String>>,
-    test_pool_addresses: Option<Vec<String>>,
-    interval: Option<u64>,
-    delay: Option<u64>,
-    downstream_hashrate: Option<String>,
-    loglevel: Option<String>,
-    nc_loglevel: Option<String>,
-    test: Option<bool>,
-    listening_addr: Option<String>,
-    api_server_port: Option<String>,
+pub struct ConfigFile {
+    pub token: Option<String>,
+    pub tp_address: Option<String>,
+    pub pool_addresses: Option<Vec<String>>,
+    pub test_pool_addresses: Option<Vec<String>>,
+    pub interval: Option<u64>,
+    pub delay: Option<u64>,
+    pub downstream_hashrate: Option<String>,
+    pub loglevel: Option<String>,
+    pub nc_loglevel: Option<String>,
+    pub test: Option<bool>,
+    pub listening_addr: Option<String>,
+    pub api_server_port: Option<String>,
+    pub hashrate_distribution: Option<Vec<f32>>, 
 }
+
 
 pub struct Configuration {
     token: Option<String>,
@@ -70,8 +78,11 @@ pub struct Configuration {
     test: bool,
     listening_addr: Option<String>,
     api_server_port: String,
+    hashrate_distribution: Option<Vec<f32>>,
 }
+
 impl Configuration {
+  
     pub fn token() -> Option<String> {
         CONFIG.token.clone()
     }
@@ -82,7 +93,7 @@ impl Configuration {
 
     pub fn pool_address() -> Option<Vec<SocketAddr>> {
         if CONFIG.test {
-            CONFIG.test_pool_addresses.clone() // Return test pool addresses in test mode
+            CONFIG.test_pool_addresses.clone()
         } else {
             CONFIG.pool_addresses.clone()
         }
@@ -103,6 +114,7 @@ impl Configuration {
     pub fn downstream_listening_addr() -> Option<String> {
         CONFIG.listening_addr.clone()
     }
+
     pub fn api_server_port() -> String {
         CONFIG.api_server_port.clone()
     }
@@ -137,10 +149,19 @@ impl Configuration {
         CONFIG.test
     }
 
+    pub fn hashrate_distribution() -> Option<Vec<f32>> {
+        CONFIG.hashrate_distribution.clone()
+    }
+
+
+    pub fn wants_hashrate_distribution() -> bool {
+        CONFIG.hashrate_distribution.is_some()
+    }
+    
     // Loads config from CLI, file, or env vars with precedence: CLI > file > env.
     fn load_config() -> Self {
         let args = Args::parse();
-        let config_path: PathBuf = args.config_file.unwrap_or("config.toml".into());
+        let config_path: PathBuf = args.config_file.clone().unwrap_or("config.toml".into());
         let config: ConfigFile = std::fs::read_to_string(&config_path)
             .ok()
             .and_then(|content| toml::from_str(&content).ok())
@@ -157,6 +178,7 @@ impl Configuration {
                 test: None,
                 listening_addr: None,
                 api_server_port: None,
+                hashrate_distribution: None, 
             });
 
         let token = args
@@ -285,11 +307,23 @@ impl Configuration {
             .unwrap_or("off".to_string());
 
         let test = args.test || config.test.unwrap_or(false) || std::env::var("TEST").is_ok();
-
+let hashrate_distribution = args
+            .hashrate_distribution
+            .or(config.hashrate_distribution)
+            .or_else(|| {
+                std::env::var("HASHRATE_DISTRIBUTION")
+                    .ok()
+                    .and_then(|s| {
+                        s.split(',')
+                            .map(|s| s.trim().parse::<f32>().ok())
+                            .collect::<Option<Vec<f32>>>()
+                    })
+            });
+      
         Configuration {
             token,
             tp_address,
-            pool_addresses,
+             pool_addresses,
             test_pool_addresses,
             interval,
             delay,
@@ -299,12 +333,13 @@ impl Configuration {
             test,
             listening_addr,
             api_server_port,
-        }
+            hashrate_distribution,
+         }
     }
 }
 
 /// Parses a hashrate string (e.g., "10T", "2.5P", "500E") into an f32 value in h/s.
-fn parse_hashrate(hashrate_str: &str) -> Result<f32, String> {
+pub fn parse_hashrate(hashrate_str: &str) -> Result<f32, String> {
     let hashrate_str = hashrate_str.trim();
     if hashrate_str.is_empty() {
         return Err("Hashrate cannot be empty. Expected format: '<number><unit>' (e.g., '10T', '2.5P', '5E'".to_string());

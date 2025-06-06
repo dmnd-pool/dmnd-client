@@ -2,13 +2,12 @@
 use jemallocator::Jemalloc;
 use router::Router;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use clap::{ArgAction, Parser};
-use serde::{Deserialize, Serialize};
-use std::path::Path;
 use crate::shared::utils::AbortOnDrop; 
+use crate::config::{Configuration, parse_hashrate}; // Import from config module
+
+#[cfg(not(target_os = "windows"))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
-
 
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
@@ -16,8 +15,8 @@ use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
 use std::{net::SocketAddr, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{error, info, warn};
-mod api;
 
+mod api;
 mod config;
 mod ingress;
 pub mod jd_client;
@@ -46,112 +45,25 @@ const TEST_AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:32767";
 
 lazy_static! {
-    static ref ARGS: Args = Args::parse();
-    // Remove or comment out the old TOKEN line:
-    // static ref TOKEN: String = std::env::var("TOKEN").expect("Missing TOKEN environment variable");
-
-    // Other existing lazy_static variables...
     static ref SV1_DOWN_LISTEN_ADDR: String =
-        std::env::var("SV1_DOWN_LISTEN_ADDR").unwrap_or(DEFAULT_LISTEN_ADDRESS.to_string());
+        Configuration::downstream_listening_addr().unwrap_or(DEFAULT_LISTEN_ADDRESS.to_string());
     static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<String>> =
-        roles_logic_sv2::utils::Mutex::new(None); // We'll set this from config
-    static ref EXPECTED_SV1_HASHPOWER: f32 = {
-        if let Some(value) = ARGS.downstream_hashrate {
-            value
-        } else {
-            let env_var = std::env::var("EXPECTED_SV1_HASHPOWER").ok();
-            env_var.and_then(|s| parse_hashrate(&s).ok())
-                .unwrap_or(DEFAULT_SV1_HASHPOWER)
-        }
-    };
-}
-
-lazy_static! {
-    pub static ref POOL_ADDRESS: &'static str = if ARGS.test {
-        TEST_POOL_ADDRESS
-    } else {
-        MAIN_POOL_ADDRESS
-    };
-    pub static ref AUTH_PUB_KEY: &'static str = if ARGS.test {
+        roles_logic_sv2::utils::Mutex::new(Configuration::tp_address());
+    static ref POOL_ADDRESS: roles_logic_sv2::utils::Mutex<Option<SocketAddr>> =
+        roles_logic_sv2::utils::Mutex::new(None); // Connected pool address
+    static ref EXPECTED_SV1_HASHPOWER: f32 = Configuration::downstream_hashrate();
+    static ref API_SERVER_PORT: String = Configuration::api_server_port();
+    static ref AUTH_PUB_KEY: &'static str = if Configuration::test() {
         TEST_AUTH_PUB_KEY
     } else {
         MAIN_AUTH_PUB_KEY
     };
 }
 
-#[derive(Parser, Debug)]
-#[clap(author, version, about, long_about = None)]
-pub struct Args {
-    // Use test
-    #[clap(long)]
-    test: bool,
-    #[clap(long ="d", short ='d', value_parser = parse_hashrate)]
-    downstream_hashrate: Option<f32>,
-    #[clap(long = "loglevel", short = 'l', default_value = "info")]
-    loglevel: String,
-    #[clap(long = "nc", short = 'n', default_value = "off")]
-    noise_connection_log: String,
-    #[clap(long = "delay", default_value = "0")]
-    delay: u64,
-    #[clap(long = "interval", short = 'i', default_value = "120000")]
-    adjustment_interval: u64,
-    // Add the missing upstream field
-    #[clap(long = "upstream", short = 'u', action = ArgAction::Append)]
-    upstream: Option<Vec<String>>,
-    #[clap(long = "config", short = 'c')]
-    pub config_file: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct Config {
-    pub token: String,
-    pub pool_addresses: Vec<String>,
-    pub tp_address: Option<String>,
-    pub interval: Option<u64>,
-    pub delay: Option<u64>,
-    pub downstream_hashrate: Option<String>,
-    pub loglevel: Option<String>,
-    pub nc_loglevel: Option<String>,
-    pub test: Option<bool>,
-    pub hashrate_distribution: Option<Vec<f32>>, // New field for custom distribution
-}
-
-impl Config {
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
-        let contents = std::fs::read_to_string(path)?;
-        let config: Config = toml::from_str(&contents)?;
-        Ok(config)
-    }
-     pub fn wants_hashrate_distribution(&self) -> bool {
-        self.hashrate_distribution.is_some()
-    }
-}
-
 #[tokio::main]
 async fn main() {
-    let args = Args::parse();
-
-    let log_level = match args.loglevel.to_lowercase().as_str() {
-        "trace" | "debug" | "info" | "warn" | "error" => args.loglevel,
-        _ => {
-            error!(
-                "Invalid log level '{}'. Defaulting to 'info'.",
-                args.loglevel
-            );
-            "info".to_string()
-        }
-    };
-
-    let noise_connection_log_level = match args.noise_connection_log.as_str() {
-        "trace" | "debug" | "info" | "warn" | "error" => args.noise_connection_log,
-        _ => {
-            error!(
-                "Invalid log level for noise_connection '{}' Defaulting to 'off'.",
-                args.noise_connection_log
-            );
-            "off".to_string()
-        }
-    };
+    let log_level = Configuration::loglevel();
+    let noise_connection_log_level = Configuration::nc_loglevel();
 
     //Disable noise_connection error (for now) because:
     // 1. It produce logs that are not very user friendly and also bloat the logs
@@ -163,87 +75,53 @@ async fn main() {
             log_level, noise_connection_log_level
         )))
         .init();
-    // std::env::var("TOKEN").expect("Missing TOKEN environment variable");
 
-    // Load configuration and get pool addresses
-    let config = if let Some(config_path) = &ARGS.config_file {
-        match Config::from_file(config_path) {
-            Ok(config) => Some(config),
-            Err(e) => {
-                error!("Failed to load config file: {}", e);
-                std::process::exit(1);
-            }
-        }
-    } else {
-        None
-    };
-    
-    // Set the total hashrate from config BEFORE creating router
-    if let Some(ref config) = config {
-        if let Some(ref hashrate_str) = config.downstream_hashrate {
-            match parse_hashrate(hashrate_str) {
-                Ok(hashrate) => {
-                    ProxyState::set_total_hashrate(hashrate);
-                    info!("Set total hashrate to: {}", HashUnit::format_value(hashrate));
-                }
-                Err(e) => {
-                    error!("Failed to parse downstream_hashrate: {}", e);
-                }
-            }
-        }
-    } else if let Some(hashrate) = ARGS.downstream_hashrate {
-        ProxyState::set_total_hashrate(hashrate);
-        info!("Set total hashrate from args to: {}", HashUnit::format_value(hashrate));
+    Configuration::token().expect("TOKEN is not set");
+
+    if Configuration::test() {
+        info!("Connecting to test endpoint...");
     }
 
-    // Get pool addresses with auth keys
-    let pool_address_keys = if let Some(ref config) = config {
-        config.pool_addresses.iter().map(|addr_str| {
-            let addr = addr_str.parse::<SocketAddr>()
-                .unwrap_or_else(|_| {
-                    error!("Invalid pool address: {}", addr_str);
-                    std::process::exit(1);
-                });
-            
-            let auth_key: Secp256k1PublicKey = if config.test.unwrap_or(false) {
-                TEST_AUTH_PUB_KEY.parse().expect("Invalid test public key")
-            } else {
-                MAIN_AUTH_PUB_KEY.parse().expect("Invalid main public key")
-            };
-            
-            (addr, auth_key)
-        }).collect()
-    } else {
-        // Fallback to single upstream
-        let addr = if ARGS.test {
-            TEST_POOL_ADDRESS.parse::<SocketAddr>().expect("Invalid test address")
-        } else {
-            MAIN_POOL_ADDRESS.parse::<SocketAddr>().expect("Invalid main address")
-        };
-        
-        let auth_key = if ARGS.test {
-            TEST_AUTH_PUB_KEY.parse().expect("Invalid test public key")
-        } else {
-            MAIN_AUTH_PUB_KEY.parse().expect("Invalid main public key")
-        };
-        
-        vec![(addr, auth_key)]
-    };
+    let auth_pub_k: Secp256k1PublicKey = AUTH_PUB_KEY.parse().expect("Invalid public key");
 
-    // Determine if we want hashrate distribution
-    let wants_distribution = config.as_ref()
-        .map(|c| c.wants_hashrate_distribution())
-        .unwrap_or(false);
+    // Use Configuration methods consistently
+    let pool_addresses = Configuration::pool_address()
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| {
+            if Configuration::test() {
+                panic!("Test pool address is missing");
+            } else {
+                panic!("Pool address is missing");
+            }
+        });
+
+    // Set downstream hashrate using Configuration pattern
+    let downstream_hashrate = Configuration::downstream_hashrate();
+    ProxyState::set_downstream_hashrate(downstream_hashrate);
+    info!("Set downstream hashrate to: {}", HashUnit::format_value(downstream_hashrate));
+
+    // Get pool addresses with auth keys using Configuration pattern
+    let pool_address_keys: Vec<(SocketAddr, Secp256k1PublicKey)> = pool_addresses.iter().map(|&addr| {
+        (addr, auth_pub_k)
+    }).collect();
+
+    // Determine hashrate distribution using Configuration pattern
+   let wants_distribution = Configuration::wants_hashrate_distribution();
+
+if wants_distribution {
+    info!("Hashrate distribution is enabled");
+} else {
+    info!("Hashrate distribution is disabled");
+}
 
     // Create router based on configuration
     let mut router = if wants_distribution {
-        // User wants hashrate distribution - use multi-upstream mode
-        let pool_address_keys_clone = pool_address_keys.clone();
+        // Multi-upstream with distribution
         match Router::new_multi(
-            pool_address_keys_clone,
-            None, // setup_connection_msg
-            None, // timer
-            true, // use_distribution = true
+            pool_address_keys.clone(),
+            None,
+            None,
+            true,
         ).await {
             Ok(router) => {
                 info!("Created multi-upstream router with {} upstreams for hashrate distribution", 
@@ -256,115 +134,83 @@ async fn main() {
             }
         }
     } else if pool_address_keys.len() > 1 {
-        // Multiple pools but no distribution specified - use latency-based selection (single upstream mode)
-        info!("Created latency-based router with {} pools (will select best latency)", pool_address_keys.len());
-        Router::new_with_keys(
-            pool_address_keys.clone(),
-            None, // setup_connection_msg
-            None, // timer
-        )
+        info!("Created latency-based router with {} pools", pool_address_keys.len());
+        Router::new_with_keys(pool_address_keys.clone(), None, None)
     } else {
-        // Single pool - use single upstream mode
         let (addr, auth_key) = pool_address_keys[0];
         info!("Created single upstream router");
-        Router::new(
-            vec![addr],
-            auth_key,
-            None, // setup_connection_msg
-            None, // timer
-        )
+        Router::new(vec![addr], auth_key, None, None)
     };
 
-    // Add this right after router creation, before the if statements:
     let epsilon = Duration::from_millis(10);
 
     // Handle the three different scenarios
+  
     if wants_distribution {
         info!("=== HASHRATE DISTRIBUTION MODE ===");
         
-        // Get the desired distribution
-        let distribution = config.as_ref()
-            .and_then(|c| c.hashrate_distribution.clone())
+        // Get the distribution from config
+        let distribution = Configuration::hashrate_distribution()
             .unwrap_or_else(|| {
-                // Default equal distribution if parallel flag is set but no custom distribution
                 let count = pool_address_keys.len();
                 let equal_percentage = 100.0 / count as f32;
                 vec![equal_percentage; count]
             });
-            println!("Using hashrate distribution: {:?}", distribution);
 
-        let desired_pool_count = distribution.len();
-        info!("Desired pool count for distribution: {}", desired_pool_count);
-
-        // Select best pools based on latency (implements condition 2 and 3)
-        let selected_pools = if pool_address_keys.len() <= desired_pool_count {
-            // Condition 3: Use all available pools (skip latency testing)
-            info!("Using all {} available pools (condition 3)", pool_address_keys.len());
-            pool_address_keys.clone()
-        } else {
-            // Condition 2: Select best pools based on latency
-            info!("Selecting {} best pools from {} available (condition 2)", desired_pool_count, pool_address_keys.len());
-            
-            // Create temporary router for latency testing
-            let mut temp_router = Router::new_with_keys(
-                pool_address_keys.clone(),
-                None,
-                None,
-            );
-            
-            temp_router.select_best_pools_for_distribution(desired_pool_count).await
-        };
-
-        // Now create the final multi-upstream router with selected pools
-        router = match Router::new_multi(
-            selected_pools,
-            None,
-            None,
-            true,
-        ).await {
-            Ok(router) => {
-                info!("Created distribution router with {} selected pools", desired_pool_count);
-                router
-            }
-            Err(e) => {
-                error!("Failed to create distribution router: {}", e);
-                std::process::exit(1);
-            }
-        };
+        info!("Using hashrate distribution: {:?}", distribution);
 
         // Initialize upstream connections
         if let Err(e) = router.initialize_upstream_connections().await {
             error!("Failed to initialize upstream connections: {}", e);
             std::process::exit(1);
         }
+        
         // Set the distribution
         if let Err(e) = router.set_hashrate_distribution(distribution.clone()).await {
             error!("Failed to set hashrate distribution: {}", e);
             std::process::exit(1);
         }
-        info!("Set hashrate distribution: {:?}", distribution);
 
-        
-        info!("🔧 About to call initialize_proxy");
+        info!("Starting proxy with hashrate distribution...");
         initialize_proxy(&mut router, None, epsilon).await;
+
     } else if pool_address_keys.len() > 1 {
-        info!("=== LATENCY-BASED SELECTION MODE (Condition 1) ===");
-        info!("Multiple pools available, will select best latency");
+        info!("=== LATENCY-BASED SELECTION MODE ===");
+        info!("Testing pool latencies and selecting best pool...");
         
-        // Actually select the best latency pool
+        // Test latency and select best pool
         let best_upstream = router.select_pool_connect().await;
-        if best_upstream.is_some() {
-            info!("Selected best upstream: {:?}", best_upstream);
+        
+        if let Some(ref upstream) = best_upstream {
+            info!("Selected best upstream: {:?}", upstream);
+        } else {
+            error!("Failed to connect to any upstream pool");
+            std::process::exit(1);
         }
+
+        info!("Starting proxy with latency-based selection...");
         initialize_proxy(&mut router, best_upstream, epsilon).await;
+
     } else {
         info!("=== SINGLE UPSTREAM MODE ===");
         
-        // Single pool mode
+        // Connect to single pool
         let best_upstream = router.select_pool_connect().await;
+        
+        if let Some(ref upstream) = best_upstream {
+            info!("Connected to single upstream: {:?}", upstream);
+        } else {
+            error!("Failed to connect to upstream pool");
+            std::process::exit(1);
+        }
+
+        info!("Starting proxy with single upstream...");
         initialize_proxy(&mut router, best_upstream, epsilon).await;
     }
 
+    // This line should never be reached since initialize_proxy runs forever
+    info!("Proxy stopped unexpectedly");
+    // This code should never be reached because initialize_proxy runs forever
     info!("Proxy initialization complete");
 
     // Wait a moment for connections to establish
@@ -376,14 +222,24 @@ async fn main() {
     info!("🔍 VERIFYING NETWORK CONNECTIONS:");
 
     // Check network connections
-    let output = std::process::Command::new("ss").args(&["-tn"]).output();
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&format!("ss -tn | grep -E \"({})\"", 
+            pool_address_keys.iter()
+                .map(|(addr, _)| addr.to_string())
+                .collect::<Vec<_>>()
+                .join("|")
+        ))
+        .output();
 
     if let Ok(output) = output {
         let connections = String::from_utf8_lossy(&output.stdout);
         let pool_connections: Vec<&str> = connections
             .lines()
             .filter(|line| {
-                line.contains("18.193.252.132:2000") || line.contains("3.74.36.119:2000")
+                pool_address_keys.iter().any(|(addr, _)| {
+                    line.contains(&addr.to_string())
+                })
             })
             .collect();
 
@@ -394,13 +250,13 @@ async fn main() {
     }
     
     // Show hashrate distribution
-    let total_hashrate = ProxyState::get_total_hashrate();
+    let downstream_hashrate = ProxyState::get_downstream_hashrate();
     let detailed_stats = router.get_detailed_connection_stats().await;
 
     info!("🚀 === INITIAL HASHRATE DISTRIBUTION ===");
     info!(
-        "🔋 Total configured hashrate: {}",
-        HashUnit::format_value(total_hashrate)
+        "🔋 Total configured downstream hashrate: {}",
+        HashUnit::format_value(downstream_hashrate)
     );
     
     let active_count = detailed_stats.iter().filter(|(_, is_active, _)| *is_active).count();
@@ -427,16 +283,16 @@ async fn main() {
       for (upstream_id, is_active, percentage) in detailed_stats {
     if is_active {
         // Calculate actual hashrate from percentage
-        let actual_hashrate = (percentage / 100.0) * total_hashrate;
+        let actual_hashrate = (percentage / 100.0) * downstream_hashrate;
         info!(
-            "  ✅ {}: allocated {} ({:.1}% of total)",
+            "  ✅ {}: allocated {} ({:.1}% of downstream)",
             upstream_id,
             HashUnit::format_value(actual_hashrate),
             percentage
         );
     } else {
         info!(
-            "  ❌ {}: 0.00T (INACTIVE - 0.0% of total)",
+            "  ❌ {}: 0.00T (INACTIVE - 0.0% of downstream)",
             upstream_id
         );
     }
@@ -456,6 +312,7 @@ async fn main() {
         }
     }
 }
+
 
 async fn initialize_proxy(
     router: &mut Router,
@@ -681,43 +538,32 @@ async fn monitor_multi_upstream(router: Router, epsilon: Duration) {
             stats_report_counter = 0;
             
             let (total_count, active_count) = router.get_upstream_counts().await;
-            let total_hashrate = ProxyState::get_total_hashrate();
+            let downstream_hashrate = ProxyState::get_downstream_hashrate();
             
             info!("🚀 === MULTI-UPSTREAM HASHRATE REPORT ===");
             info!("📊 Total upstreams: {}, Active: {}", total_count, active_count);
-            info!("🔋 Total hashrate: {}", HashUnit::format_value(total_hashrate));
+            info!("🔋 Downstream hashrate: {}", HashUnit::format_value(downstream_hashrate));
             
             if active_count > 0 {
                 let detailed_stats = router.get_detailed_connection_stats().await;
-                let distribution = router.get_hashrate_distribution().await;
                 
-                // Check if using custom distribution
-                let is_custom = !distribution.is_empty() && distribution.len() == detailed_stats.len();
-                
-                if is_custom {
-                    info!("🎯 Distribution mode: Custom");
-                    info!("📈 Distribution percentages: {:?}", distribution);
-                } else {
-                    info!("⚖️  Distribution mode: Equal (automatic)");
+                for (upstream_id, is_active, percentage) in detailed_stats {
+                    if is_active {
+                        // Calculate actual hashrate from percentage
+                        let allocated_hashrate = (percentage / 100.0) * downstream_hashrate;
+                        info!(
+                            "  ✅ {}: allocated {} ({:.1}% of downstream)",
+                            upstream_id,
+                            HashUnit::format_value(allocated_hashrate),
+                            percentage
+                        );
+                    } else {
+                        info!(
+                            "  ❌ {}: 0.00T (INACTIVE - 0.0% of downstream)",
+                            upstream_id
+                        );
+                    }
                 }
-
-               for (upstream_id, is_active, percentage) in detailed_stats {
-    if is_active {
-        // Calculate actual hashrate from percentage
-        let allocated_hashrate = (percentage / 100.0) * total_hashrate;
-        info!(
-            "  ✅ {}: allocated {} ({:.1}% of total)",
-            upstream_id,
-            HashUnit::format_value(allocated_hashrate),
-            percentage
-        );
-    } else {
-        info!(
-            "  ❌ {}: 0.00T (INACTIVE - 0.0% of total)",
-            upstream_id
-        );
-    }
-}
             } else {
                 warn!("❌ No active upstream connections!");
             }
@@ -731,38 +577,6 @@ async fn monitor_multi_upstream(router: Router, epsilon: Duration) {
             break;
         }
     }
-}
-/// Parses a hashrate string (e.g., "10T", "2.5P", "500E") into an f32 value in h/s.
-fn parse_hashrate(hashrate_str: &str) -> Result<f32, String> {
-    let hashrate_str = hashrate_str.trim();
-    if hashrate_str.is_empty() {
-        return Err("Hashrate cannot be empty. Expected format: '<number><unit>' (e.g., '10T', '2.5P', '5E'".to_string());
-    }
-
-    let unit = hashrate_str.chars().last().unwrap_or(' ').to_string();
-    let num = &hashrate_str[..hashrate_str.len().saturating_sub(1)];
-
-    let num: f32 = num.parse().map_err(|_| {
-        format!(
-            "Invalid number '{}'. Expected format: '<number><unit>' (e.g., '10T', '2.5P', '5E')",
-            num
-        )
-    })?;
-
-    let multiplier = HashUnit::from_str(&unit)
-        .map(|unit| unit.multiplier())
-        .ok_or_else(|| format!(
-            "Invalid unit '{}'. Expected 'T' (Terahash), 'P' (Petahash), or 'E' (Exahash). Example: '10T', '2.5P', '5E'",
-            unit
-        ))?;
-
-    let hashrate = num * multiplier;
-
-    if hashrate.is_infinite() || hashrate.is_nan() {
-        return Err("Hashrate too large or invalid".to_string());
-    }
-
-    Ok(hashrate)
 }
 
 pub enum Reconnect {

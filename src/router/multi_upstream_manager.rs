@@ -122,7 +122,7 @@ impl MultiUpstreamManager {
         println!("calling set_hashrate_distribution in multi manager with: {:?}", distribution);
         
         let mut upstreams = self.upstreams.lock().await;
-        let total_hashrate = ProxyState::get_total_hashrate() as f64;
+        let total_hashrate = ProxyState::get_downstream_hashrate() as f64;
         
         println!("Total hashrate: {}", HashUnit::format_value(total_hashrate as f32));
         

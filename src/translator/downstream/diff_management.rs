@@ -29,7 +29,7 @@ impl Downstream {
         let (message, _) = diff_to_sv1_message(diff as f64)?;
         Downstream::send_message_downstream(self_.clone(), message.clone()).await;
 
-        let total_delay = Duration::from_secs(crate::ARGS.delay);
+        let total_delay = Duration::from_secs(crate::Configuration::delay());
         let repeat_interval = Duration::from_secs(30);
 
         let self_clone = self_.clone();
@@ -379,9 +379,7 @@ mod test {
         }
 
         let elapsed_secs = start_time.elapsed().as_secs_f64();
-        let hashrate = hashes as f64 / elapsed_secs;
-        let nominal_hash_rate = hashrate;
-        nominal_hash_rate
+        hashes as f64 / elapsed_secs
     }
 
     fn hash(share: &mut [u8; 80]) -> Target {

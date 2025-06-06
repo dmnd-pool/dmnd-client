@@ -1,6 +1,6 @@
 token="UR01TMkZv6Vs5zbwr0t6"
-pool_addresses=["18.193.252.132:2000","3.74.36.119:2000"]
-tp_address = "127.0.0.1:8442"
+test_pool_addresses=["3.74.36.119:2000","18.193.252.132:2000"]
+#tp_address = "127.0.0.1:8442"
 interval = 120_000
 delay = 540
 downstream_hashrate = "500T"
@@ -9,4 +9,4 @@ nc_loglevel = "off"
 test = true
 
 # Uncomment this line to enable hashrate distribution
-#hashrate_distribution = [30.0, 70.0]
+hashrate_distribution = [70.0, 30.0]
