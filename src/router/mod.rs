@@ -31,7 +31,7 @@ pub use multi_upstream_manager::MultiUpstreamManager;
 
 /// Router handles connection to Multiple upstreams.
 pub struct Router {
-    pub pool_socket_addresses: Vec<SocketAddr>,
+    pub  pool_addresses: Vec<SocketAddr>,
     pub keys: Vec<Secp256k1PublicKey>,
     pub current_pool: Option<SocketAddr>,
     pub upstream_manager: Option<MultiUpstreamManager>,
@@ -46,7 +46,7 @@ pub struct Router {
 impl Clone for Router {
     fn clone(&self) -> Self {
         Self {
-            pool_socket_addresses: self.pool_socket_addresses.clone(),
+             pool_addresses: self. pool_addresses.clone(),
             keys: self.keys.clone(),
             current_pool: self.current_pool,
             upstream_manager: self.upstream_manager.clone(),
@@ -72,7 +72,7 @@ impl Router {
         let auth_keys = vec![auth_pub_k; pool_addresses.len()];
 
         Self {
-            pool_socket_addresses: pool_addresses,
+             pool_addresses: pool_addresses,
             keys: auth_keys,
             current_pool: None,
             upstream_manager: None,
@@ -91,7 +91,7 @@ impl Router {
         setup_connection_msg: Option<SetupConnection<'static>>,
         timer: Option<Duration>,
     ) -> Self {
-        let pool_socket_addresses: Vec<SocketAddr> =
+        let  pool_addresses: Vec<SocketAddr> =
             pool_address_keys.iter().map(|(addr, _)| *addr).collect();
         let keys: Vec<Secp256k1PublicKey> = pool_address_keys.iter().map(|(_, key)| *key).collect();
         let auth_pub_k = keys[0]; // Use first key as primary
@@ -99,7 +99,7 @@ impl Router {
         let (latency_tx, latency_rx) = watch::channel(None);
 
         Self {
-            pool_socket_addresses,
+             pool_addresses,
             keys,
             current_pool: None,
             upstream_manager: None,
@@ -119,14 +119,14 @@ impl Router {
         timer: Option<Duration>,
         use_distribution: bool, // Changed from use_parallel to use_distribution
     ) -> Result<Self, &'static str> {
-        let pool_socket_addresses: Vec<SocketAddr> =
+        let  pool_addresses: Vec<SocketAddr> =
             pool_address_keys.iter().map(|(addr, _)| *addr).collect();
         let keys: Vec<Secp256k1PublicKey> = pool_address_keys.iter().map(|(_, key)| *key).collect();
 
         // Create upstream manager only if we want custom distribution
          let upstream_manager = if use_distribution {
             Some(MultiUpstreamManager::new(
-                pool_socket_addresses.clone(),
+                 pool_addresses.clone(),
                 keys[0],
                 setup_connection_msg.clone(),
                 timer,
@@ -144,7 +144,7 @@ impl Router {
         let (latency_tx, latency_rx) = watch::channel(None);
 
         Ok(Self {
-            pool_socket_addresses,
+             pool_addresses,
             keys,
             current_pool: None,
             upstream_manager,
@@ -172,10 +172,10 @@ impl Router {
 
      
     /// Checks for faster upstream and switches to it if found
-    pub async fn monitor_upstream(&mut self, epsilon: Duration) -> Option<SocketAddr> {
+     pub async fn monitor_upstream(&mut self, epsilon: Duration) -> Option<SocketAddr> {
         // For multi-upstream mode, we don't switch since we use all simultaneously
         if self.is_multi_upstream_enabled() {
-            // In parallel mode, we don't need to switch upstreams
+            // In distribution mode, we don't need to switch upstreams
             // All upstreams are used simultaneously
             return None;
         }
@@ -190,29 +190,52 @@ impl Router {
         None
     }
 
-    /// Select the best pool for monitoring (checks latency differences)
-    async fn select_pool_monitor(&self, epsilon: Duration) -> Option<SocketAddr> {
-        if let Some(current_pool) = self.current_pool {
-            if let Ok(current_latency) = self.get_latency(current_pool).await {
-                // Check if there's a significantly better pool
-                for &pool_addr in &self.pool_socket_addresses {
-                    if pool_addr != current_pool {
-                        if let Ok(pool_latency) = self.get_latency(pool_addr).await {
-                            // Switch if the new pool is significantly faster
-                            if current_latency > pool_latency + epsilon {
-                                info!(
-                                    "Found faster upstream: {:?} (latency: {:?}) vs current {:?} (latency: {:?})",
-                                    pool_addr, pool_latency, current_pool, current_latency
-                                );
-                                return Some(pool_addr);
-                            }
-                        }
-                    }
+    /// Internal function to select pool with the least latency.
+    async fn select_pool(&self) -> Option<(SocketAddr, Duration)> {
+        let mut best_pool = None;
+        let mut least_latency = Duration::MAX;
+
+        for &pool_addr in &self.pool_addresses {
+            if let Ok(latency) = self.get_latency(pool_addr).await {
+                if latency < least_latency {
+                    least_latency = latency;
+                    best_pool = Some(pool_addr)
                 }
+            }
+        }
+
+        best_pool.map(|pool| (pool, least_latency))
+    }
+    /// Select the best pool for monitoring
+    async fn select_pool_monitor(&self, epsilon: Duration) -> Option<SocketAddr> {
+        if let Some((best_pool, best_pool_latency)) = self.select_pool().await {
+            if let Some(current_pool) = self.current_pool {
+                if best_pool == current_pool {
+                    return None;
+                }
+                let current_latency = match self.get_latency(current_pool).await {
+                    Ok(latency) => latency,
+                    Err(e) => {
+                        error!("Failed to get latency: {:?}", e);
+                        return Some(best_pool);                    }
+                };
+                // saturating_sub is used to avoid panic on negative duration result
+                if best_pool_latency < current_latency.saturating_sub(epsilon) {
+                    info!(
+                        "Found faster pool: {:?} with latency {:?}",
+                        best_pool, best_pool_latency
+                    );
+                    return Some(best_pool);
+                } else {
+                    return None;
+                }
+            } else {
+                return Some(best_pool);
             }
         }
         None
     }
+
 
     /// Select the best pool for connection
     pub async fn select_pool_connect(&mut self) -> Option<SocketAddr> {
@@ -258,7 +281,7 @@ impl Router {
 
         // Find the matching auth key for this address - fix field name
         let auth_key =
-            if let Some(index) = self.pool_socket_addresses.iter().position(|&a| a == pool) {
+            if let Some(index) = self. pool_addresses.iter().position(|&a| a == pool) {
                 self.keys[index]
             } else {
                 self.auth_pub_k
@@ -276,7 +299,7 @@ impl Router {
                 // Update ProxyState with successful connection
                 let upstream_id = format!(
                     "upstream-{}",
-                    self.pool_socket_addresses
+                    self. pool_addresses
                         .iter()
                         .position(|&a| a == pool)
                         .unwrap_or(0)
@@ -287,7 +310,6 @@ impl Router {
                 crate::POOL_ADDRESS
                     .safe_lock(|pool_address| {
                         *pool_address = Some(pool);
-                        println!("Pool: {:?}", pool_address)
                     })
                     .unwrap_or_else(|_| {
                         error!("Pool address Mutex corrupt");
@@ -301,7 +323,7 @@ impl Router {
                 // Update ProxyState with failed connection
                 let upstream_id = format!(
                     "upstream-{}",
-                    self.pool_socket_addresses
+                    self. pool_addresses
                         .iter()
                         .position(|&a| a == pool)
                         .unwrap_or(0)
@@ -317,7 +339,7 @@ impl Router {
     async fn get_latency(&self, pool_address: SocketAddr) -> Result<Duration, ()> {
         // Find the auth key for this address - fix field names
         let auth_pub_key = if let Some(index) = self
-            .pool_socket_addresses
+            . pool_addresses
             .iter()
             .position(|&a| a == pool_address)
         {
@@ -389,12 +411,12 @@ impl Router {
         if let Some(ref manager) = self.upstream_manager {
             info!(
                 "Initializing {} upstream connections",
-                self.pool_socket_addresses.len()
+                self. pool_addresses.len()
             );
 
             // Add each unique upstream only once - fix field names
             for (idx, (addr, key)) in self
-                .pool_socket_addresses
+                . pool_addresses
                 .iter()
                 .zip(self.keys.iter())
                 .enumerate()
@@ -436,7 +458,7 @@ impl Router {
             let active = upstreams.values().filter(|u| u.is_active).count();
             (total, active)
         } else {
-            (self.pool_socket_addresses.len(), 1) // Single upstream mode
+            (self. pool_addresses.len(), 1) // Single upstream mode
         }
     }
     /// Sets the hashrate distribution for the upstream manager.
@@ -454,22 +476,6 @@ pub async fn set_hashrate_distribution(&self, distribution: Vec<f32>) -> Result<
         }
     }
 
-/// Select the best pool based on latency
-    async fn select_pool(&mut self) -> Option<(SocketAddr, Duration)> {
-        let mut best_pool = None;
-        let mut best_latency = Duration::from_secs(u64::MAX);
-
-        for &pool_addr in &self.pool_socket_addresses {
-            if let Ok(latency) = self.get_latency(pool_addr).await {
-                if latency < best_latency {
-                    best_latency = latency;
-                    best_pool = Some(pool_addr);
-                }
-            }
-        }
-
-        best_pool.map(|pool| (pool, best_latency))
-    }
 }
 
 /// Track latencies for various stages of pool connection setup.

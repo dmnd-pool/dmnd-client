@@ -120,26 +120,21 @@ if wants_distribution {
             None,
             true,
         ).await {
-            Ok(router) => {
-                info!("Created multi-upstream router with {} upstreams for hashrate distribution", 
-                      pool_address_keys.len());
-                router
-            }
+            Ok(router) => router,
             Err(e) => {
                 error!("Failed to create multi-upstream router: {}", e);
                 std::process::exit(1);
             }
         }
-    } else if pool_address_keys.len() > 1 {
-        info!("Created latency-based router with {} pools", pool_address_keys.len());
+   } else if pool_address_keys.len() > 1 {
+        // Multiple pools, latency-based selection
         Router::new_with_keys(pool_address_keys.clone(), None, None)
     } else {
-        let (addr, auth_key) = pool_address_keys[0];
-        info!("Created single upstream router");
-        Router::new(vec![addr], auth_key, None, None)
+        // Single upstream (backward compatible)
+        Router::new(pool_addresses, auth_pub_k, None, None)
     };
 
-    let epsilon = Duration::from_millis(10);
+    let epsilon = Duration::from_millis(30_000);
 
     // Handle the three different scenarios
   
