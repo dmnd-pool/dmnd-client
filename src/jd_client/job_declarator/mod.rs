@@ -57,7 +57,7 @@ pub struct JobDeclarator {
     min_extranonce_size: u16,
     // (Sent DeclareMiningJob, is future, template id, merkle path)
     last_declare_mining_jobs_sent: HashMap<u32, Option<LastDeclareJob>>,
-    last_set_new_prev_hash: Option<SetNewPrevHash<'static>>,
+    pub last_set_new_prev_hash: Option<SetNewPrevHash<'static>>,
     set_new_prev_hash_counter: u8,
     #[allow(clippy::type_complexity)]
     future_jobs: HashMap<

@@ -2,13 +2,13 @@
 use jemallocator::Jemalloc;
 use router::Router;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use crate::shared::utils::AbortOnDrop; 
-use crate::config::{Configuration, parse_hashrate}; // Import from config module
 
 #[cfg(not(target_os = "windows"))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+use crate::shared::utils::AbortOnDrop;
+use config::Configuration;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
@@ -36,12 +36,8 @@ const DEFAULT_SV1_HASHPOWER: f32 = 100_000_000_000_000.0;
 const SHARE_PER_MIN: f32 = 10.0;
 const CHANNEL_DIFF_UPDTATE_INTERVAL: u32 = 10;
 const MAX_LEN_DOWN_MSG: u32 = 10000;
-const MAIN_POOL_ADDRESS: &str = "mining.dmnd.work:2000";
-//const TEST_POOL_ADDRESS: &str = "127.0.0.1:20000";
-const TEST_POOL_ADDRESS: &str = "18.193.252.132:2000";
-const MAIN_AUTH_PUB_KEY: &str = "9bQHWsQ2J9TRFTaxRh3KjoxdyLRfWVEy25YHtKF8y8gotLoCZZ";
+const MAIN_AUTH_PUB_KEY: &str = "9bQHWXsQ2J9TRFTaxRh3KjoxdyLRfWVEy25YHtKF8y8gotLoCZZ";
 const TEST_AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
-//const TP_ADDRESS: &str = "127.0.0.1:8442";
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:32767";
 
 lazy_static! {
@@ -53,7 +49,10 @@ lazy_static! {
         roles_logic_sv2::utils::Mutex::new(None); // Connected pool address
     static ref EXPECTED_SV1_HASHPOWER: f32 = Configuration::downstream_hashrate();
     static ref API_SERVER_PORT: String = Configuration::api_server_port();
-    static ref AUTH_PUB_KEY: &'static str = if Configuration::test() {
+}
+
+lazy_static! {
+    pub static ref AUTH_PUB_KEY: &'static str = if Configuration::test() {
         TEST_AUTH_PUB_KEY
     } else {
         MAIN_AUTH_PUB_KEY
@@ -75,7 +74,6 @@ async fn main() {
             log_level, noise_connection_log_level
         )))
         .init();
-
     Configuration::token().expect("TOKEN is not set");
 
     if Configuration::test() {
@@ -84,7 +82,6 @@ async fn main() {
 
     let auth_pub_k: Secp256k1PublicKey = AUTH_PUB_KEY.parse().expect("Invalid public key");
 
-    // Use Configuration methods consistently
     let pool_addresses = Configuration::pool_address()
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| {

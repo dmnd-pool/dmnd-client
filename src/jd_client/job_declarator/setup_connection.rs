@@ -1,3 +1,4 @@
+use crate::config::Configuration;
 use codec_sv2::{StandardEitherFrame, StandardSv2Frame};
 use rand::distributions::{Alphanumeric, DistString};
 use roles_logic_sv2::{
@@ -10,6 +11,7 @@ use roles_logic_sv2::{
 use std::{convert::TryInto, net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc::{Receiver as TReceiver, Sender as TSender};
 use tracing::error;
+
 pub type Message = PoolMessages<'static>;
 pub type StdFrame = StandardSv2Frame<Message>;
 pub type EitherFrame = StandardEitherFrame<Message>;
@@ -26,7 +28,7 @@ impl SetupConnectionHandler {
         let vendor = String::new().try_into().expect("Internal error: this operation can not fail because empty string can always be converted into Inner");
         let hardware_version = String::new().try_into().expect("Internal error: this operation can not fail because empty string can always be converted into Inner");
         let firmware = String::new().try_into().expect("Internal error: this operation can not fail because empty string can always be converted into Inner");
-        let token = std::env::var("TOKEN").expect("Checked at initialization");
+        let token = Configuration::token().expect("Checked at initialization");
         let device_id = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
         let device_id = format!("{}::POOLED::{}", device_id, token)
             .to_string()

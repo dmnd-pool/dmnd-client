@@ -18,7 +18,9 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info};
 
-use crate::{proxy_state::ProxyState, shared::utils::AbortOnDrop, PoolState};
+use crate::{
+    config::Configuration, proxy_state::ProxyState, shared::utils::AbortOnDrop, PoolState,
+};
 use task_manager::TaskManager;
 
 pub type Message = PoolExtMessages<'static>;
@@ -219,7 +221,7 @@ pub fn get_mining_setup_connection_msg(work_selection: bool) -> SetupConnection<
         false => 0b0000_0000_0000_0000_0000_0000_0000_0100,
         true => 0b0000_0000_0000_0000_0000_0000_0000_0110,
     };
-    let token = std::env::var("TOKEN").expect("Checked at initialization");
+    let token = Configuration::token().expect("Checked at initialization");
     let device_id = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
     let device_id = format!("{}::POOLED::{}", device_id, token)
         .to_string()

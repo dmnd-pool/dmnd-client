@@ -1,8 +1,6 @@
 use clap::Parser;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use tracing_subscriber::field::delimited::VisitDelimited;
-use core::hash;
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     path::PathBuf,
@@ -93,7 +91,7 @@ impl Configuration {
 
     pub fn pool_address() -> Option<Vec<SocketAddr>> {
         if CONFIG.test {
-            CONFIG.test_pool_addresses.clone()
+            CONFIG.test_pool_addresses.clone() // Return test pool addresses in test mode
         } else {
             CONFIG.pool_addresses.clone()
         }
@@ -114,7 +112,6 @@ impl Configuration {
     pub fn downstream_listening_addr() -> Option<String> {
         CONFIG.listening_addr.clone()
     }
-
     pub fn api_server_port() -> String {
         CONFIG.api_server_port.clone()
     }
@@ -339,7 +336,7 @@ let hashrate_distribution = args
 }
 
 /// Parses a hashrate string (e.g., "10T", "2.5P", "500E") into an f32 value in h/s.
-pub fn parse_hashrate(hashrate_str: &str) -> Result<f32, String> {
+fn parse_hashrate(hashrate_str: &str) -> Result<f32, String> {
     let hashrate_str = hashrate_str.trim();
     if hashrate_str.is_empty() {
         return Err("Hashrate cannot be empty. Expected format: '<number><unit>' (e.g., '10T', '2.5P', '5E'".to_string());

@@ -47,7 +47,7 @@ pub struct DownstreamMiningNode {
     miner_coinbase_output: Vec<TxOut>,
     // used to retreive the job id of the share that we send upstream
     last_template_id: u64,
-    jd: Option<Arc<Mutex<JobDeclarator>>>,
+    pub jd: Option<Arc<Mutex<JobDeclarator>>>,
 }
 
 #[allow(clippy::large_enum_variant)]
