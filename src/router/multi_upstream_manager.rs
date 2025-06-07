@@ -2,7 +2,7 @@ use crate::{minin_pool_connection, proxy_state::ProxyState, HashUnit};
 use key_utils::Secp256k1PublicKey;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Clone)]
 pub struct MultiUpstreamManager {
@@ -15,6 +15,7 @@ pub struct MultiUpstreamManager {
 #[derive(Clone)]
 pub struct UpstreamConnection {
     pub address: SocketAddr,
+    #[allow(dead_code)]
     pub allocated_hashrate: f64,
     pub allocated_percentage: f32,
     pub is_active: bool,
@@ -29,7 +30,7 @@ impl UpstreamConnection {
             is_active: false,
         }
     }
-
+    #[allow(dead_code)] // This method is kept for future use
     fn update_allocation(&mut self, percentage: f32, total_hashrate: f64) {
         self.allocated_percentage = percentage;
         self.allocated_hashrate = total_hashrate * percentage as f64 / 100.0;
@@ -75,7 +76,6 @@ impl MultiUpstreamManager {
 
             tokio::spawn(async move {
                 loop {
-                    info!("Connecting to upstream {}: {}", id, address);
                     match minin_pool_connection::connect_pool(
                         address,
                         auth_pub_k,
@@ -85,7 +85,6 @@ impl MultiUpstreamManager {
                     .await
                     {
                         Ok((_send, _recv, _abortable)) => {
-                            info!("✅ Connected to upstream {} - maintaining connection", id);
                             Self::update_upstream_status(&upstreams, &id, true).await;
                             // Keep the connection alive (simulate mining)
                             tokio::time::sleep(Duration::from_secs(30)).await;
@@ -113,35 +112,122 @@ impl MultiUpstreamManager {
         }
     }
 
-    /// Set hashrate distribution for each upstream (percentages)
-    pub async fn set_hashrate_distribution(&self, distribution: Vec<f32>) {
-        println!(
-            "calling set_hashrate_distribution in multi manager with: {:?}",
-            distribution
-        );
+    pub async fn set_hashrate_distribution(
+        &mut self,
+        mut distribution: Vec<f32>,
+    ) -> Result<(), String> {
+        let upstream_count = {
+            let upstreams = self.upstreams.lock().await;
+            upstreams.len()
+        };
 
-        let mut upstreams = self.upstreams.lock().await;
-        let total_hashrate = ProxyState::get_downstream_hashrate() as f64;
+        // Pad with zeros if needed
+        if distribution.len() < upstream_count {
+            let zeros_needed = upstream_count - distribution.len();
+            distribution.extend(vec![0.0; zeros_needed]);
+            debug!("Padded distribution with {} zeros", zeros_needed);
+        } else if distribution.len() > upstream_count {
+            return Err(format!(
+                "Distribution array has {} values but only {} pools available",
+                distribution.len(),
+                upstream_count
+            ));
+        }
 
-        println!(
-            "Total hashrate: {}",
-            HashUnit::format_value(total_hashrate as f32)
-        );
+        // Sort distribution highest to lowest
+        distribution.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
 
-        for (i, (_id, conn)) in upstreams.iter_mut().enumerate() {
-            if let Some(&percentage) = distribution.get(i) {
-                println!("setting upstream {} to {}%", i, percentage);
-                conn.update_allocation(percentage, total_hashrate);
-                info!(
-                    "Upstream {}: allocated {} ({:.1}%)",
-                    conn.address,
-                    HashUnit::format_value(conn.allocated_hashrate as f32),
-                    percentage
-                );
+        // Get pools ranked by latency (best first)
+        let ranked_pools = self.rank_by_latency().await;
+
+        // Normalize percentages
+        let total: f32 = distribution.iter().sum();
+        if (total - 100.0).abs() > 0.1 {
+            warn!("Distribution sum: {:.1}%, normalizing to 100%", total);
+            if total > 0.0 {
+                for percentage in &mut distribution {
+                    *percentage = (*percentage / total) * 100.0;
+                }
+            } else {
+                return Err("All distribution percentages are zero or negative".to_string());
             }
+        }
+
+        // Apply distribution to ranked pools
+        let mut upstreams = self.upstreams.lock().await;
+
+        // Reset all to 0%
+        for upstream in upstreams.values_mut() {
+            upstream.allocated_percentage = 0.0;
+        }
+
+        // Assign percentages to best latency pools first
+        let downstream_hashrate = ProxyState::get_downstream_hashrate();
+
+        for (i, (pool_id, _address, latency)) in ranked_pools.iter().enumerate() {
+            if let Some(&percentage) = distribution.get(i) {
+                if let Some(upstream) = upstreams.get_mut(pool_id) {
+                    upstream.allocated_percentage = percentage;
+
+                    if percentage > 0.0 {
+                        let allocated_hashrate = (percentage / 100.0) * downstream_hashrate;
+                        info!(
+                            "{}: {} ({:.1}%) - {}ms",
+                            pool_id,
+                            HashUnit::format_value(allocated_hashrate),
+                            percentage,
+                            latency.as_millis()
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Add this method to test latency
+    async fn test_pool_latency(address: &SocketAddr) -> Result<Duration, String> {
+        let start = std::time::Instant::now();
+
+        match tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect(address),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(start.elapsed()),
+            Ok(Err(e)) => Err(format!("Connection failed: {}", e)),
+            Err(_) => Err("Timeout".to_string()),
         }
     }
 
+    // Add this method to rank pools by latency
+    pub async fn rank_by_latency(&self) -> Vec<(String, SocketAddr, Duration)> {
+        let upstreams = self.upstreams.lock().await;
+        let mut pool_latencies = Vec::new();
+
+        info!("Testing latency for {} pools", upstreams.len());
+
+        for (id, conn) in upstreams.iter() {
+            match Self::test_pool_latency(&conn.address).await {
+                Ok(latency) => {
+                    debug!("{}: {}ms", id, latency.as_millis());
+                    pool_latencies.push((id.clone(), conn.address, latency));
+                }
+                Err(e) => {
+                    warn!("{}: latency test failed - {}", id, e);
+                    pool_latencies.push((id.clone(), conn.address, Duration::from_secs(999)));
+                }
+            }
+        }
+
+        // Sort by latency (lowest first)
+        pool_latencies.sort_by_key(|(_, _, latency)| *latency);
+
+        pool_latencies
+    }
+    #[allow(dead_code)] // This method is kept for future use
     pub async fn get_upstreams(&self) -> HashMap<String, UpstreamConnection> {
         self.upstreams.lock().await.clone()
     }
@@ -150,11 +236,7 @@ impl MultiUpstreamManager {
 
         upstreams
             .iter()
-            .map(|(id, conn)| {
-                println!("Upstream {}: {}% allocation", id, conn.allocated_percentage);
-                // Return the percentage, not the hashrate
-                (id.clone(), conn.is_active, conn.allocated_percentage)
-            })
+            .map(|(id, conn)| (id.clone(), conn.is_active, conn.allocated_percentage))
             .collect()
     }
 
@@ -173,18 +255,49 @@ impl MultiUpstreamManager {
 
         // Check if upstream already exists - if so, don't overwrite it
         if upstreams.contains_key(&id) {
-            println!("⚠️ Upstream {} already exists, not overwriting", id);
             return Ok(());
         }
 
         // Only insert if it doesn't exist
         upstreams.insert(id.clone(), UpstreamConnection::new(address));
-        println!("✅ Added new upstream {}", id);
         Ok(())
     }
 
     // Maintain connections (called from Router)
     pub async fn initialize_connections(&self) {
         self.maintain_connections().await;
+    }
+    #[allow(dead_code)] // This method is kept for future use
+    pub async fn handle_upstream_failure(&mut self, upstream_id: &str) {
+        {
+            let mut upstreams = self.upstreams.lock().await;
+
+            if let Some(upstream) = upstreams.get_mut(upstream_id) {
+                upstream.is_active = false;
+                warn!(
+                    "Upstream {} disconnected, attempting reconnection",
+                    upstream_id
+                );
+            }
+        } // Drop the guard here
+
+        // Redistribute hashrate among remaining active upstreams
+        self.rebalance_on_failure().await;
+    }
+    #[allow(dead_code)] // This method is kept for future use
+    async fn rebalance_on_failure(&mut self) {
+        let upstreams = self.upstreams.lock().await;
+        let active_count = upstreams.values().filter(|u| u.is_active).count();
+
+        if active_count == 0 {
+            error!("All upstreams disconnected - proxy will retry connections");
+            return;
+        }
+
+        info!(
+            "Rebalancing hashrate across {} active upstreams",
+            active_count
+        );
+        // Implement rebalancing logic here
     }
 }

@@ -265,7 +265,7 @@ impl ProxyState {
 
     /// Set the downstream hashrate to be distributed among upstreams
     pub fn set_downstream_hashrate(hashrate: f32) {
-        info!("Setting total hashrate to: {} h/s", hashrate);
+        info!("Setting downstream hashrate to: {} h/s", hashrate);
         if PROXY_STATE
             .safe_lock(|state| {
                 state.total_hashrate = hashrate;

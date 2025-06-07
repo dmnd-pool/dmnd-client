@@ -17,7 +17,7 @@ use tokio::{
         watch,
     },
 };
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::{
     minin_pool_connection::{self, get_mining_setup_connection_msg, mining_setup_connection},
@@ -72,7 +72,7 @@ impl Router {
         let auth_keys = vec![auth_pub_k; pool_addresses.len()];
 
         Self {
-            pool_addresses: pool_addresses,
+            pool_addresses,
             keys: auth_keys,
             current_pool: None,
             upstream_manager: None,
@@ -402,7 +402,7 @@ impl Router {
     /// Initialize upstream connections for the manager
     pub async fn initialize_upstream_connections(&mut self) -> Result<(), String> {
         if let Some(ref manager) = self.upstream_manager {
-            info!(
+            debug!(
                 "Initializing {} upstream connections",
                 self.pool_addresses.len()
             );
@@ -411,7 +411,7 @@ impl Router {
             for (idx, (addr, key)) in self.pool_addresses.iter().zip(self.keys.iter()).enumerate() {
                 let id = format!("upstream-{}", idx);
 
-                info!("Adding upstream {}: {} ({})", id, addr, key);
+                debug!("Adding upstream {}: {} ({})", id, addr, key);
 
                 if let Err(e) = manager
                     .add_upstream(
@@ -431,41 +431,21 @@ impl Router {
             // This ensures add_upstream() calls are complete and won't overwrite distribution
             manager.initialize_connections().await;
 
-            info!("Upstream connections initialized - ready for hashrate distribution");
             Ok(())
         } else {
             Err("No upstream manager available".to_string())
         }
     }
 
-    /// Get count of total and active upstreams
-    pub async fn get_upstream_counts(&self) -> (usize, usize) {
-        if let Some(ref manager) = self.upstream_manager {
-            let upstreams = manager.get_upstreams().await;
-            let total = upstreams.len();
-            let active = upstreams.values().filter(|u| u.is_active).count();
-            (total, active)
-        } else {
-            (self.pool_addresses.len(), 1) // Single upstream mode
-        }
-    }
     /// Sets the hashrate distribution for the upstream manager.
     pub async fn set_hashrate_distribution(
-        &self,
+        &mut self,
         distribution: Vec<f32>,
     ) -> Result<(), &'static str> {
-        info!(
-            "🔧 Router::set_hashrate_distribution called with: {:?}",
-            distribution
-        );
-
-        if let Some(ref manager) = self.upstream_manager {
-            info!("🔧 Calling manager.set_hashrate_distribution");
-            manager.set_hashrate_distribution(distribution).await;
-            info!("🔧 Manager.set_hashrate_distribution returned");
+        if let Some(ref mut manager) = self.upstream_manager {
+            let _ = manager.set_hashrate_distribution(distribution).await;
             Ok(())
         } else {
-            error!("❌ No upstream manager available");
             Err("No upstream manager available")
         }
     }

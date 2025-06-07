@@ -94,10 +94,6 @@ async fn main() {
     // Set downstream hashrate using Configuration pattern
     let downstream_hashrate = Configuration::downstream_hashrate();
     ProxyState::set_downstream_hashrate(downstream_hashrate);
-    info!(
-        "Set downstream hashrate to: {}",
-        HashUnit::format_value(downstream_hashrate)
-    );
 
     // Get pool addresses with auth keys using Configuration pattern
     let pool_address_keys: Vec<(SocketAddr, Secp256k1PublicKey)> = pool_addresses
@@ -107,12 +103,6 @@ async fn main() {
 
     // Determine hashrate distribution using Configuration pattern
     let wants_distribution = Configuration::wants_hashrate_distribution();
-
-    if wants_distribution {
-        info!("Hashrate distribution is enabled");
-    } else {
-        info!("Hashrate distribution is disabled");
-    }
 
     // Create router based on configuration
     let mut router = if wants_distribution {
@@ -164,19 +154,16 @@ async fn main() {
         initialize_proxy(&mut router, None, epsilon).await;
     } else if pool_address_keys.len() > 1 {
         info!("=== LATENCY-BASED SELECTION MODE ===");
-        info!("Testing pool latencies and selecting best pool...");
 
         // Test latency and select best pool
         let best_upstream = router.select_pool_connect().await;
 
-        if let Some(ref upstream) = best_upstream {
-            info!("Selected best upstream: {:?}", upstream);
+        if let Some(ref _upstream) = best_upstream {
         } else {
             error!("Failed to connect to any upstream pool");
             std::process::exit(1);
         }
 
-        info!("Starting proxy with latency-based selection...");
         initialize_proxy(&mut router, best_upstream, epsilon).await;
     } else {
         info!("=== SINGLE UPSTREAM MODE ===");
@@ -191,117 +178,31 @@ async fn main() {
             std::process::exit(1);
         }
 
-        info!("Starting proxy with single upstream...");
         initialize_proxy(&mut router, best_upstream, epsilon).await;
     }
-
-    // This line should never be reached since initialize_proxy runs forever
-    info!("Proxy stopped unexpectedly");
-    // This code should never be reached because initialize_proxy runs forever
-    info!("Proxy initialization complete");
 
     // Wait a moment for connections to establish
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Show immediate hashrate distribution with network verification
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    info!("🔍 VERIFYING NETWORK CONNECTIONS:");
-
-    // Check network connections
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "ss -tn | grep -E \"({})\"",
-            pool_address_keys
-                .iter()
-                .map(|(addr, _)| addr.to_string())
-                .collect::<Vec<_>>()
-                .join("|")
-        ))
-        .output();
-
-    if let Ok(output) = output {
-        let connections = String::from_utf8_lossy(&output.stdout);
-        let pool_connections: Vec<&str> = connections
-            .lines()
-            .filter(|line| {
-                pool_address_keys
-                    .iter()
-                    .any(|(addr, _)| line.contains(&addr.to_string()))
-            })
-            .collect();
-
-        info!("📡 Active pool connections: {}", pool_connections.len());
-        for conn in pool_connections {
-            info!("  🔗 {}", conn.trim());
-        }
-    }
-
     // Show hashrate distribution
-    let downstream_hashrate = ProxyState::get_downstream_hashrate();
     let detailed_stats = router.get_detailed_connection_stats().await;
-
-    info!("🚀 === INITIAL HASHRATE DISTRIBUTION ===");
-    info!(
-        "🔋 Total configured downstream hashrate: {}",
-        HashUnit::format_value(downstream_hashrate)
-    );
-
     let active_count = detailed_stats
         .iter()
         .filter(|(_, is_active, _)| *is_active)
         .count();
 
     if active_count > 0 {
-        // Check if using custom distribution
-        let mut is_custom_distribution = false;
-        for (_, is_active, percentage) in &detailed_stats {
-            if *is_active && (percentage - (100.0 / active_count as f32)).abs() > 1.0 {
-                is_custom_distribution = true;
-                break;
-            }
-        }
-
-        if is_custom_distribution {
-            info!("🎯 Mode: Custom Distribution (from config)");
-        } else {
-            let percentage_per_upstream = 100.0 / active_count as f32;
-            info!(
-                "🌐 Mode: Equal Distribution ({:.1}% per upstream)",
-                percentage_per_upstream
-            );
-        }
-
-        for (upstream_id, is_active, percentage) in detailed_stats {
-            if is_active {
-                // Calculate actual hashrate from percentage
-                let actual_hashrate = (percentage / 100.0) * downstream_hashrate;
-                info!(
-                    "  ✅ {}: allocated {} ({:.1}% of downstream)",
-                    upstream_id,
-                    HashUnit::format_value(actual_hashrate),
-                    percentage
-                );
-            } else {
-                info!(
-                    "  ❌ {}: 0.00T (INACTIVE - 0.0% of downstream)",
-                    upstream_id
-                );
-            }
-        }
-        info!("========================================");
+        info!("Proxy initialized with {} active upstream(s)", active_count);
 
         // Start monitoring task for multi-upstream
         let router_clone = router.clone();
         tokio::spawn(async move {
-            monitor_multi_upstream(router_clone).await;
+            monitor_multi_upstream(router_clone, epsilon).await;
         });
 
         // Keep main thread alive
         loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            info!("Multi-upstream proxy running...");
+            tokio::time::sleep(Duration::from_secs(300)).await;
         }
     }
 }
@@ -314,7 +215,6 @@ async fn initialize_proxy(
     // Check if we're in multi-upstream mode
     if router.is_multi_upstream_enabled() {
         info!("Initializing proxy in HASHRATE DISTRIBUTION mode");
-        info!("🎯 Focus: Distribute hashrate allocation across upstreams");
 
         // Start API server for monitoring
         let stats_sender = api::stats::StatsSender::new();
@@ -323,10 +223,9 @@ async fn initialize_proxy(
         // Start the monitor task in the background
         let router_clone = router.clone();
         tokio::spawn(async move {
-            monitor_multi_upstream(router_clone).await;
+            monitor_multi_upstream(router_clone, epsilon).await;
         });
 
-        info!("✅ Hashrate distribution monitor started");
         return;
     }
 
@@ -518,65 +417,48 @@ async fn monitor(
 }
 
 // Consolidated monitoring function for multi-upstream mode
-async fn monitor_multi_upstream(router: Router) {
-    let mut stats_report_counter = 0;
+async fn monitor_multi_upstream(router: Router, _epsilon: Duration) {
+    let mut report_counter = 0;
+    let mut last_stats: Option<Vec<(String, bool, f32)>> = None;
 
     loop {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        stats_report_counter += 1;
+        tokio::time::sleep(Duration::from_secs(30)).await;
 
-        // Generate periodic reports every 30 seconds (3 * 10 seconds)
-        if stats_report_counter >= 3 {
-            stats_report_counter = 0;
+        let detailed_stats = router.get_detailed_connection_stats().await;
+        let active_count = detailed_stats
+            .iter()
+            .filter(|(_, active, _)| *active)
+            .count();
 
-            let (total_count, active_count) = router.get_upstream_counts().await;
-            let downstream_hashrate = ProxyState::get_downstream_hashrate();
+        // Only log every 10 cycles (5 minutes) or if stats changed significantly
+        let stats_changed = match &last_stats {
+            Some(prev) => {
+                prev.len() != detailed_stats.len()
+                    || prev.iter().zip(&detailed_stats).any(
+                        |((_, prev_active, prev_pct), (_, active, pct))| {
+                            prev_active != active || (prev_pct - pct).abs() > 1.0
+                        },
+                    )
+            }
+            None => true,
+        };
 
-            info!("🚀 === MULTI-UPSTREAM HASHRATE REPORT ===");
-            info!(
-                "📊 Total upstreams: {}, Active: {}",
-                total_count, active_count
-            );
-            info!(
-                "🔋 Downstream hashrate: {}",
-                HashUnit::format_value(downstream_hashrate)
-            );
-
+        if stats_changed || report_counter >= 10 {
             if active_count > 0 {
-                let detailed_stats = router.get_detailed_connection_stats().await;
-
-                for (upstream_id, is_active, percentage) in detailed_stats {
-                    if is_active {
-                        // Calculate actual hashrate from percentage
-                        let allocated_hashrate = (percentage / 100.0) * downstream_hashrate;
-                        info!(
-                            "  ✅ {}: allocated {} ({:.1}% of downstream)",
-                            upstream_id,
-                            HashUnit::format_value(allocated_hashrate),
-                            percentage
-                        );
-                    } else {
-                        info!(
-                            "  ❌ {}: 0.00T (INACTIVE - 0.0% of downstream)",
-                            upstream_id
-                        );
+                info!("Active pools: {}", active_count);
+                for (upstream_id, is_active, percentage) in &detailed_stats {
+                    if *is_active && *percentage > 0.0 {
+                        info!("  {} {:.1}%", upstream_id, percentage);
                     }
                 }
-            } else {
-                warn!("❌ No active upstream connections!");
             }
-            info!("=========================================");
-        }
-
-        // Check proxy state
-        let (is_down, error_msg) = ProxyState::is_proxy_down();
-        if is_down {
-            error!("⚠️  Proxy state is DOWN: {:?}", error_msg);
-            break;
+            report_counter = 0;
+            last_stats = Some(detailed_stats);
+        } else {
+            report_counter += 1;
         }
     }
 }
-
 pub enum Reconnect {
     NewUpstream(std::net::SocketAddr), // Reconnecting with a new upstream
     NoUpstream,                        // Reconnecting without upstream
