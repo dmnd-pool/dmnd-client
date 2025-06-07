@@ -263,7 +263,6 @@ impl ProxyState {
         }
     }
 
-  
     /// Set the downstream hashrate to be distributed among upstreams
     pub fn set_downstream_hashrate(hashrate: f32) {
         info!("Setting total hashrate to: {} h/s", hashrate);
@@ -293,7 +292,6 @@ impl ProxyState {
         hashrate
     }
 
-    
     /// Update connection status for an upstream with timestamp
     pub fn set_upstream_connection_status(id: &str, connected: bool) {
         if PROXY_STATE
@@ -315,7 +313,7 @@ impl ProxyState {
         }
     }
 
-   /// Check if proxy is down
+    /// Check if proxy is down
     pub fn is_proxy_down() -> (bool, Option<String>) {
         let errors = Self::get_errors();
         if errors.is_ok() && errors.as_ref().unwrap().is_empty() {
@@ -364,5 +362,4 @@ impl ProxyState {
             Ok(errors)
         }
     }
-
-  }
+}

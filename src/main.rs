@@ -27,7 +27,6 @@ mod share_accounter;
 mod shared;
 mod translator;
 
-
 const TRANSLATOR_BUFFER_SIZE: usize = 32;
 const MIN_EXTRANONCE_SIZE: u16 = 6;
 const MIN_EXTRANONCE2_SIZE: u16 = 5;
@@ -95,38 +94,37 @@ async fn main() {
     // Set downstream hashrate using Configuration pattern
     let downstream_hashrate = Configuration::downstream_hashrate();
     ProxyState::set_downstream_hashrate(downstream_hashrate);
-    info!("Set downstream hashrate to: {}", HashUnit::format_value(downstream_hashrate));
+    info!(
+        "Set downstream hashrate to: {}",
+        HashUnit::format_value(downstream_hashrate)
+    );
 
     // Get pool addresses with auth keys using Configuration pattern
-    let pool_address_keys: Vec<(SocketAddr, Secp256k1PublicKey)> = pool_addresses.iter().map(|&addr| {
-        (addr, auth_pub_k)
-    }).collect();
+    let pool_address_keys: Vec<(SocketAddr, Secp256k1PublicKey)> = pool_addresses
+        .iter()
+        .map(|&addr| (addr, auth_pub_k))
+        .collect();
 
     // Determine hashrate distribution using Configuration pattern
-   let wants_distribution = Configuration::wants_hashrate_distribution();
+    let wants_distribution = Configuration::wants_hashrate_distribution();
 
-if wants_distribution {
-    info!("Hashrate distribution is enabled");
-} else {
-    info!("Hashrate distribution is disabled");
-}
+    if wants_distribution {
+        info!("Hashrate distribution is enabled");
+    } else {
+        info!("Hashrate distribution is disabled");
+    }
 
     // Create router based on configuration
     let mut router = if wants_distribution {
         // Multi-upstream with distribution
-        match Router::new_multi(
-            pool_address_keys.clone(),
-            None,
-            None,
-            true,
-        ).await {
+        match Router::new_multi(pool_address_keys.clone(), None, None, true).await {
             Ok(router) => router,
             Err(e) => {
                 error!("Failed to create multi-upstream router: {}", e);
                 std::process::exit(1);
             }
         }
-   } else if pool_address_keys.len() > 1 {
+    } else if pool_address_keys.len() > 1 {
         // Multiple pools, latency-based selection
         Router::new_with_keys(pool_address_keys.clone(), None, None)
     } else {
@@ -137,17 +135,16 @@ if wants_distribution {
     let epsilon = Duration::from_millis(30_000);
 
     // Handle the three different scenarios
-  
+
     if wants_distribution {
         info!("=== HASHRATE DISTRIBUTION MODE ===");
-        
+
         // Get the distribution from config
-        let distribution = Configuration::hashrate_distribution()
-            .unwrap_or_else(|| {
-                let count = pool_address_keys.len();
-                let equal_percentage = 100.0 / count as f32;
-                vec![equal_percentage; count]
-            });
+        let distribution = Configuration::hashrate_distribution().unwrap_or_else(|| {
+            let count = pool_address_keys.len();
+            let equal_percentage = 100.0 / count as f32;
+            vec![equal_percentage; count]
+        });
 
         info!("Using hashrate distribution: {:?}", distribution);
 
@@ -156,7 +153,7 @@ if wants_distribution {
             error!("Failed to initialize upstream connections: {}", e);
             std::process::exit(1);
         }
-        
+
         // Set the distribution
         if let Err(e) = router.set_hashrate_distribution(distribution.clone()).await {
             error!("Failed to set hashrate distribution: {}", e);
@@ -165,14 +162,13 @@ if wants_distribution {
 
         info!("Starting proxy with hashrate distribution...");
         initialize_proxy(&mut router, None, epsilon).await;
-
     } else if pool_address_keys.len() > 1 {
         info!("=== LATENCY-BASED SELECTION MODE ===");
         info!("Testing pool latencies and selecting best pool...");
-        
+
         // Test latency and select best pool
         let best_upstream = router.select_pool_connect().await;
-        
+
         if let Some(ref upstream) = best_upstream {
             info!("Selected best upstream: {:?}", upstream);
         } else {
@@ -182,13 +178,12 @@ if wants_distribution {
 
         info!("Starting proxy with latency-based selection...");
         initialize_proxy(&mut router, best_upstream, epsilon).await;
-
     } else {
         info!("=== SINGLE UPSTREAM MODE ===");
-        
+
         // Connect to single pool
         let best_upstream = router.select_pool_connect().await;
-        
+
         if let Some(ref upstream) = best_upstream {
             info!("Connected to single upstream: {:?}", upstream);
         } else {
@@ -216,8 +211,10 @@ if wants_distribution {
     // Check network connections
     let output = std::process::Command::new("sh")
         .arg("-c")
-        .arg(format!("ss -tn | grep -E \"({})\"", 
-            pool_address_keys.iter()
+        .arg(format!(
+            "ss -tn | grep -E \"({})\"",
+            pool_address_keys
+                .iter()
                 .map(|(addr, _)| addr.to_string())
                 .collect::<Vec<_>>()
                 .join("|")
@@ -229,9 +226,9 @@ if wants_distribution {
         let pool_connections: Vec<&str> = connections
             .lines()
             .filter(|line| {
-                pool_address_keys.iter().any(|(addr, _)| {
-                    line.contains(&addr.to_string())
-                })
+                pool_address_keys
+                    .iter()
+                    .any(|(addr, _)| line.contains(&addr.to_string()))
             })
             .collect();
 
@@ -240,7 +237,7 @@ if wants_distribution {
             info!("  🔗 {}", conn.trim());
         }
     }
-    
+
     // Show hashrate distribution
     let downstream_hashrate = ProxyState::get_downstream_hashrate();
     let detailed_stats = router.get_detailed_connection_stats().await;
@@ -250,45 +247,51 @@ if wants_distribution {
         "🔋 Total configured downstream hashrate: {}",
         HashUnit::format_value(downstream_hashrate)
     );
-    
-    let active_count = detailed_stats.iter().filter(|(_, is_active, _)| *is_active).count();
-    
+
+    let active_count = detailed_stats
+        .iter()
+        .filter(|(_, is_active, _)| *is_active)
+        .count();
+
     if active_count > 0 {
         // Check if using custom distribution
         let mut is_custom_distribution = false;
         for (_, is_active, percentage) in &detailed_stats {
-    if *is_active && (percentage - (100.0 / active_count as f32)).abs() > 1.0 {
-        is_custom_distribution = true;
-        break;
-    }
-}
-        
+            if *is_active && (percentage - (100.0 / active_count as f32)).abs() > 1.0 {
+                is_custom_distribution = true;
+                break;
+            }
+        }
+
         if is_custom_distribution {
             info!("🎯 Mode: Custom Distribution (from config)");
         } else {
             let percentage_per_upstream = 100.0 / active_count as f32;
-            info!("🌐 Mode: Equal Distribution ({:.1}% per upstream)", percentage_per_upstream);
+            info!(
+                "🌐 Mode: Equal Distribution ({:.1}% per upstream)",
+                percentage_per_upstream
+            );
         }
 
-      for (upstream_id, is_active, percentage) in detailed_stats {
-    if is_active {
-        // Calculate actual hashrate from percentage
-        let actual_hashrate = (percentage / 100.0) * downstream_hashrate;
-        info!(
-            "  ✅ {}: allocated {} ({:.1}% of downstream)",
-            upstream_id,
-            HashUnit::format_value(actual_hashrate),
-            percentage
-        );
-    } else {
-        info!(
-            "  ❌ {}: 0.00T (INACTIVE - 0.0% of downstream)",
-            upstream_id
-        );
-    }
-}
+        for (upstream_id, is_active, percentage) in detailed_stats {
+            if is_active {
+                // Calculate actual hashrate from percentage
+                let actual_hashrate = (percentage / 100.0) * downstream_hashrate;
+                info!(
+                    "  ✅ {}: allocated {} ({:.1}% of downstream)",
+                    upstream_id,
+                    HashUnit::format_value(actual_hashrate),
+                    percentage
+                );
+            } else {
+                info!(
+                    "  ❌ {}: 0.00T (INACTIVE - 0.0% of downstream)",
+                    upstream_id
+                );
+            }
+        }
         info!("========================================");
-        
+
         // Start monitoring task for multi-upstream
         let router_clone = router.clone();
         tokio::spawn(async move {
@@ -303,7 +306,6 @@ if wants_distribution {
     }
 }
 
-
 async fn initialize_proxy(
     router: &mut Router,
     mut pool_addr: Option<std::net::SocketAddr>,
@@ -313,7 +315,7 @@ async fn initialize_proxy(
     if router.is_multi_upstream_enabled() {
         info!("Initializing proxy in HASHRATE DISTRIBUTION mode");
         info!("🎯 Focus: Distribute hashrate allocation across upstreams");
-        
+
         // Start API server for monitoring
         let stats_sender = api::stats::StatsSender::new();
         let _server_handle = tokio::spawn(api::start(router.clone(), stats_sender));
@@ -327,11 +329,11 @@ async fn initialize_proxy(
         info!("✅ Hashrate distribution monitor started");
         return;
     }
-    
+
     // Single upstream mode only
     loop {
         let stats_sender = api::stats::StatsSender::new();
-        
+
         let (send_to_pool, recv_from_pool, pool_connection_abortable) =
             match router.connect_pool(pool_addr).await {
                 Ok(connection) => connection,
@@ -518,7 +520,7 @@ async fn monitor(
 // Consolidated monitoring function for multi-upstream mode
 async fn monitor_multi_upstream(router: Router) {
     let mut stats_report_counter = 0;
-    
+
     loop {
         tokio::time::sleep(Duration::from_secs(10)).await;
         stats_report_counter += 1;
@@ -526,17 +528,23 @@ async fn monitor_multi_upstream(router: Router) {
         // Generate periodic reports every 30 seconds (3 * 10 seconds)
         if stats_report_counter >= 3 {
             stats_report_counter = 0;
-            
+
             let (total_count, active_count) = router.get_upstream_counts().await;
             let downstream_hashrate = ProxyState::get_downstream_hashrate();
-            
+
             info!("🚀 === MULTI-UPSTREAM HASHRATE REPORT ===");
-            info!("📊 Total upstreams: {}, Active: {}", total_count, active_count);
-            info!("🔋 Downstream hashrate: {}", HashUnit::format_value(downstream_hashrate));
-            
+            info!(
+                "📊 Total upstreams: {}, Active: {}",
+                total_count, active_count
+            );
+            info!(
+                "🔋 Downstream hashrate: {}",
+                HashUnit::format_value(downstream_hashrate)
+            );
+
             if active_count > 0 {
                 let detailed_stats = router.get_detailed_connection_stats().await;
-                
+
                 for (upstream_id, is_active, percentage) in detailed_stats {
                     if is_active {
                         // Calculate actual hashrate from percentage
@@ -572,7 +580,7 @@ async fn monitor_multi_upstream(router: Router) {
 pub enum Reconnect {
     NewUpstream(std::net::SocketAddr), // Reconnecting with a new upstream
     NoUpstream,                        // Reconnecting without upstream
-}   
+}
 enum HashUnit {
     Tera,
     Peta,

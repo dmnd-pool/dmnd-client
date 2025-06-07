@@ -59,9 +59,8 @@ pub struct ConfigFile {
     pub test: Option<bool>,
     pub listening_addr: Option<String>,
     pub api_server_port: Option<String>,
-    pub hashrate_distribution: Option<Vec<f32>>, 
+    pub hashrate_distribution: Option<Vec<f32>>,
 }
-
 
 pub struct Configuration {
     token: Option<String>,
@@ -80,7 +79,6 @@ pub struct Configuration {
 }
 
 impl Configuration {
-  
     pub fn token() -> Option<String> {
         CONFIG.token.clone()
     }
@@ -150,11 +148,10 @@ impl Configuration {
         CONFIG.hashrate_distribution.clone()
     }
 
-
     pub fn wants_hashrate_distribution() -> bool {
         CONFIG.hashrate_distribution.is_some()
     }
-    
+
     // Loads config from CLI, file, or env vars with precedence: CLI > file > env.
     fn load_config() -> Self {
         let args = Args::parse();
@@ -175,7 +172,7 @@ impl Configuration {
                 test: None,
                 listening_addr: None,
                 api_server_port: None,
-                hashrate_distribution: None, 
+                hashrate_distribution: None,
             });
 
         let token = args
@@ -304,23 +301,21 @@ impl Configuration {
             .unwrap_or("off".to_string());
 
         let test = args.test || config.test.unwrap_or(false) || std::env::var("TEST").is_ok();
-let hashrate_distribution = args
+        let hashrate_distribution = args
             .hashrate_distribution
             .or(config.hashrate_distribution)
             .or_else(|| {
-                std::env::var("HASHRATE_DISTRIBUTION")
-                    .ok()
-                    .and_then(|s| {
-                        s.split(',')
-                            .map(|s| s.trim().parse::<f32>().ok())
-                            .collect::<Option<Vec<f32>>>()
-                    })
+                std::env::var("HASHRATE_DISTRIBUTION").ok().and_then(|s| {
+                    s.split(',')
+                        .map(|s| s.trim().parse::<f32>().ok())
+                        .collect::<Option<Vec<f32>>>()
+                })
             });
-      
+
         Configuration {
             token,
             tp_address,
-             pool_addresses,
+            pool_addresses,
             test_pool_addresses,
             interval,
             delay,
@@ -331,7 +326,7 @@ let hashrate_distribution = args
             listening_addr,
             api_server_port,
             hashrate_distribution,
-         }
+        }
     }
 }
 

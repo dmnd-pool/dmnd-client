@@ -1,12 +1,8 @@
+use crate::{minin_pool_connection, proxy_state::ProxyState, HashUnit};
+use key_utils::Secp256k1PublicKey;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tracing::{error, info};
-use crate::{
-    minin_pool_connection,
-    proxy_state::ProxyState,
-    HashUnit,
-};
-use key_utils::Secp256k1PublicKey;
 
 #[derive(Clone)]
 pub struct MultiUpstreamManager {
@@ -44,7 +40,9 @@ impl MultiUpstreamManager {
     pub fn new(
         upstreams: Vec<SocketAddr>,
         auth_pub_k: Secp256k1PublicKey,
-        setup_connection_msg: Option<roles_logic_sv2::common_messages_sv2::SetupConnection<'static>>,
+        setup_connection_msg: Option<
+            roles_logic_sv2::common_messages_sv2::SetupConnection<'static>,
+        >,
         timer: Option<Duration>,
     ) -> Self {
         let upstream_map = upstreams
@@ -52,7 +50,7 @@ impl MultiUpstreamManager {
             .enumerate()
             .map(|(i, addr)| (format!("upstream-{}", i), UpstreamConnection::new(addr)))
             .collect();
-        
+
         Self {
             upstreams: Arc::new(Mutex::new(upstream_map)),
             auth_pub_k,
@@ -117,13 +115,19 @@ impl MultiUpstreamManager {
 
     /// Set hashrate distribution for each upstream (percentages)
     pub async fn set_hashrate_distribution(&self, distribution: Vec<f32>) {
-        println!("calling set_hashrate_distribution in multi manager with: {:?}", distribution);
-        
+        println!(
+            "calling set_hashrate_distribution in multi manager with: {:?}",
+            distribution
+        );
+
         let mut upstreams = self.upstreams.lock().await;
         let total_hashrate = ProxyState::get_downstream_hashrate() as f64;
-        
-        println!("Total hashrate: {}", HashUnit::format_value(total_hashrate as f32));
-        
+
+        println!(
+            "Total hashrate: {}",
+            HashUnit::format_value(total_hashrate as f32)
+        );
+
         for (i, (_id, conn)) in upstreams.iter_mut().enumerate() {
             if let Some(&percentage) = distribution.get(i) {
                 println!("setting upstream {} to {}%", i, percentage);
@@ -141,45 +145,43 @@ impl MultiUpstreamManager {
     pub async fn get_upstreams(&self) -> HashMap<String, UpstreamConnection> {
         self.upstreams.lock().await.clone()
     }
-pub async fn get_detailed_connection_stats(&self) -> Vec<(String, bool, f32)> {
-    let upstreams = self.upstreams.lock().await;
-    
-    upstreams
-        .iter()
-        .map(|(id, conn)| {
-            println!(
-                "Upstream {}: {}% allocation", 
-                id, 
-                conn.allocated_percentage
-            );
-            // Return the percentage, not the hashrate
-            (id.clone(), conn.is_active, conn.allocated_percentage)
-        })
-        .collect()
-}
+    pub async fn get_detailed_connection_stats(&self) -> Vec<(String, bool, f32)> {
+        let upstreams = self.upstreams.lock().await;
+
+        upstreams
+            .iter()
+            .map(|(id, conn)| {
+                println!("Upstream {}: {}% allocation", id, conn.allocated_percentage);
+                // Return the percentage, not the hashrate
+                (id.clone(), conn.is_active, conn.allocated_percentage)
+            })
+            .collect()
+    }
 
     // Add upstream (called from Router)
- pub async fn add_upstream(
-    &self,
-    id: String,
-    address: SocketAddr,
-    _key: Secp256k1PublicKey,
-    _setup_connection_msg: Option<roles_logic_sv2::common_messages_sv2::SetupConnection<'static>>,
-    _timer: Option<Duration>,
-) -> Result<(), String> {
-    let mut upstreams = self.upstreams.lock().await;
-    
-    // Check if upstream already exists - if so, don't overwrite it
-    if upstreams.contains_key(&id) {
-        println!("⚠️ Upstream {} already exists, not overwriting", id);
-        return Ok(());
+    pub async fn add_upstream(
+        &self,
+        id: String,
+        address: SocketAddr,
+        _key: Secp256k1PublicKey,
+        _setup_connection_msg: Option<
+            roles_logic_sv2::common_messages_sv2::SetupConnection<'static>,
+        >,
+        _timer: Option<Duration>,
+    ) -> Result<(), String> {
+        let mut upstreams = self.upstreams.lock().await;
+
+        // Check if upstream already exists - if so, don't overwrite it
+        if upstreams.contains_key(&id) {
+            println!("⚠️ Upstream {} already exists, not overwriting", id);
+            return Ok(());
+        }
+
+        // Only insert if it doesn't exist
+        upstreams.insert(id.clone(), UpstreamConnection::new(address));
+        println!("✅ Added new upstream {}", id);
+        Ok(())
     }
-    
-    // Only insert if it doesn't exist
-    upstreams.insert(id.clone(), UpstreamConnection::new(address));
-    println!("✅ Added new upstream {}", id);
-    Ok(())
-}
 
     // Maintain connections (called from Router)
     pub async fn initialize_connections(&self) {
