@@ -31,16 +31,16 @@ pub use multi_upstream_manager::MultiUpstreamManager;
 
 /// Router handles connection to Multiple upstreams.
 pub struct Router {
-    pub pool_addresses: Vec<SocketAddr>,
-    pub keys: Vec<Secp256k1PublicKey>,
+    pool_addresses: Vec<SocketAddr>,
+    keys: Vec<Secp256k1PublicKey>,
     pub current_pool: Option<SocketAddr>,
-    pub upstream_manager: Option<MultiUpstreamManager>,
+    upstream_manager: Option<MultiUpstreamManager>,
 
     // Keep these fields for backward compatibility with single upstream mode
-    pub auth_pub_k: Secp256k1PublicKey,
-    pub setup_connection_msg: Option<SetupConnection<'static>>,
-    pub timer: Option<Duration>,
-    pub latency_tx: tokio::sync::watch::Sender<Option<Duration>>,
+    auth_pub_k: Secp256k1PublicKey,
+    setup_connection_msg: Option<SetupConnection<'static>>,
+    timer: Option<Duration>,
+    latency_tx: tokio::sync::watch::Sender<Option<Duration>>,
     pub latency_rx: tokio::sync::watch::Receiver<Option<Duration>>,
 }
 impl Clone for Router {
@@ -65,15 +65,19 @@ impl Router {
     pub fn new(
         pool_addresses: Vec<SocketAddr>,
         auth_pub_k: Secp256k1PublicKey,
+         // Configuration msg used to setup connection between client and pool
+        // If not, present `get_mining_setup_connection_msg()` is called to generated default values
         setup_connection_msg: Option<SetupConnection<'static>>,
+        // Max duration for pool setup after which it times out.
+        // If None, default time of 5s is used.
         timer: Option<Duration>,
     ) -> Self {
         let (latency_tx, latency_rx) = watch::channel(None);
-        let auth_keys = vec![auth_pub_k; pool_addresses.len()];
+        let auth_pub_keys = vec![auth_pub_k; pool_addresses.len()];
 
         Self {
             pool_addresses,
-            keys: auth_keys,
+            keys: auth_pub_keys,
             current_pool: None,
             upstream_manager: None,
             auth_pub_k,
@@ -267,7 +271,7 @@ impl Router {
             Some(addr) => addr,
             None => match self.select_pool_connect().await {
                 Some(addr) => addr,
-                // Called when we initialize
+                // Called when we initialize the proxy, without a valid pool we can not start mine and we
                 // return Err
                 None => {
                     return Err(minin_pool_connection::errors::Error::Unrecoverable);
@@ -279,7 +283,7 @@ impl Router {
         info!("Upstream {:?} selected", pool);
 
         // Find the matching auth key for this address - fix field name
-        let auth_key = if let Some(index) = self.pool_addresses.iter().position(|&a| a == pool) {
+        let auth_pub_key = if let Some(index) = self.pool_addresses.iter().position(|&a| a == pool) {
             self.keys[index]
         } else {
             self.auth_pub_k
@@ -287,7 +291,7 @@ impl Router {
 
         match minin_pool_connection::connect_pool(
             pool,
-            auth_key,
+            auth_pub_key,
             self.setup_connection_msg.clone(),
             self.timer,
         )

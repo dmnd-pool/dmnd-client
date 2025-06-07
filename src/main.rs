@@ -2,7 +2,6 @@
 use jemallocator::Jemalloc;
 use router::Router;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
 #[cfg(not(target_os = "windows"))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
@@ -15,8 +14,8 @@ use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
 use std::{net::SocketAddr, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{error, info, warn};
-
 mod api;
+
 mod config;
 mod ingress;
 pub mod jd_client;
@@ -61,6 +60,7 @@ lazy_static! {
 #[tokio::main]
 async fn main() {
     let log_level = Configuration::loglevel();
+
     let noise_connection_log_level = Configuration::nc_loglevel();
 
     //Disable noise_connection error (for now) because:
@@ -231,6 +231,7 @@ async fn initialize_proxy(
 
     // Single upstream mode only
     loop {
+        // Initial setup for the proxy
         let stats_sender = api::stats::StatsSender::new();
 
         let (send_to_pool, recv_from_pool, pool_connection_abortable) =
@@ -245,6 +246,7 @@ async fn initialize_proxy(
                         tokio::time::sleep(Duration::from_secs(1)).await;
                         secs -= 1;
                     }
+                    // Restart loop, esentially restarting proxy
                     continue;
                 }
             };
@@ -459,10 +461,12 @@ async fn monitor_multi_upstream(router: Router, _epsilon: Duration) {
         }
     }
 }
+
 pub enum Reconnect {
     NewUpstream(std::net::SocketAddr), // Reconnecting with a new upstream
     NoUpstream,                        // Reconnecting without upstream
 }
+
 enum HashUnit {
     Tera,
     Peta,

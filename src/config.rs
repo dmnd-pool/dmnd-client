@@ -13,53 +13,53 @@ lazy_static! {
     pub static ref CONFIG: Configuration = Configuration::load_config();
 }
 
-#[derive(Parser)]
-pub struct Args {
+#[derive(Parser)] 
+struct Args {
     #[clap(long)]
-    pub test: bool,
+    test: bool,
     #[clap(long = "d", short = 'd', value_parser = parse_hashrate)]
-    pub downstream_hashrate: Option<f32>,
+    downstream_hashrate: Option<f32>,
     #[clap(long = "loglevel", short = 'l')]
-    pub loglevel: Option<String>,
+    loglevel: Option<String>,
     #[clap(long = "nc", short = 'n')]
-    pub noise_connection_log: Option<String>,
+    noise_connection_log: Option<String>,
     #[clap(long = "delay")]
-    pub delay: Option<u64>,
+    delay: Option<u64>,
     #[clap(long = "interval", short = 'i')]
-    pub adjustment_interval: Option<u64>,
+    adjustment_interval: Option<u64>,
     #[clap(long = "pool", short = 'p', value_delimiter = ',')]
-    pub pool_addresses: Option<Vec<String>>,
+    pool_addresses: Option<Vec<String>>,
     #[clap(long = "test-pool", value_delimiter = ',')]
-    pub test_pool_addresses: Option<Vec<String>>,
+    test_pool_addresses: Option<Vec<String>>,
     #[clap(long)]
-    pub token: Option<String>,
+    token: Option<String>,
     #[clap(long)]
-    pub tp_address: Option<String>,
+    tp_address: Option<String>,
     #[clap(long)]
-    pub listening_addr: Option<String>,
+    listening_addr: Option<String>,
     #[clap(long = "config", short = 'c')]
-    pub config_file: Option<PathBuf>,
+    config_file: Option<PathBuf>,
     #[clap(long = "api-server-port", short = 's')]
-    pub api_server_port: Option<String>,
+    api_server_port: Option<String>,
     #[clap(long = "hashrate-distribution", value_delimiter = ',')]
-    pub hashrate_distribution: Option<Vec<f32>>,
+    hashrate_distribution: Option<Vec<f32>>,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct ConfigFile {
-    pub token: Option<String>,
-    pub tp_address: Option<String>,
-    pub pool_addresses: Option<Vec<String>>,
-    pub test_pool_addresses: Option<Vec<String>>,
-    pub interval: Option<u64>,
-    pub delay: Option<u64>,
-    pub downstream_hashrate: Option<String>,
-    pub loglevel: Option<String>,
-    pub nc_loglevel: Option<String>,
-    pub test: Option<bool>,
-    pub listening_addr: Option<String>,
-    pub api_server_port: Option<String>,
-    pub hashrate_distribution: Option<Vec<f32>>,
+struct ConfigFile {
+    tp_address: Option<String>,
+    token: Option<String>,
+    pool_addresses: Option<Vec<String>>,
+    test_pool_addresses: Option<Vec<String>>,
+    interval: Option<u64>,
+    delay: Option<u64>,
+    downstream_hashrate: Option<String>,
+    loglevel: Option<String>,
+    nc_loglevel: Option<String>,
+    test: Option<bool>,
+    listening_addr: Option<String>,
+    api_server_port: Option<String>,
+    hashrate_distribution: Option<Vec<f32>>,
 }
 
 pub struct Configuration {
@@ -155,7 +155,7 @@ impl Configuration {
     // Loads config from CLI, file, or env vars with precedence: CLI > file > env.
     fn load_config() -> Self {
         let args = Args::parse();
-        let config_path: PathBuf = args.config_file.clone().unwrap_or("config.toml".into());
+        let config_path: PathBuf = args.config_file.unwrap_or("config.toml".into());
         let config: ConfigFile = std::fs::read_to_string(&config_path)
             .ok()
             .and_then(|content| toml::from_str(&content).ok())
