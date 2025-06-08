@@ -1,0 +1,16 @@
+tp_address = "127.0.0.1:8442"
+test = true
+loglevel = "info"
+test_pool_addresses = [
+    "general-pool.dmnd.work:20000",
+    "elektron-pool.dmnd.work:20000",
+]
+token = "X7u5ozCGPpXmSorp76X5"
+auto_update = false
+custom_job_timeout = 30
+
+# Bitcoin Core Configuration
+zmq_pub_sequence = "tcp://127.0.0.1:28334"
+rpc_allow_ip = "127.0.0.1"
+rpc_port = 8332
+bitcoin_datadir = "/Users/divyanshseth/bitcoin-sv2-tp-0.1.17/main/"
