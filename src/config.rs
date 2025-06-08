@@ -13,7 +13,7 @@ lazy_static! {
     pub static ref CONFIG: Configuration = Configuration::load_config();
 }
 
-#[derive(Parser)] 
+#[derive(Parser)]
 struct Args {
     #[clap(long)]
     test: bool,

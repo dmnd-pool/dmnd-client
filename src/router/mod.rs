@@ -65,7 +65,7 @@ impl Router {
     pub fn new(
         pool_addresses: Vec<SocketAddr>,
         auth_pub_k: Secp256k1PublicKey,
-         // Configuration msg used to setup connection between client and pool
+        // Configuration msg used to setup connection between client and pool
         // If not, present `get_mining_setup_connection_msg()` is called to generated default values
         setup_connection_msg: Option<SetupConnection<'static>>,
         // Max duration for pool setup after which it times out.
@@ -283,7 +283,8 @@ impl Router {
         info!("Upstream {:?} selected", pool);
 
         // Find the matching auth key for this address - fix field name
-        let auth_pub_key = if let Some(index) = self.pool_addresses.iter().position(|&a| a == pool) {
+        let auth_pub_key = if let Some(index) = self.pool_addresses.iter().position(|&a| a == pool)
+        {
             self.keys[index]
         } else {
             self.auth_pub_k
@@ -334,6 +335,23 @@ impl Router {
 
                 Err(e)
             }
+        }
+    }
+
+    /// Start multi-upstream share accounting
+    pub async fn start_multi_upstream_share_accounting(
+        &self,
+        from_translator_recv: tokio::sync::mpsc::Receiver<
+            roles_logic_sv2::parsers::Mining<'static>,
+        >,
+        to_translator_send: tokio::sync::mpsc::Sender<roles_logic_sv2::parsers::Mining<'static>>,
+    ) -> Result<crate::shared::utils::AbortOnDrop, Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(ref manager) = self.upstream_manager {
+            manager
+                .start_multi_upstream_share_accounting(from_translator_recv, to_translator_send)
+                .await
+        } else {
+            Err("Multi-upstream manager not initialized".into())
         }
     }
 
@@ -451,6 +469,23 @@ impl Router {
             Ok(())
         } else {
             Err("No upstream manager available")
+        }
+    }
+    pub async fn start_multi_upstream_share_accounting_with_jdc(
+        &self,
+        from_jdc_recv: Receiver<roles_logic_sv2::parsers::Mining<'static>>,
+        to_jdc_send: Sender<roles_logic_sv2::parsers::Mining<'static>>,
+    ) -> Result<AbortOnDrop, Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(ref manager) = self.upstream_manager {
+            // Direct pass-through since types already match
+            let manager_handle = manager
+                .start_multi_upstream_share_accounting(from_jdc_recv, to_jdc_send)
+                .await?;
+
+            // No type conversion needed - just return the handle
+            Ok(manager_handle)
+        } else {
+            Err("Multi-upstream manager not initialized".into())
         }
     }
 }

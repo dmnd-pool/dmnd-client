@@ -10,7 +10,7 @@ use crate::shared::utils::AbortOnDrop;
 use config::Configuration;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
-use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
+use proxy_state::{PoolState, ProxyState, TpState, TranslatorState}; // Add ProxyStates
 use std::{net::SocketAddr, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{error, info, warn};
@@ -83,17 +83,10 @@ async fn main() {
 
     let pool_addresses = Configuration::pool_address()
         .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| {
-            if Configuration::test() {
-                panic!("Test pool address is missing");
-            } else {
-                panic!("Pool address is missing");
-            }
-        });
+        .unwrap_or_else(|| panic!("Pool address is missing"));
 
     // Set downstream hashrate using Configuration pattern
-    let downstream_hashrate = Configuration::downstream_hashrate();
-    ProxyState::set_downstream_hashrate(downstream_hashrate);
+    ProxyState::set_downstream_hashrate(Configuration::downstream_hashrate());
 
     // Get pool addresses with auth keys using Configuration pattern
     let pool_address_keys: Vec<(SocketAddr, Secp256k1PublicKey)> = pool_addresses
@@ -127,8 +120,6 @@ async fn main() {
     // Handle the three different scenarios
 
     if wants_distribution {
-        info!("=== HASHRATE DISTRIBUTION MODE ===");
-
         // Get the distribution from config
         let distribution = Configuration::hashrate_distribution().unwrap_or_else(|| {
             let count = pool_address_keys.len();
@@ -150,11 +141,10 @@ async fn main() {
             std::process::exit(1);
         }
 
-        info!("Starting proxy with hashrate distribution...");
+        // Wait for connections to establish
+        tokio::time::sleep(Duration::from_secs(3)).await;
         initialize_proxy(&mut router, None, epsilon).await;
     } else if pool_address_keys.len() > 1 {
-        info!("=== LATENCY-BASED SELECTION MODE ===");
-
         // Test latency and select best pool
         let best_upstream = router.select_pool_connect().await;
 
@@ -166,44 +156,12 @@ async fn main() {
 
         initialize_proxy(&mut router, best_upstream, epsilon).await;
     } else {
-        info!("=== SINGLE UPSTREAM MODE ===");
-
-        // Connect to single pool
         let best_upstream = router.select_pool_connect().await;
-
-        if let Some(ref upstream) = best_upstream {
-            info!("Connected to single upstream: {:?}", upstream);
-        } else {
+        if best_upstream.is_none() {
             error!("Failed to connect to upstream pool");
             std::process::exit(1);
         }
-
         initialize_proxy(&mut router, best_upstream, epsilon).await;
-    }
-
-    // Wait a moment for connections to establish
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Show hashrate distribution
-    let detailed_stats = router.get_detailed_connection_stats().await;
-    let active_count = detailed_stats
-        .iter()
-        .filter(|(_, is_active, _)| *is_active)
-        .count();
-
-    if active_count > 0 {
-        info!("Proxy initialized with {} active upstream(s)", active_count);
-
-        // Start monitoring task for multi-upstream
-        let router_clone = router.clone();
-        tokio::spawn(async move {
-            monitor_multi_upstream(router_clone, epsilon).await;
-        });
-
-        // Keep main thread alive
-        loop {
-            tokio::time::sleep(Duration::from_secs(300)).await;
-        }
     }
 }
 
@@ -214,18 +172,105 @@ async fn initialize_proxy(
 ) {
     // Check if we're in multi-upstream mode
     if router.is_multi_upstream_enabled() {
-        info!("Initializing proxy in HASHRATE DISTRIBUTION mode");
-
-        // Start API server for monitoring
+        // Initialize all the same components as single upstream mode
         let stats_sender = api::stats::StatsSender::new();
-        let _server_handle = tokio::spawn(api::start(router.clone(), stats_sender));
 
-        // Start the monitor task in the background
-        let router_clone = router.clone();
-        tokio::spawn(async move {
-            monitor_multi_upstream(router_clone, epsilon).await;
-        });
+        // Start SV1 ingress to handle downstream (mining device) connections
+        let (downs_sv1_tx, downs_sv1_rx) = channel(10);
+        let sv1_ingress_abortable = ingress::sv1_ingress::start_listen_for_downstream(downs_sv1_tx);
 
+        // Start translator to handle SV1 <-> SV2 translation
+        let (translator_up_tx, mut translator_up_rx) = channel(10);
+        let translator_abortable =
+            match translator::start(downs_sv1_rx, translator_up_tx, stats_sender.clone()).await {
+                Ok(abortable) => abortable,
+                Err(e) => {
+                    error!("Impossible to initialize translator: {e}");
+                    ProxyState::update_translator_state(TranslatorState::Down);
+                    ProxyState::update_tp_state(TpState::Down);
+                    return;
+                }
+            };
+
+        // Get translator channels
+        let (jdc_to_translator_sender, jdc_from_translator_receiver, _) = translator_up_rx
+            .recv()
+            .await
+            .expect("Translator failed before initialization");
+
+        // Setup JDC channels with correct types
+        let (from_jdc_to_share_accounter_send, from_jdc_to_share_accounter_recv) =
+            channel::<roles_logic_sv2::parsers::Mining<'static>>(10);
+        let (from_share_accounter_to_jdc_send, from_share_accounter_to_jdc_recv) =
+            channel::<roles_logic_sv2::parsers::Mining<'static>>(10);
+
+        // Check if TP is available first
+        let tp_available = TP_ADDRESS.safe_lock(|tp| tp.clone()).ok().flatten();
+
+        let (share_accounter_abortable, jdc_abortable) = if let Some(_tp_addr) = tp_available {
+            // WITH TP: Start JDC first, then share accounting with JDC channels
+            let jdc_handle = jd_client::start(
+                jdc_from_translator_receiver,
+                jdc_to_translator_sender,
+                from_share_accounter_to_jdc_recv,
+                from_jdc_to_share_accounter_send,
+            )
+            .await;
+
+            if jdc_handle.is_some() {
+                // JDC started successfully, use JDC channels
+                match router
+                    .start_multi_upstream_share_accounting_with_jdc(
+                        from_jdc_to_share_accounter_recv,
+                        from_share_accounter_to_jdc_send,
+                    )
+                    .await
+                {
+                    Ok(handle) => (handle, jdc_handle),
+                    Err(e) => {
+                        error!(
+                            "Failed to start multi-upstream share accounting with JDC: {}",
+                            e
+                        );
+                        return;
+                    }
+                }
+            } else {
+                error!("Failed to start JDC with TP");
+                return;
+            }
+        } else {
+            // WITHOUT TP: Use translator channels directly
+            match router
+                .start_multi_upstream_share_accounting(
+                    jdc_from_translator_receiver,
+                    jdc_to_translator_sender,
+                )
+                .await
+            {
+                Ok(handle) => (handle, None),
+                Err(e) => {
+                    error!("Failed to start multi-upstream share accounting: {}", e);
+                    return;
+                }
+            }
+        };
+
+        // Start API server
+        let server_handle = tokio::spawn(api::start(router.clone(), stats_sender));
+
+        // Collect abort handles for monitoring
+        let mut abort_handles = vec![
+            (sv1_ingress_abortable, "sv1_ingress".to_string()),
+            (translator_abortable, "translator".to_string()),
+            (share_accounter_abortable, "share_accounter".to_string()),
+        ];
+        if let Some(jdc_handle) = jdc_abortable {
+            abort_handles.push((jdc_handle, "jdc".to_string()));
+        }
+
+        // Use combined monitoring function
+        monitor_multi_upstream(router.clone(), abort_handles, server_handle, epsilon).await;
         return;
     }
 
@@ -267,13 +312,14 @@ async fn initialize_proxy(
                 }
             };
 
-        let (from_jdc_to_share_accounter_send, from_jdc_to_share_accounter_recv) = channel(10);
-        let (from_share_accounter_to_jdc_send, from_share_accounter_to_jdc_recv) = channel(10);
+        // This creates the channels but translator has no upstream to connect to
         let (jdc_to_translator_sender, jdc_from_translator_receiver, _) = translator_up_rx
             .recv()
             .await
             .expect("Translator failed before initialization");
 
+        let (from_jdc_to_share_accounter_send, from_jdc_to_share_accounter_recv) = channel(10);
+        let (from_share_accounter_to_jdc_send, from_share_accounter_to_jdc_recv) = channel(10);
         let jdc_abortable: Option<AbortOnDrop>;
         let share_accounter_abortable;
         let tp = match TP_ADDRESS.safe_lock(|tp| tp.clone()) {
@@ -418,34 +464,55 @@ async fn monitor(
     }
 }
 
-// Consolidated monitoring function for multi-upstream mode
-async fn monitor_multi_upstream(router: Router, _epsilon: Duration) {
+// Combined monitoring function for multi-upstream mode
+async fn monitor_multi_upstream(
+    router: Router,
+    abort_handles: Vec<(AbortOnDrop, String)>,
+    server_handle: tokio::task::JoinHandle<()>,
+    _epsilon: Duration,
+) {
     let mut report_counter = 0;
-    let mut last_stats: Option<Vec<(String, bool, f32)>> = None;
 
     loop {
         tokio::time::sleep(Duration::from_secs(30)).await;
 
-        let detailed_stats = router.get_detailed_connection_stats().await;
-        let active_count = detailed_stats
+        // Monitor finished tasks (critical components)
+        if let Some((_handle, name)) = abort_handles
             .iter()
-            .filter(|(_, active, _)| *active)
-            .count();
-
-        // Only log every 10 cycles (5 minutes) or if stats changed significantly
-        let stats_changed = match &last_stats {
-            Some(prev) => {
-                prev.len() != detailed_stats.len()
-                    || prev.iter().zip(&detailed_stats).any(
-                        |((_, prev_active, prev_pct), (_, active, pct))| {
-                            prev_active != active || (prev_pct - pct).abs() > 1.0
-                        },
-                    )
+            .find(|(handle, _name)| handle.is_finished())
+        {
+            if name != "jdc" {
+                error!("Critical task {:?} failed, restarting", name);
+                for (handle, _name) in abort_handles {
+                    drop(handle);
+                }
+                server_handle.abort();
+                return;
             }
-            None => true,
-        };
+        }
 
-        if stats_changed || report_counter >= 10 {
+        // Check proxy state - but be more lenient for multi-upstream mode
+        let is_proxy_down = ProxyState::is_proxy_down();
+        if is_proxy_down.0 {
+            if let Some(ref status) = is_proxy_down.1 {
+                let status_str = format!("{:?}", status);
+                if !status_str.contains("Tp(Down)") && !status_str.contains("InternalInconsistency")
+                {
+                    error!("{:?} is DOWN, restarting", status);
+                    drop(abort_handles);
+                    server_handle.abort();
+                    return;
+                }
+            }
+        }
+
+        if report_counter >= 10 {
+            let detailed_stats = router.get_detailed_connection_stats().await;
+            let active_count = detailed_stats
+                .iter()
+                .filter(|(_, active, _)| *active)
+                .count();
+
             if active_count > 0 {
                 info!("Active pools: {}", active_count);
                 for (upstream_id, is_active, percentage) in &detailed_stats {
@@ -455,13 +522,11 @@ async fn monitor_multi_upstream(router: Router, _epsilon: Duration) {
                 }
             }
             report_counter = 0;
-            last_stats = Some(detailed_stats);
         } else {
             report_counter += 1;
         }
     }
 }
-
 pub enum Reconnect {
     NewUpstream(std::net::SocketAddr), // Reconnecting with a new upstream
     NoUpstream,                        // Reconnecting without upstream
