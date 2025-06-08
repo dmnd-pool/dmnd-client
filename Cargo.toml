@@ -4,9 +4,11 @@ version = "0.2.0"
 edition = "2021"
 
 [dependencies]
-dashmap = {version = "6.1.0", features = ["inline"]}
-bitcoin = {version = "0.32.5", features = ["serde","rand"]}
-serde_json = { version = "1.0.64", default-features = false, features = ["alloc"] }
+dashmap = { version = "6.1.0", features = ["inline"] }
+bitcoin = { version = "0.32.5", features = ["serde", "rand"] }
+serde_json = { version = "1.0.64", default-features = false, features = [
+    "alloc",
+] }
 tokio-util = { version = "*", features = ["codec"] }
 nohash-hasher = "*"
 futures = "*"
@@ -14,18 +16,23 @@ async-recursion = "1.0.0"
 lazy_static = "1.4.0"
 rand = "0.8.4"
 tracing = { version = "0.1" }
-tracing-subscriber = { version = "*", features = ["env-filter"]}
-tokio = {version="^1.36.0",features = ["full","tracing", "macros","rt-multi-thread"]}
+tracing-subscriber = { version = "*", features = ["env-filter"] }
+tokio = { version = "^1.36.0", features = [
+    "full",
+    "tracing",
+    "macros",
+    "rt-multi-thread",
+] }
 key-utils = "1.0.0"
-pid = { version = "4.0.0"}
-clap = {version = "4.5.31", features = ["derive"]}
-axum = {version = "0.8.1"}
-serde = { version = "1.0.219", features = ["derive"] }  
-sysinfo = {version = "0.33.1"}
+pid = { version = "4.0.0" }
+clap = { version = "4.5.31", features = ["derive"] }
+axum = { version = "0.8.1", features = ["ws"] }
+serde = { version = "1.0.219", features = ["derive"] }
+sysinfo = { version = "0.33.1" }
 primitive-types = { version = "0.13.1" }
-toml ={ version = "0.8.22" }
-self_update = {version = "0.42.0", features = ["archive-tar"]}
-reqwest ={ version = "0.12.20"}
+toml = { version = "0.8.22" }
+self_update = { version = "0.42.0", features = ["archive-tar"] }
+reqwest = { version = "0.12.20" }
 #roles_logic_sv2 = "1.2.1"
 #sv1_api = "1.0.1"
 #demand-sv2-connection = "0.0.3"
@@ -45,17 +52,22 @@ reqwest ={ version = "0.12.20"}
 #codec_sv2 = {features = ["noise_sv2","with_buffer_pool"], path = "../stratum/protocols/v2/codec-sv2" }
 #sv1_api = {path = "../stratum/protocols/v1" }
 
-demand-share-accounting-ext = { git = "https://github.com/demand-open-source/share-accounting-ext"}
-demand-sv2-connection = {git = "https://github.com/demand-open-source/demand-sv2-connection"}
-roles_logic_sv2 = { git = "https://github.com/demand-open-source/stratum", subdirectory = "protocols/v2/roles-logic-sv2"}
+demand-share-accounting-ext = { git = "https://github.com/demand-open-source/share-accounting-ext" }
+demand-sv2-connection = { git = "https://github.com/demand-open-source/demand-sv2-connection" }
+roles_logic_sv2 = { git = "https://github.com/demand-open-source/stratum", subdirectory = "protocols/v2/roles-logic-sv2" }
 framing_sv2 = { git = "https://github.com/demand-open-source/stratum", subdirectory = "protocols/v2/framing_sv2" }
-binary_sv2 = { git = "https://github.com/demand-open-source/stratum",subdirectory = "protocols/v2/binary_sv2"}
-noise_sv2 = { git = "https://github.com/demand-open-source/stratum",subdirectory = "protocols/v2/noise-sv2"}
-codec_sv2 = { git = "https://github.com/demand-open-source/stratum",subdirectory = "protocols/v2/codec-sv2", features = ["noise_sv2","with_buffer_pool"]}
-sv1_api = { git = "https://github.com/demand-open-source/stratum",subdirectory = "protocols/v1"}
+binary_sv2 = { git = "https://github.com/demand-open-source/stratum", subdirectory = "protocols/v2/binary_sv2" }
+noise_sv2 = { git = "https://github.com/demand-open-source/stratum", subdirectory = "protocols/v2/noise-sv2" }
+codec_sv2 = { git = "https://github.com/demand-open-source/stratum", subdirectory = "protocols/v2/codec-sv2", features = [
+    "noise_sv2",
+    "with_buffer_pool",
+] }
+sv1_api = { git = "https://github.com/demand-open-source/stratum", subdirectory = "protocols/v1" }
 
-
-
+bitcoincore-rpc = "0.19.0"
+zmq = "0.10.0"
+tokio-stream = { version = "0.1.17", features = ["sync"] }
+tower-http = { version = "0.6.6", features = ["cors"] }
 
 
 [dev-dependencies]
