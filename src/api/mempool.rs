@@ -1,5 +1,4 @@
 use super::AppState;
-use axum::Extension;
 use axum::{
     extract::{
         ws::{WebSocket, WebSocketUpgrade},
@@ -8,8 +7,8 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use bitcoin::consensus::encode;
-use bitcoin::{Transaction, Txid};
+use bitcoin::consensus::{deserialize, encode};
+use bitcoin::{Block, Transaction, Txid};
 use bitcoincore_rpc::json::GetMempoolEntryResultFees;
 use bitcoincore_rpc::{Client, RpcApi};
 use futures::StreamExt;
@@ -17,9 +16,10 @@ use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
+use tracing::{error, info};
 
 #[derive(Debug, Serialize, Clone)]
-pub struct Tx {
+pub struct MempoolTransaction {
     pub txid: String,
     pub vsize: u64,
     pub weight: Option<u64>,
@@ -37,7 +37,7 @@ pub struct Tx {
     pub unbroadcast: Option<bool>,
 }
 
-impl From<(Txid, bitcoincore_rpc::json::GetMempoolEntryResult)> for Tx {
+impl From<(Txid, bitcoincore_rpc::json::GetMempoolEntryResult)> for MempoolTransaction {
     fn from((txid, entry): (Txid, bitcoincore_rpc::json::GetMempoolEntryResult)) -> Self {
         Self {
             txid: txid.to_string(),
@@ -59,87 +59,126 @@ impl From<(Txid, bitcoincore_rpc::json::GetMempoolEntryResult)> for Tx {
     }
 }
 
-type TxSender = broadcast::Sender<Tx>;
+#[derive(Debug, Serialize, Clone)]
+pub struct BlockTransactionList {
+    pub block_hash: String,
+    pub txids: Vec<String>,
+}
 
-pub async fn get_mempool_txs(State(state): State<AppState>) -> Json<Vec<Tx>> {
-    match state.rpc.get_raw_mempool_verbose() {
-        Ok(entries) => {
-            let txs = entries.into_iter().map(Tx::from).collect();
-            Json(txs)
+pub type TxBroadcaster = broadcast::Sender<MempoolTransaction>;
+pub type BlockBroadcaster = broadcast::Sender<BlockTransactionList>;
+
+async fn stream_to_ws<T: Serialize + Clone + Send + 'static>(
+    mut socket: WebSocket,
+    subscriber: broadcast::Receiver<T>,
+    label: &str,
+) {
+    let mut stream = BroadcastStream::new(subscriber);
+    while let Some(Ok(item)) = stream.next().await {
+        if let Ok(json) = serde_json::to_string(&item) {
+            if socket
+                .send(axum::extract::ws::Message::Text(json.into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
-        Err(err) => {
-            println!("rpc.get_raw_mempool_verbose failed: {err}");
+    }
+    info!("WebSocket closed: {}", label);
+}
+
+pub async fn ws_new_transactions(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| stream_to_ws(socket, state.tx_broadcaster.subscribe(), "new_txs"))
+}
+
+pub async fn ws_block_transactions(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| {
+        stream_to_ws(socket, state.block_broadcaster.subscribe(), "block_txs")
+    })
+}
+
+pub async fn fetch_mempool(State(state): State<AppState>) -> Json<Vec<MempoolTransaction>> {
+    match state.rpc.get_raw_mempool_verbose() {
+        Ok(entries) => Json(entries.into_iter().map(MempoolTransaction::from).collect()),
+        Err(e) => {
+            error!("Failed to fetch mempool: {e}");
             Json(Vec::new())
         }
     }
 }
 
-pub fn spawn_zmq_task(rpc: Arc<Client>, tx_sender: TxSender, zmq_address: &'static str) {
-    let _handle = std::thread::spawn(move || {
+/// Generic ZMQ stream spawner for broadcasting messages of type T
+fn start_zmq_stream<T, F>(
+    broadcaster: broadcast::Sender<T>,
+    zmq_url: &'static str,
+    subscribe_topic: &'static str,
+    process_msg: F,
+) where
+    T: Clone + Send + 'static,
+    F: Fn(&[u8]) -> Option<T> + Send + 'static,
+{
+    std::thread::spawn(move || {
         let context = zmq::Context::new();
         let subscriber = context
             .socket(zmq::SUB)
             .expect("Failed to create ZMQ socket");
         subscriber
-            .connect(zmq_address)
+            .connect(zmq_url)
             .expect("Failed to connect to ZMQ address");
         subscriber
-            .set_subscribe(b"rawtx")
+            .set_subscribe(subscribe_topic.as_bytes())
             .expect("Failed to subscribe");
 
-        let mut backlog = Vec::new();
+        let mut backlog: Vec<T> = Vec::new();
 
         loop {
-            backlog.retain(|tx: &Tx| match tx_sender.send(tx.clone()) {
+            backlog.retain(|item| match broadcaster.send(item.clone()) {
                 Ok(_) => false,
                 Err(_) => true,
             });
 
-            let topic = subscriber.recv_msg(0).expect("Failed to receive topic");
-            if topic.as_str().unwrap_or("") != "rawtx" {
-                continue;
-            }
-
-            let raw_tx = subscriber
-                .recv_bytes(0)
-                .expect("Failed to receive rawtx data");
-
-            if let Ok(tx) = encode::deserialize::<Transaction>(&raw_tx) {
-                let txid = tx.compute_txid();
-                match rpc.get_mempool_entry(&txid) {
-                    Ok(entry) => {
-                        let tx_meta = Tx::from((txid, entry));
-                        if tx_sender.send(tx_meta.clone()).is_err() {
-                            backlog.push(tx_meta);
-                        }
+            let topic_msg = subscriber.recv_msg(0).expect("Failed to receive topic");
+            if topic_msg.as_str().unwrap_or("") == subscribe_topic {
+                let raw = subscriber.recv_bytes(0).expect("Failed to receive data");
+                if let Some(item) = process_msg(&raw) {
+                    if broadcaster.send(item.clone()).is_err() {
+                        backlog.push(item);
                     }
-                    Err(err) => println!("mempool entry not found for {txid}: {err}"),
                 }
             }
         }
     });
 }
 
-pub async fn ws_upgrade(
-    (ws, Extension(tx_sender)): (WebSocketUpgrade, Extension<TxSender>),
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, tx_sender.subscribe()))
+pub fn start_zmq_tx_stream(rpc: Arc<Client>, broadcaster: TxBroadcaster, zmq_url: &'static str) {
+    start_zmq_stream(broadcaster, zmq_url, "rawtx", move |raw| {
+        encode::deserialize::<Transaction>(raw).ok().and_then(|tx| {
+            let txid = tx.compute_txid();
+            rpc.get_mempool_entry(&txid)
+                .ok()
+                .map(|entry| MempoolTransaction::from((txid, entry)))
+        })
+    });
 }
 
-async fn handle_ws(mut socket: WebSocket, rx: broadcast::Receiver<Tx>) {
-    let mut stream = BroadcastStream::new(rx);
-    loop {
-        tokio::select! {
-            biased;
-            Some(Ok(tx)) = stream.next() => {
-                if let Ok(json) = serde_json::to_string(&tx) {
-                    if socket.send(axum::extract::ws::Message::Text(json.into())).await.is_err() {
-                        break;
-                    }
-                }
-            }
-            _ = socket.recv() => break,
-        }
-    }
-    println!("WebSocket connection closed");
+pub fn start_zmq_block_stream(broadcaster: BlockBroadcaster, zmq_url: &'static str) {
+    start_zmq_stream(broadcaster, zmq_url, "rawblock", move |raw| {
+        deserialize::<Block>(raw)
+            .ok()
+            .map(|block| BlockTransactionList {
+                block_hash: block.block_hash().to_string(),
+                txids: block
+                    .txdata
+                    .into_iter()
+                    .map(|t| t.compute_txid().to_string())
+                    .collect(),
+            })
+    });
 }
