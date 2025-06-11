@@ -1,4 +1,4 @@
-use crate::{minin_pool_connection, proxy_state::ProxyState, HashUnit};
+use crate::{minin_pool_connection, router::connection_manager::ConnectionManager, HashUnit};
 use key_utils::Secp256k1PublicKey;
 use rand;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
@@ -178,7 +178,7 @@ impl MultiUpstreamManager {
         }
 
         // Assign percentages to best latency pools first
-        let downstream_hashrate = ProxyState::get_downstream_hashrate();
+        let downstream_hashrate = ConnectionManager::get_downstream_hashrate();
 
         for (i, (pool_id, _address, latency)) in ranked_pools.iter().enumerate() {
             if let Some(&percentage) = distribution.get(i) {

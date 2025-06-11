@@ -6,6 +6,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+use crate::router::connection_manager::ConnectionManager; // Add this import
 use crate::shared::utils::AbortOnDrop;
 use config::Configuration;
 use key_utils::Secp256k1PublicKey;
@@ -86,7 +87,7 @@ async fn main() {
         .unwrap_or_else(|| panic!("Pool address is missing"));
 
     // Set downstream hashrate using Configuration pattern
-    ProxyState::set_downstream_hashrate(Configuration::downstream_hashrate());
+    ConnectionManager::set_downstream_hashrate(Configuration::downstream_hashrate());
 
     // Get pool addresses with auth keys using Configuration pattern
     let pool_address_keys: Vec<(SocketAddr, Secp256k1PublicKey)> = pool_addresses

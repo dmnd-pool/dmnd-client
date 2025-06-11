@@ -1,6 +1,4 @@
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 use lazy_static::lazy_static;
 use roles_logic_sv2::utils::Mutex;
@@ -87,22 +85,8 @@ pub enum UpstreamType {
     TranslatorUpstream,
 }
 
-/// Create an UpstreamConnection struct to store connection info
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct UpstreamConnection {
-    pub url: String,
-    pub address: std::net::SocketAddr,
-    pub auth_key: key_utils::Secp256k1PublicKey,
-    pub connection_type: UpstreamType,
-    pub is_connected: bool,
-    pub shares_submitted: u64,
-    pub shares_accepted: u64,
-    pub last_used: Instant,
-}
-
 /// Represents global proxy state
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyState {
     pub pool: PoolState,
     pub tp: TpState,
@@ -112,10 +96,6 @@ pub struct ProxyState {
     pub inconsistency: Option<u32>,
     pub downstream: DownstreamState,
     pub upstream: UpstreamState,
-
-    // New fields for multiple upstream support
-    pub upstream_connections: HashMap<String, UpstreamConnection>,
-    pub total_hashrate: f32,
 }
 
 impl ProxyState {
@@ -129,10 +109,6 @@ impl ProxyState {
             inconsistency: None,
             downstream: DownstreamState::Up,
             upstream: UpstreamState::Up,
-
-            // Initialize new fields
-            upstream_connections: HashMap::new(),
-            total_hashrate: 0.0,
         }
     }
 
@@ -263,57 +239,6 @@ impl ProxyState {
         }
     }
 
-    /// Set the downstream hashrate to be distributed among upstreams
-    pub fn set_downstream_hashrate(hashrate: f32) {
-        info!("Setting downstream hashrate to: {} h/s", hashrate);
-        if PROXY_STATE
-            .safe_lock(|state| {
-                state.total_hashrate = hashrate;
-            })
-            .is_err()
-        {
-            error!("Global Proxy Mutex Corrupted");
-            std::process::exit(1);
-        }
-    }
-
-    /// Get the downstream hashrate
-    pub fn get_downstream_hashrate() -> f32 {
-        let mut hashrate = 0.0;
-        if PROXY_STATE
-            .safe_lock(|state| {
-                hashrate = state.total_hashrate;
-            })
-            .is_err()
-        {
-            error!("Global Proxy Mutex Corrupted");
-            std::process::exit(1);
-        }
-        hashrate
-    }
-
-    /// Update connection status for an upstream with timestamp
-    pub fn set_upstream_connection_status(id: &str, connected: bool) {
-        if PROXY_STATE
-            .safe_lock(|state| {
-                if let Some(conn) = state.upstream_connections.get_mut(id) {
-                    conn.is_connected = connected;
-                    if connected {
-                        conn.last_used = Instant::now();
-                        info!("Upstream {} is now connected", id);
-                    } else {
-                        info!("Upstream {} is now disconnected", id);
-                    }
-                }
-            })
-            .is_err()
-        {
-            error!("Global Proxy Mutex Corrupted");
-            std::process::exit(1);
-        }
-    }
-
-    /// Check if proxy is down
     pub fn is_proxy_down() -> (bool, Option<String>) {
         let errors = Self::get_errors();
         if errors.is_ok() && errors.as_ref().unwrap().is_empty() {

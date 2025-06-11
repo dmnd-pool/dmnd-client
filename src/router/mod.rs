@@ -25,8 +25,11 @@ use crate::{
     shared::utils::AbortOnDrop,
 };
 
-// Add the new module
+// Add the new modules
+pub mod connection_manager;
 pub mod multi_upstream_manager;
+
+pub use connection_manager::ConnectionManager;
 pub use multi_upstream_manager::MultiUpstreamManager;
 
 /// Router handles connection to Multiple upstreams.
@@ -43,6 +46,7 @@ pub struct Router {
     latency_tx: tokio::sync::watch::Sender<Option<Duration>>,
     pub latency_rx: tokio::sync::watch::Receiver<Option<Duration>>,
 }
+
 impl Clone for Router {
     fn clone(&self) -> Self {
         Self {
@@ -65,11 +69,7 @@ impl Router {
     pub fn new(
         pool_addresses: Vec<SocketAddr>,
         auth_pub_k: Secp256k1PublicKey,
-        // Configuration msg used to setup connection between client and pool
-        // If not, present `get_mining_setup_connection_msg()` is called to generated default values
         setup_connection_msg: Option<SetupConnection<'static>>,
-        // Max duration for pool setup after which it times out.
-        // If None, default time of 5s is used.
         timer: Option<Duration>,
     ) -> Self {
         let (latency_tx, latency_rx) = watch::channel(None);
@@ -98,7 +98,7 @@ impl Router {
         let pool_addresses: Vec<SocketAddr> =
             pool_address_keys.iter().map(|(addr, _)| *addr).collect();
         let keys: Vec<Secp256k1PublicKey> = pool_address_keys.iter().map(|(_, key)| *key).collect();
-        let auth_pub_k = keys[0]; // Use first key as primary
+        let auth_pub_k = keys[0];
 
         let (latency_tx, latency_rx) = watch::channel(None);
 
@@ -121,7 +121,7 @@ impl Router {
         pool_address_keys: Vec<(SocketAddr, Secp256k1PublicKey)>,
         setup_connection_msg: Option<SetupConnection<'static>>,
         timer: Option<Duration>,
-        use_distribution: bool, // Changed from use_parallel to use_distribution
+        use_distribution: bool,
     ) -> Result<Self, &'static str> {
         let pool_addresses: Vec<SocketAddr> =
             pool_address_keys.iter().map(|(addr, _)| *addr).collect();
@@ -139,7 +139,6 @@ impl Router {
             None
         };
 
-        // Use
         let auth_pub_k = keys
             .first()
             .copied()
@@ -178,8 +177,6 @@ impl Router {
     pub async fn monitor_upstream(&mut self, epsilon: Duration) -> Option<SocketAddr> {
         // For multi-upstream mode, we don't switch since we use all simultaneously
         if self.is_multi_upstream_enabled() {
-            // In distribution mode, we don't need to switch upstreams
-            // All upstreams are used simultaneously
             return None;
         }
 
@@ -209,6 +206,7 @@ impl Router {
 
         best_pool.map(|pool| (pool, least_latency))
     }
+
     /// Select the best pool for monitoring
     async fn select_pool_monitor(&self, epsilon: Duration) -> Option<SocketAddr> {
         if let Some((best_pool, best_pool_latency)) = self.select_pool().await {
@@ -223,7 +221,6 @@ impl Router {
                         return Some(best_pool);
                     }
                 };
-                // saturating_sub is used to avoid panic on negative duration result
                 if best_pool_latency < current_latency.saturating_sub(epsilon) {
                     info!(
                         "Found faster pool: {:?} with latency {:?}",
@@ -244,7 +241,6 @@ impl Router {
     pub async fn select_pool_connect(&mut self) -> Option<SocketAddr> {
         info!("Selecting the best upstream");
 
-        // Remove round-robin logic - only use latency-based selection
         if let Some((pool, latency)) = self.select_pool().await {
             info!("Latency for upstream {:?} is {:?}", pool, latency);
             self.latency_tx.send_replace(Some(latency));
@@ -254,7 +250,7 @@ impl Router {
         }
     }
 
-    /// Selects the best upstream and connects to.
+    /// Selects the best upstream and connects to it.
     /// Uses minin_pool_connection::connect_pool
     pub async fn connect_pool(
         &mut self,
@@ -271,8 +267,6 @@ impl Router {
             Some(addr) => addr,
             None => match self.select_pool_connect().await {
                 Some(addr) => addr,
-                // Called when we initialize the proxy, without a valid pool we can not start mine and we
-                // return Err
                 None => {
                     return Err(minin_pool_connection::errors::Error::Unrecoverable);
                 }
@@ -282,7 +276,7 @@ impl Router {
 
         info!("Upstream {:?} selected", pool);
 
-        // Find the matching auth key for this address - fix field name
+        // Find the matching auth key for this address
         let auth_pub_key = if let Some(index) = self.pool_addresses.iter().position(|&a| a == pool)
         {
             self.keys[index]
@@ -299,7 +293,7 @@ impl Router {
         .await
         {
             Ok((send_to_pool, recv_from_pool, pool_connection_abortable)) => {
-                // Update ProxyState with successful connection
+                // Update ConnectionManager with successful connection
                 let upstream_id = format!(
                     "upstream-{}",
                     self.pool_addresses
@@ -307,7 +301,14 @@ impl Router {
                         .position(|&a| a == pool)
                         .unwrap_or(0)
                 );
-                ProxyState::set_upstream_connection_status(&upstream_id, true);
+
+                let connection_info = connection_manager::ConnectionInfo {
+                    connected: true,
+                    address: pool,
+                    allocated_percentage: 100.0, // Single upstream gets 100%
+                    last_seen: std::time::Instant::now(),
+                };
+                ConnectionManager::set_upstream_connection(&upstream_id, connection_info);
 
                 // Update current pool address
                 crate::POOL_ADDRESS
@@ -316,14 +317,14 @@ impl Router {
                     })
                     .unwrap_or_else(|_| {
                         error!("Pool address Mutex corrupt");
-                        crate::proxy_state::ProxyState::update_inconsistency(Some(1));
+                        ProxyState::update_inconsistency(Some(1));
                     });
 
                 Ok((send_to_pool, recv_from_pool, pool_connection_abortable))
             }
 
             Err(e) => {
-                // Update ProxyState with failed connection
+                // Update ConnectionManager with failed connection
                 let upstream_id = format!(
                     "upstream-{}",
                     self.pool_addresses
@@ -331,7 +332,14 @@ impl Router {
                         .position(|&a| a == pool)
                         .unwrap_or(0)
                 );
-                ProxyState::set_upstream_connection_status(&upstream_id, false);
+
+                let connection_info = connection_manager::ConnectionInfo {
+                    connected: false,
+                    address: pool,
+                    allocated_percentage: 0.0,
+                    last_seen: std::time::Instant::now(),
+                };
+                ConnectionManager::set_upstream_connection(&upstream_id, connection_info);
 
                 Err(e)
             }
@@ -355,9 +363,25 @@ impl Router {
         }
     }
 
+    /// Start multi-upstream share accounting with JDC
+    pub async fn start_multi_upstream_share_accounting_with_jdc(
+        &self,
+        from_jdc_recv: Receiver<roles_logic_sv2::parsers::Mining<'static>>,
+        to_jdc_send: Sender<roles_logic_sv2::parsers::Mining<'static>>,
+    ) -> Result<AbortOnDrop, Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(ref manager) = self.upstream_manager {
+            let manager_handle = manager
+                .start_multi_upstream_share_accounting(from_jdc_recv, to_jdc_send)
+                .await?;
+            Ok(manager_handle)
+        } else {
+            Err("Multi-upstream manager not initialized".into())
+        }
+    }
+
     /// Returns the sum all the latencies for a given upstream
     async fn get_latency(&self, pool_address: SocketAddr) -> Result<Duration, ()> {
-        // Find the auth key for this address - fix field names
+        // Find the auth key for this address
         let auth_pub_key =
             if let Some(index) = self.pool_addresses.iter().position(|&a| a == pool_address) {
                 self.keys[index]
@@ -369,7 +393,6 @@ impl Router {
         let setup_connection_msg = self.setup_connection_msg.as_ref();
         let timer = self.timer.as_ref();
 
-        // Rest of the function remains the same
         tokio::time::timeout(
             Duration::from_secs(15),
             PoolLatency::get_mining_setup_latencies(
@@ -387,7 +410,6 @@ impl Router {
             );
         })??;
 
-        // Rest of the function remains unchanged
         if (PoolLatency::get_mining_setup_latencies(
             &mut pool,
             setup_connection_msg.cloned(),
@@ -416,7 +438,6 @@ impl Router {
             pool.open_sv2_jd_connection,
             pool.get_a_mining_token,
         ];
-        // Get sum of all latencies for pool
         let sum_of_latencies: Duration = latencies.iter().flatten().sum();
         Ok(sum_of_latencies)
     }
@@ -429,10 +450,8 @@ impl Router {
                 self.pool_addresses.len()
             );
 
-            // Add each unique upstream only once - fix field names
             for (idx, (addr, key)) in self.pool_addresses.iter().zip(self.keys.iter()).enumerate() {
                 let id = format!("upstream-{}", idx);
-
                 debug!("Adding upstream {}: {} ({})", id, addr, key);
 
                 if let Err(e) = manager
@@ -449,10 +468,7 @@ impl Router {
                 }
             }
 
-            // IMPORTANT: Initialize connections BEFORE any hashrate distribution is set
-            // This ensures add_upstream() calls are complete and won't overwrite distribution
             manager.initialize_connections().await;
-
             Ok(())
         } else {
             Err("No upstream manager available".to_string())
@@ -471,23 +487,6 @@ impl Router {
             Err("No upstream manager available")
         }
     }
-    pub async fn start_multi_upstream_share_accounting_with_jdc(
-        &self,
-        from_jdc_recv: Receiver<roles_logic_sv2::parsers::Mining<'static>>,
-        to_jdc_send: Sender<roles_logic_sv2::parsers::Mining<'static>>,
-    ) -> Result<AbortOnDrop, Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(ref manager) = self.upstream_manager {
-            // Direct pass-through since types already match
-            let manager_handle = manager
-                .start_multi_upstream_share_accounting(from_jdc_recv, to_jdc_send)
-                .await?;
-
-            // No type conversion needed - just return the handle
-            Ok(manager_handle)
-        } else {
-            Err("Multi-upstream manager not initialized".into())
-        }
-    }
 }
 
 /// Track latencies for various stages of pool connection setup.
@@ -503,7 +502,6 @@ struct PoolLatency {
 }
 
 impl PoolLatency {
-    // Create new `PoolLatency` given an upstream address
     fn new(pool: SocketAddr) -> PoolLatency {
         Self {
             pool,
@@ -516,15 +514,12 @@ impl PoolLatency {
         }
     }
 
-    /// Sets the `PoolLatency`'s `open_sv2_mining_connection`, `setup_channel_timer`, `receive_first_job`,
-    /// and `receive_first_set_new_prev_hash`
     async fn get_mining_setup_latencies(
         &mut self,
         setup_connection_msg: Option<SetupConnection<'static>>,
         timer: Option<Duration>,
         authority_public_key: Secp256k1PublicKey,
     ) -> Result<(), ()> {
-        // Set open_sv2_mining_connection latency
         let open_sv2_mining_connection_timer = Instant::now();
         match TcpStream::connect(self.pool).await {
             Ok(stream) => {
@@ -538,7 +533,6 @@ impl PoolLatency {
                     )
                     .await?;
 
-                // Set setup_channel latency
                 let setup_channel_timer = Instant::now();
                 let result = mining_setup_connection(
                     &mut receiver,
@@ -575,18 +569,15 @@ impl PoolLatency {
                                 _new_ext_job,
                             )) = message.clone()
                             {
-                                // Set receive_first_job latency
                                 self.receive_first_job = Some(timer.elapsed());
                                 received_new_job = true;
                             }
                             if let PoolExtMessages::Mining(Mining::SetNewPrevHash(_new_prev_hash)) =
                                 message.clone()
                             {
-                                // Set receive_first_set_new_prev_hash latency
                                 self.receive_first_set_new_prev_hash = Some(timer.elapsed());
                                 received_prev_hash = true;
                             }
-                            // Both latencies have been set so we break the loop
                             if received_new_job && received_prev_hash {
                                 break;
                             }
@@ -612,14 +603,11 @@ impl PoolLatency {
         }
     }
 
-    /// Sets the `PoolLatency`'s `open_sv2_jd_connection` and `get_a_mining_token`
     async fn get_jd_latencies(
         &mut self,
         authority_public_key: Secp256k1PublicKey,
     ) -> Result<(), ()> {
         let address = self.pool;
-
-        // Set open_sv2_jd_connection latency
         let open_sv2_jd_connection_timer = Instant::now();
 
         match tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(address)).await {
@@ -629,7 +617,6 @@ impl PoolLatency {
                     .map_err(|_| error!(" TP_ADDRESS Mutex Corrupted"))?;
                 if let Some(_tp_addr) = tp {
                     let initiator = Initiator::from_raw_k(authority_public_key.into_bytes())
-                        // Safe expect Key is a constant and must be right
                         .expect("Unable to create initialtor");
                     let (mut receiver, mut sender, _, _) =
                         match Connection::new(stream, HandshakeRole::Initiator(initiator)).await {
@@ -673,7 +660,6 @@ impl PoolLatency {
                         }
                     };
 
-                    // Set get_a_mining_token latency
                     let get_a_mining_token_timer = Instant::now();
                     let _token = JobDeclarator::get_last_token(&job_declarator).await;
                     self.get_a_mining_token = Some(get_a_mining_token_timer.elapsed());
@@ -698,7 +684,6 @@ fn open_channel() -> Mining<'static> {
             user_identity: "ABC"
                 .to_string()
                 .try_into()
-                // This can never fail
                 .expect("Failed to convert user identity to string"),
             nominal_hash_rate: 0.0,
         },
@@ -718,7 +703,6 @@ async fn initialize_mining_connections(
     (),
 > {
     let initiator =
-        // Safe expect Key is a constant and must be right
         Initiator::from_raw_k(authority_public_key.into_bytes()).expect("Invalid authority key");
     let (receiver, sender, _, _) =
         match Connection::new(stream, HandshakeRole::Initiator(initiator)).await {
