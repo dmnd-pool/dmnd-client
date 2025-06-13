@@ -13,6 +13,7 @@ use routes::Api;
 use stats::StatsSender;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 // Holds shared state (like the router) that so that it can be accessed in all routes.
 #[derive(Clone)]
 pub struct AppState {
@@ -24,6 +25,11 @@ pub struct AppState {
 }
 
 pub(crate) async fn start(router: Router, stats_sender: StatsSender) {
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::exact("http://localhost:3000".parse().unwrap()))
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     let rpc = Client::new(
         "http://127.0.0.1:8332",
         Auth::UserPass("username".to_string(), "password".to_string()),
@@ -58,7 +64,8 @@ pub(crate) async fn start(router: Router, stats_sender: StatsSender) {
             "/ws/blocks/confirmed/txids",
             get(mempool::ws_block_transactions),
         )
-        .with_state(state);
+        .with_state(state)
+        .layer(cors);
 
     let api_server_addr = format!("0.0.0.0:{}", *API_SERVER_PORT);
     let listener = tokio::net::TcpListener::bind(api_server_addr)
