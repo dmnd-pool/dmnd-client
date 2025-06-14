@@ -1,4 +1,5 @@
 mod errors;
+pub mod ext_negotiation;
 mod task_manager;
 
 use errors::Error;
