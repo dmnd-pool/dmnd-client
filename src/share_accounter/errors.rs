@@ -2,6 +2,9 @@ use std::fmt;
 
 #[derive(Debug)]
 pub enum Error {
+    Timeout,
+    NegotationFailed,
+    RequestIdMismatch,
     ShareAccounterTaskManagerMutexCorrupted,
     ShareAccounterTaskManagerError,
 }
@@ -16,6 +19,9 @@ impl fmt::Display for Error {
             ShareAccounterTaskManagerError => {
                 write!(f, "Share Accounter TaskManager Failed to add Task")
             }
+            Timeout => write!(f, "Timeout"),
+            NegotationFailed => write!(f, "Extension Negotation Failed"),
+            RequestIdMismatch => write!(f, "Request Id Mismatch"),
         }
     }
 }
