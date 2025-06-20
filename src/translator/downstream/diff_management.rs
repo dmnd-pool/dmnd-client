@@ -303,14 +303,18 @@ pub fn nearest_power_of_10(x: f32) -> f32 {
     if x <= 0.0 {
         return 0.001;
     }
-    let exponent = x.log10().round() as i32;
-    10f32.powi(exponent)
+    let log = x.log10();
+    let base = 10f32.powi(log.floor() as i32); // Current power of 10
+    let scaled = (x / base).ceil(); // Round up to next multiple
+    scaled * base
 }
 
 #[cfg(test)]
 mod test {
     use super::super::super::upstream::diff_management::UpstreamDifficultyConfig;
-    use crate::translator::downstream::{downstream::DownstreamDifficultyConfig, Downstream};
+    use crate::translator::downstream::{
+        diff_management::nearest_power_of_10, downstream::DownstreamDifficultyConfig, Downstream,
+    };
     use binary_sv2::U256;
     use pid::Pid;
     use rand::{thread_rng, Rng};
@@ -322,6 +326,13 @@ mod test {
         time::{Duration, Instant},
     };
     use tokio::sync::mpsc::channel;
+
+    #[test]
+    fn test_nearest_power_of_10() {
+        assert_eq!(nearest_power_of_10(450.0), 500.0);
+        assert_eq!(nearest_power_of_10(0.034), 0.04);
+        assert_eq!(nearest_power_of_10(0.0), 0.001);
+    }
 
     #[test]
     #[ignore] // TODO
