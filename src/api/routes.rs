@@ -118,14 +118,14 @@ struct AggregateStates {
 }
 
 #[derive(Debug, Serialize)]
-struct APIResponse<T> {
+pub struct APIResponse<T> {
     success: bool,
     message: Option<String>,
     data: Option<T>,
 }
 
 impl<T: Serialize> APIResponse<T> {
-    fn success(data: Option<T>) -> Self {
+    pub fn success(data: Option<T>) -> Self {
         APIResponse {
             success: true,
             message: None,
@@ -133,7 +133,7 @@ impl<T: Serialize> APIResponse<T> {
         }
     }
 
-    fn error(message: Option<String>) -> Self {
+    pub fn error(message: Option<String>) -> Self {
         APIResponse {
             success: false,
             message,

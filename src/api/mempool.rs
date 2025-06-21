@@ -1,4 +1,7 @@
+use crate::api::routes::APIResponse;
+
 use super::AppState;
+use axum::http::StatusCode;
 use axum::{
     extract::{
         ws::{WebSocket, WebSocketUpgrade},
@@ -7,12 +10,14 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use binary_sv2::{Seq064K, B016M};
 use bitcoin::consensus::{deserialize, encode};
 use bitcoin::{Block, Transaction, Txid};
 use bitcoincore_rpc::json::GetMempoolEntryResultFees;
 use bitcoincore_rpc::{Client, RpcApi};
 use futures::StreamExt;
 use serde::Serialize;
+use std::convert::TryInto;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
@@ -112,6 +117,54 @@ pub async fn fetch_mempool(State(state): State<AppState>) -> Json<Vec<MempoolTra
             Json(Vec::new())
         }
     }
+}
+
+pub async fn submit_tx_list(
+    State(state): State<AppState>,
+    Json(txids): Json<Vec<String>>,
+) -> impl IntoResponse {
+    let mut txs: Vec<B016M<'static>> = Vec::new();
+    for txid_str in txids {
+        let txid = match txid_str.parse::<Txid>() {
+            Ok(t) => t,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(APIResponse::error(Some(format!(
+                        "Invalid txid: {}",
+                        txid_str
+                    )))),
+                );
+            }
+        };
+        match state.rpc.get_raw_transaction(&txid, None) {
+            Ok(tx) => {
+                let bytes = encode::serialize(&tx);
+                let serialized: B016M<'static> = bytes.try_into().unwrap();
+                txs.push(serialized);
+            }
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(APIResponse::error(Some(format!(
+                        "Failed to fetch tx {}: {}",
+                        txid, e
+                    )))),
+                );
+            }
+        }
+    }
+    let seq: Seq064K<'static, B016M<'static>> = txs.into();
+
+    if state.tx_list_sender.send(seq).await.is_err() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(APIResponse::error(Some(
+                "Failed to send tx list".to_string(),
+            ))),
+        );
+    }
+    (StatusCode::OK, Json(APIResponse::success(None::<()>)))
 }
 
 /// Generic ZMQ stream spawner for broadcasting messages of type T

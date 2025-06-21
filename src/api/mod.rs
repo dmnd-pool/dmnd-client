@@ -2,17 +2,25 @@ mod routes;
 pub mod stats;
 mod utils;
 use crate::{
-    api::mempool::{start_zmq_block_stream, start_zmq_tx_stream, BlockBroadcaster, TxBroadcaster},
+    api::mempool::{
+        start_zmq_block_stream, start_zmq_tx_stream, submit_tx_list, BlockBroadcaster,
+        TxBroadcaster,
+    },
     router::Router,
     API_SERVER_PORT,
 };
-use axum::{routing::get, Router as AxumRouter};
+use axum::{
+    routing::{get, post},
+    Router as AxumRouter,
+};
+use binary_sv2::{Seq064K, B016M};
 use bitcoincore_rpc::{Auth, Client};
 pub mod mempool;
 use routes::Api;
 use stats::StatsSender;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc::Sender as TSender;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 // Holds shared state (like the router) that so that it can be accessed in all routes.
 #[derive(Clone)]
@@ -22,9 +30,14 @@ pub struct AppState {
     rpc: Arc<Client>,
     tx_broadcaster: TxBroadcaster,
     block_broadcaster: BlockBroadcaster,
+    tx_list_sender: TSender<Seq064K<'static, B016M<'static>>>,
 }
 
-pub(crate) async fn start(router: Router, stats_sender: StatsSender) {
+pub(crate) async fn start(
+    router: Router,
+    stats_sender: StatsSender,
+    tx_list_sender: TSender<Seq064K<'static, B016M<'static>>>,
+) {
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::exact("http://localhost:3000".parse().unwrap()))
         .allow_methods(Any)
@@ -47,6 +60,7 @@ pub(crate) async fn start(router: Router, stats_sender: StatsSender) {
         rpc: rpc.clone(),
         tx_broadcaster: tx_broadcaster.clone(),
         block_broadcaster: blk_broadcaster.clone(),
+        tx_list_sender,
     };
 
     start_zmq_tx_stream(rpc.clone(), tx_broadcaster, "tcp://127.0.0.1:28332");
@@ -64,6 +78,7 @@ pub(crate) async fn start(router: Router, stats_sender: StatsSender) {
             "/ws/blocks/confirmed/txids",
             get(mempool::ws_block_transactions),
         )
+        .route("/api/job-declaration", post(submit_tx_list))
         .with_state(state)
         .layer(cors);
 

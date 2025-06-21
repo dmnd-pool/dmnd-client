@@ -220,7 +220,7 @@ impl JobDeclarator {
         self_mutex: &Arc<Mutex<Self>>,
         template: NewTemplate<'static>,
         token: Vec<u8>,
-        tx_list_: Seq064K<'static, B016M<'static>>,
+        tx_list_receiver: Arc<tokio::sync::Mutex<TReceiver<Seq064K<'static, B016M<'static>>>>>,
         excess_data: B064K<'static>,
         coinbase_pool_output: Vec<u8>,
     ) -> Result<(), Error> {
@@ -234,6 +234,19 @@ impl JobDeclarator {
             tokio::task::yield_now().await;
         }
         super::IS_CUSTOM_JOB_SET.store(false, std::sync::atomic::Ordering::Release);
+
+        let tx_list_ = {
+            let mut receiver = tx_list_receiver.lock().await;
+            match receiver.recv().await {
+                Some(tx_list) => tx_list,
+                None => {
+                    error!("Failed to receive tx list from backend");
+                    ProxyState::update_pool_state(PoolState::Down);
+                    return Err(Error::Unrecoverable);
+                }
+            }
+        };
+
         let (id, _, sender) = self_mutex
             .safe_lock(|s| (s.req_ids.next(), s.min_extranonce_size, s.sender.clone()))
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;

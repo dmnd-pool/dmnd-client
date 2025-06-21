@@ -6,6 +6,7 @@ use crate::{
 };
 
 use super::{error::Error, job_declarator::JobDeclarator};
+use binary_sv2::{Seq064K, B016M};
 use bitcoin::{consensus::Encodable, TxOut};
 use codec_sv2::{HandshakeRole, Initiator, StandardEitherFrame, StandardSv2Frame};
 use demand_sv2_connection::noise_connection_tokio::Connection;
@@ -53,6 +54,7 @@ impl TemplateRx {
         down: Arc<Mutex<Downstream>>,
         miner_coinbase_outputs: Vec<TxOut>,
         authority_public_key: Option<Secp256k1PublicKey>,
+        tx_list_receiver: TReceiver<Seq064K<'static, B016M<'static>>>,
         test_only_do_not_send_solution_to_tp: bool,
     ) -> Result<AbortOnDrop, Error> {
         let mut encoded_outputs = vec![];
@@ -115,7 +117,13 @@ impl TemplateRx {
         TaskManager::add_on_new_solution(task_manager.clone(), on_new_solution_task.into())
             .await
             .map_err(|_| Error::TemplateRxTaskManagerFailed)?;
-        let main_task = match Self::start_templates(self_mutex, receiver).await {
+        let main_task = match Self::start_templates(
+            self_mutex,
+            receiver,
+            Arc::new(tokio::sync::Mutex::new(tx_list_receiver)),
+        )
+        .await
+        {
             Ok(main_task) => main_task,
             Err(e) => return Err(e),
         };
@@ -195,6 +203,7 @@ impl TemplateRx {
     pub async fn start_templates(
         self_mutex: Arc<Mutex<Self>>,
         mut receiver: TReceiver<EitherFrame>,
+        tx_list_receiver: Arc<tokio::sync::Mutex<TReceiver<Seq064K<'static, B016M<'static>>>>>,
     ) -> Result<AbortOnDrop, Error> {
         let jd = self_mutex
             .safe_lock(|s| s.jd.clone())
@@ -344,7 +353,6 @@ impl TemplateRx {
                                             ) => {
                                                 // safe to unwrap because this message is received after the new
                                                 // template message
-                                                let transactions_data = m.transaction_list;
                                                 let excess_data = m.excess_data;
                                                 let expected_template_id = m.template_id;
                                                 let m = match self_mutex
@@ -373,14 +381,13 @@ impl TemplateRx {
                                                 jd,
                                                 m.clone(),
                                                 mining_token,
-                                                transactions_data,
+                                                tx_list_receiver.clone(),
                                                 excess_data,
                                                 pool_coinbase_out,
                                             )
                                             .await {
                                                 error!("{e:?}");
                                                 break;
-
                                             };
                                                 }
                                             }

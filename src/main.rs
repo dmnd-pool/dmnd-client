@@ -183,13 +183,14 @@ async fn initialize_proxy(
                 return;
             }
         };
-
+        let (tx_list_sender, tx_list_receiver) = channel(10);
         if let Some(_tp_addr) = tp {
             jdc_abortable = jd_client::start(
                 jdc_from_translator_receiver,
                 jdc_to_translator_sender,
                 from_share_accounter_to_jdc_recv,
                 from_jdc_to_share_accounter_send,
+                tx_list_receiver,
             )
             .await;
             if jdc_abortable.is_none() {
@@ -238,7 +239,7 @@ async fn initialize_proxy(
         if let Some(jdc_handle) = jdc_abortable {
             abort_handles.push((jdc_handle, "jdc".to_string()));
         }
-        let server_handle = tokio::spawn(api::start(router.clone(), stats_sender));
+        let server_handle = tokio::spawn(api::start(router.clone(), stats_sender, tx_list_sender));
         match monitor(router, abort_handles, epsilon, server_handle).await {
             Reconnect::NewUpstream(new_pool_addr) => {
                 ProxyState::update_proxy_state_up();
