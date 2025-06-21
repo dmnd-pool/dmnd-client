@@ -249,23 +249,9 @@ checksum = "d965446196e3b7decd44aa7ee49e31d630118f90ef12f97900f262eb915c951d"
 [[package]]
 name = "binary_codec_sv2"
 version = "2.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#2db296e724fda2d9b3f65691aba6fefedfe6f07d"
-dependencies = [
- "buffer_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
-]
-
-[[package]]
-name = "binary_codec_sv2"
-version = "2.0.0"
 source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
-
-[[package]]
-name = "binary_sv2"
-version = "2.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#2db296e724fda2d9b3f65691aba6fefedfe6f07d"
 dependencies = [
- "binary_codec_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "derive_codec_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
+ "buffer_sv2",
 ]
 
 [[package]]
@@ -273,8 +259,8 @@ name = "binary_sv2"
 version = "2.0.0"
 source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
- "binary_codec_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum)",
- "derive_codec_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum)",
+ "binary_codec_sv2",
+ "derive_codec_sv2",
 ]
 
 [[package]]
@@ -434,14 +420,6 @@ dependencies = [
 [[package]]
 name = "buffer_sv2"
 version = "2.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#2db296e724fda2d9b3f65691aba6fefedfe6f07d"
-dependencies = [
- "aes-gcm",
-]
-
-[[package]]
-name = "buffer_sv2"
-version = "2.0.0"
 source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "aes-gcm",
@@ -582,27 +560,13 @@ checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
 [[package]]
 name = "codec_sv2"
 version = "2.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#2db296e724fda2d9b3f65691aba6fefedfe6f07d"
-dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "buffer_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "framing_sv2 4.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "noise_sv2 1.2.1 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "rand 0.8.5",
- "tracing",
-]
-
-[[package]]
-name = "codec_sv2"
-version = "2.0.0"
 source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum)",
- "buffer_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum)",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum)",
- "framing_sv2 4.0.0 (git+https://github.com/demand-open-source/stratum)",
- "noise_sv2 1.2.1 (git+https://github.com/demand-open-source/stratum)",
+ "binary_sv2",
+ "buffer_sv2",
+ "const_sv2",
+ "framing_sv2",
+ "noise_sv2",
  "rand 0.8.5",
  "tracing",
 ]
@@ -616,19 +580,10 @@ checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 [[package]]
 name = "common_messages_sv2"
 version = "4.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#2db296e724fda2d9b3f65691aba6fefedfe6f07d"
-dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
-]
-
-[[package]]
-name = "common_messages_sv2"
-version = "4.0.0"
 source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum)",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum)",
+ "binary_sv2",
+ "const_sv2",
 ]
 
 [[package]]
@@ -669,11 +624,6 @@ dependencies = [
  "quote",
  "unicode-xid",
 ]
-
-[[package]]
-name = "const_sv2"
-version = "3.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#2db296e724fda2d9b3f65691aba6fefedfe6f07d"
 
 [[package]]
 name = "const_sv2"
@@ -840,26 +790,26 @@ version = "0.2.0"
 dependencies = [
  "async-recursion",
  "axum",
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
+ "binary_sv2",
  "bitcoin",
  "bitcoincore-rpc",
  "clap",
- "codec_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
+ "codec_sv2",
  "dashmap",
  "demand-share-accounting-ext",
  "demand-sv2-connection",
- "framing_sv2 4.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
+ "framing_sv2",
  "futures",
  "jemallocator",
  "key-utils",
  "lazy_static",
  "nohash-hasher",
- "noise_sv2 1.2.1 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
+ "noise_sv2",
  "pid",
  "primitive-types",
  "rand 0.8.5",
  "reqwest",
- "roles_logic_sv2 3.1.1",
+ "roles_logic_sv2",
  "self_update",
  "serde",
  "serde_json",
@@ -881,9 +831,9 @@ name = "demand-share-accounting-ext"
 version = "0.0.13"
 source = "git+https://github.com/demand-open-source/share-accounting-ext#c661e936264cd8cc6b13b51fc06a79e04a6ae76e"
 dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum)",
- "framing_sv2 4.0.0 (git+https://github.com/demand-open-source/stratum)",
- "roles_logic_sv2 3.2.1",
+ "binary_sv2",
+ "framing_sv2",
+ "roles_logic_sv2",
 ]
 
 [[package]]
@@ -891,9 +841,9 @@ name = "demand-sv2-connection"
 version = "0.0.8"
 source = "git+https://github.com/demand-open-source/demand-sv2-connection#edeb677c9e2aa07de99f6b7a9ce5b627ff0e1899"
 dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum)",
- "codec_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum)",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum)",
+ "binary_sv2",
+ "codec_sv2",
+ "const_sv2",
  "futures",
  "tokio",
  "tracing",
@@ -912,17 +862,9 @@ dependencies = [
 [[package]]
 name = "derive_codec_sv2"
 version = "2.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#2db296e724fda2d9b3f65691aba6fefedfe6f07d"
-dependencies = [
- "binary_codec_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
-]
-
-[[package]]
-name = "derive_codec_sv2"
-version = "2.0.0"
 source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
- "binary_codec_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum)",
+ "binary_codec_sv2",
 ]
 
 [[package]]
@@ -1097,20 +1039,11 @@ dependencies = [
 [[package]]
 name = "framing_sv2"
 version = "4.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#2db296e724fda2d9b3f65691aba6fefedfe6f07d"
-dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "buffer_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
-]
-
-[[package]]
-name = "framing_sv2"
-version = "4.0.0"
 source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum)",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum)",
+ "binary_sv2",
+ "buffer_sv2",
+ "const_sv2",
 ]
 
 [[package]]
@@ -1670,29 +1603,10 @@ dependencies = [
 [[package]]
 name = "job_declaration_sv2"
 version = "3.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#2db296e724fda2d9b3f65691aba6fefedfe6f07d"
-dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
-]
-
-[[package]]
-name = "job_declaration_sv2"
-version = "3.0.0"
 source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum)",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum)",
-]
-
-[[package]]
-name = "jobserver"
-version = "0.1.33"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38f262f097c174adebe41eb73d66ae9c06b2844fb0da69969647bbddd9b0538a"
-dependencies = [
- "getrandom 0.3.3",
- "libc",
+ "binary_sv2",
+ "const_sv2",
 ]
 
 [[package]]
@@ -1837,19 +1751,10 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 [[package]]
 name = "mining_sv2"
 version = "3.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#2db296e724fda2d9b3f65691aba6fefedfe6f07d"
-dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
-]
-
-[[package]]
-name = "mining_sv2"
-version = "3.0.0"
 source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum)",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum)",
+ "binary_sv2",
+ "const_sv2",
 ]
 
 [[package]]
@@ -1909,24 +1814,11 @@ checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 [[package]]
 name = "noise_sv2"
 version = "1.2.1"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#2db296e724fda2d9b3f65691aba6fefedfe6f07d"
-dependencies = [
- "aes-gcm",
- "chacha20poly1305",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
- "secp256k1 0.28.2",
-]
-
-[[package]]
-name = "noise_sv2"
-version = "1.2.1"
 source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "aes-gcm",
  "chacha20poly1305",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum)",
+ "const_sv2",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "secp256k1 0.28.2",
@@ -2492,43 +2384,22 @@ dependencies = [
 
 [[package]]
 name = "roles_logic_sv2"
-version = "3.1.1"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#2db296e724fda2d9b3f65691aba6fefedfe6f07d"
-dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "chacha20poly1305",
- "common_messages_sv2 4.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "framing_sv2 4.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "hex-conservative 0.3.0",
- "job_declaration_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "mining_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "nohash-hasher",
- "primitive-types",
- "siphasher",
- "stratum-common 1.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "template_distribution_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "tracing",
-]
-
-[[package]]
-name = "roles_logic_sv2"
 version = "3.2.1"
 source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum)",
+ "binary_sv2",
  "chacha20poly1305",
- "common_messages_sv2 4.0.0 (git+https://github.com/demand-open-source/stratum)",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum)",
- "framing_sv2 4.0.0 (git+https://github.com/demand-open-source/stratum)",
+ "common_messages_sv2",
+ "const_sv2",
+ "framing_sv2",
  "hex-conservative 0.3.0",
- "job_declaration_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum)",
- "mining_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum)",
+ "job_declaration_sv2",
+ "mining_sv2",
  "nohash-hasher",
  "primitive-types",
  "siphasher",
- "stratum-common 1.0.0 (git+https://github.com/demand-open-source/stratum)",
- "template_distribution_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum)",
+ "stratum-common",
+ "template_distribution_sv2",
  "tracing",
 ]
 
@@ -2930,15 +2801,6 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "stratum-common"
 version = "1.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#2db296e724fda2d9b3f65691aba6fefedfe6f07d"
-dependencies = [
- "bitcoin",
- "secp256k1 0.28.2",
-]
-
-[[package]]
-name = "stratum-common"
-version = "1.0.0"
 source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "bitcoin",
@@ -2960,9 +2822,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sv1_api"
 version = "1.0.1"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#2db296e724fda2d9b3f65691aba6fefedfe6f07d"
+source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
+ "binary_sv2",
  "bitcoin_hashes 0.3.2",
  "byteorder",
  "hex",
@@ -3089,19 +2951,10 @@ dependencies = [
 [[package]]
 name = "template_distribution_sv2"
 version = "3.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#2db296e724fda2d9b3f65691aba6fefedfe6f07d"
-dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase)",
-]
-
-[[package]]
-name = "template_distribution_sv2"
-version = "3.0.0"
 source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
- "binary_sv2 2.0.0 (git+https://github.com/demand-open-source/stratum)",
- "const_sv2 3.0.0 (git+https://github.com/demand-open-source/stratum)",
+ "binary_sv2",
+ "const_sv2",
 ]
 
 [[package]]
