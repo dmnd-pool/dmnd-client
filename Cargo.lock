@@ -206,7 +206,7 @@ dependencies = [
  "miniz_oxide",
  "object",
  "rustc-demangle",
- "windows-targets",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -240,7 +240,7 @@ checksum = "d965446196e3b7decd44aa7ee49e31d630118f90ef12f97900f262eb915c951d"
 [[package]]
 name = "binary_codec_sv2"
 version = "2.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#7bb53de6c9f52cfdf137c745c1f6c52f505dfe93"
+source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "buffer_sv2",
 ]
@@ -248,7 +248,7 @@ dependencies = [
 [[package]]
 name = "binary_sv2"
 version = "2.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#7bb53de6c9f52cfdf137c745c1f6c52f505dfe93"
+source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "binary_codec_sv2",
  "derive_codec_sv2",
@@ -381,7 +381,7 @@ dependencies = [
 [[package]]
 name = "buffer_sv2"
 version = "2.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#7bb53de6c9f52cfdf137c745c1f6c52f505dfe93"
+source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "aes-gcm",
 ]
@@ -509,7 +509,7 @@ checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
 [[package]]
 name = "codec_sv2"
 version = "2.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#7bb53de6c9f52cfdf137c745c1f6c52f505dfe93"
+source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "binary_sv2",
  "buffer_sv2",
@@ -529,7 +529,7 @@ checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 [[package]]
 name = "common_messages_sv2"
 version = "4.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#7bb53de6c9f52cfdf137c745c1f6c52f505dfe93"
+source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "binary_sv2",
  "const_sv2",
@@ -577,7 +577,7 @@ dependencies = [
 [[package]]
 name = "const_sv2"
 version = "3.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#7bb53de6c9f52cfdf137c745c1f6c52f505dfe93"
+source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 
 [[package]]
 name = "core-foundation"
@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "demand-cli"
-version = "0.1.10"
+version = "0.1.12"
 dependencies = [
  "async-recursion",
  "axum",
@@ -736,8 +736,8 @@ dependencies = [
 
 [[package]]
 name = "demand-share-accounting-ext"
-version = "0.0.12"
-source = "git+https://github.com/demand-open-source/share-accounting-ext#5e9baeabc4d3d8059351284e25da772f3bcf0731"
+version = "0.0.13"
+source = "git+https://github.com/demand-open-source/share-accounting-ext#c661e936264cd8cc6b13b51fc06a79e04a6ae76e"
 dependencies = [
  "binary_sv2",
  "framing_sv2",
@@ -746,8 +746,8 @@ dependencies = [
 
 [[package]]
 name = "demand-sv2-connection"
-version = "0.0.7"
-source = "git+https://github.com/demand-open-source/demand-sv2-connection#fdddebabee5a5fd94f09f762659bb9e13cc5dfc3"
+version = "0.0.8"
+source = "git+https://github.com/demand-open-source/demand-sv2-connection#edeb677c9e2aa07de99f6b7a9ce5b627ff0e1899"
 dependencies = [
  "binary_sv2",
  "codec_sv2",
@@ -770,7 +770,7 @@ dependencies = [
 [[package]]
 name = "derive_codec_sv2"
 version = "2.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#7bb53de6c9f52cfdf137c745c1f6c52f505dfe93"
+source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "binary_codec_sv2",
 ]
@@ -859,12 +859,12 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "errno"
-version = "0.3.12"
+version = "0.3.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cea14ef9355e3beab063703aa9dab15afd25f0667c341310c1e5274bb1d0da18"
+checksum = "778e2ac28f6c47af28e4907f13ffd1e1ddbd400980a9abd7c8df189bf578a5ad"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -936,7 +936,7 @@ dependencies = [
 [[package]]
 name = "framing_sv2"
 version = "4.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#7bb53de6c9f52cfdf137c745c1f6c52f505dfe93"
+source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "binary_sv2",
  "buffer_sv2",
@@ -1500,7 +1500,7 @@ dependencies = [
 [[package]]
 name = "job_declaration_sv2"
 version = "3.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#7bb53de6c9f52cfdf137c745c1f6c52f505dfe93"
+source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "binary_sv2",
  "const_sv2",
@@ -1616,7 +1616,7 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 [[package]]
 name = "mining_sv2"
 version = "3.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#7bb53de6c9f52cfdf137c745c1f6c52f505dfe93"
+source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "binary_sv2",
  "const_sv2",
@@ -1668,7 +1668,7 @@ checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 [[package]]
 name = "noise_sv2"
 version = "1.2.1"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#7bb53de6c9f52cfdf137c745c1f6c52f505dfe93"
+source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "aes-gcm",
  "chacha20poly1305",
@@ -1837,7 +1837,7 @@ dependencies = [
  "libc",
  "redox_syscall",
  "smallvec",
- "windows-targets",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -2238,8 +2238,8 @@ dependencies = [
 
 [[package]]
 name = "roles_logic_sv2"
-version = "3.1.2"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#7bb53de6c9f52cfdf137c745c1f6c52f505dfe93"
+version = "3.2.1"
+source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "binary_sv2",
  "chacha20poly1305",
@@ -2635,7 +2635,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "stratum-common"
 version = "1.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#7bb53de6c9f52cfdf137c745c1f6c52f505dfe93"
+source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "bitcoin",
  "secp256k1 0.28.2",
@@ -2656,7 +2656,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sv1_api"
 version = "1.0.1"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#7bb53de6c9f52cfdf137c745c1f6c52f505dfe93"
+source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "binary_sv2",
  "bitcoin_hashes 0.3.2",
@@ -2669,9 +2669,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "2.0.103"
+version = "2.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4307e30089d6fd6aff212f2da3a1f9e32f3223b1f010fb09b7c95f90f3ca1e8"
+checksum = "17b6f705963418cdb9927482fa304bc562ece2fdd4f616084c50b7023b435a40"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2766,7 +2766,7 @@ dependencies = [
 [[package]]
 name = "template_distribution_sv2"
 version = "3.0.0"
-source = "git+https://github.com/demand-open-source/stratum?branch=ImproveCoinbase#7bb53de6c9f52cfdf137c745c1f6c52f505dfe93"
+source = "git+https://github.com/demand-open-source/stratum#e1f92c76ceed09d29764b68d8351e9859f52f605"
 dependencies = [
  "binary_sv2",
  "const_sv2",
@@ -3260,9 +3260,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2853738d1cc4f2da3a225c18ec6c3721abb31961096e9dbf5ab35fa88b19cfdb"
+checksum = "8782dd5a41a24eed3a4f40b606249b3e236ca61adf1f25ea4d45c73de122b502"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -3296,7 +3296,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12342cb4d8e3b046f3d80effd474a7a02447231330ef77d71daa6fbc40681143"
 dependencies = [
  "windows-core",
- "windows-targets",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -3308,7 +3308,7 @@ dependencies = [
  "windows-implement",
  "windows-interface",
  "windows-result 0.1.2",
- "windows-targets",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -3356,7 +3356,7 @@ version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e383302e8ec8515204254685643de10811af0ed97ea37210dc26fb0032647f8"
 dependencies = [
- "windows-targets",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -3383,7 +3383,7 @@ version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
 dependencies = [
- "windows-targets",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -3392,7 +3392,16 @@ version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
- "windows-targets",
+ "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.60.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2f500e4d28234f72040990ec9d39e3a6b950f9f22d3dba18416c35882612bcb"
+dependencies = [
+ "windows-targets 0.53.2",
 ]
 
 [[package]]
@@ -3401,14 +3410,30 @@ version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973"
 dependencies = [
- "windows_aarch64_gnullvm",
- "windows_aarch64_msvc",
- "windows_i686_gnu",
- "windows_i686_gnullvm",
- "windows_i686_msvc",
- "windows_x86_64_gnu",
- "windows_x86_64_gnullvm",
- "windows_x86_64_msvc",
+ "windows_aarch64_gnullvm 0.52.6",
+ "windows_aarch64_msvc 0.52.6",
+ "windows_i686_gnu 0.52.6",
+ "windows_i686_gnullvm 0.52.6",
+ "windows_i686_msvc 0.52.6",
+ "windows_x86_64_gnu 0.52.6",
+ "windows_x86_64_gnullvm 0.52.6",
+ "windows_x86_64_msvc 0.52.6",
+]
+
+[[package]]
+name = "windows-targets"
+version = "0.53.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c66f69fcc9ce11da9966ddb31a40968cad001c5bedeb5c2b82ede4253ab48aef"
+dependencies = [
+ "windows_aarch64_gnullvm 0.53.0",
+ "windows_aarch64_msvc 0.53.0",
+ "windows_i686_gnu 0.53.0",
+ "windows_i686_gnullvm 0.53.0",
+ "windows_i686_msvc 0.53.0",
+ "windows_x86_64_gnu 0.53.0",
+ "windows_x86_64_gnullvm 0.53.0",
+ "windows_x86_64_msvc 0.53.0",
 ]
 
 [[package]]
@@ -3418,10 +3443,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3"
 
 [[package]]
+name = "windows_aarch64_gnullvm"
+version = "0.53.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86b8d5f90ddd19cb4a147a5fa63ca848db3df085e25fee3cc10b39b6eebae764"
+
+[[package]]
 name = "windows_aarch64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469"
+
+[[package]]
+name = "windows_aarch64_msvc"
+version = "0.53.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7651a1f62a11b8cbd5e0d42526e55f2c99886c77e007179efff86c2b137e66c"
 
 [[package]]
 name = "windows_i686_gnu"
@@ -3430,10 +3467,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e9b5ad5ab802e97eb8e295ac6720e509ee4c243f69d781394014ebfe8bbfa0b"
 
 [[package]]
+name = "windows_i686_gnu"
+version = "0.53.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1dc67659d35f387f5f6c479dc4e28f1d4bb90ddd1a5d3da2e5d97b42d6272c3"
+
+[[package]]
 name = "windows_i686_gnullvm"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66"
+
+[[package]]
+name = "windows_i686_gnullvm"
+version = "0.53.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ce6ccbdedbf6d6354471319e781c0dfef054c81fbc7cf83f338a4296c0cae11"
 
 [[package]]
 name = "windows_i686_msvc"
@@ -3442,10 +3491,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
 
 [[package]]
+name = "windows_i686_msvc"
+version = "0.53.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "581fee95406bb13382d2f65cd4a908ca7b1e4c2f1917f143ba16efe98a589b5d"
+
+[[package]]
 name = "windows_x86_64_gnu"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78"
+
+[[package]]
+name = "windows_x86_64_gnu"
+version = "0.53.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e55b5ac9ea33f2fc1716d1742db15574fd6fc8dadc51caab1c16a3d3b4190ba"
 
 [[package]]
 name = "windows_x86_64_gnullvm"
@@ -3454,10 +3515,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d"
 
 [[package]]
+name = "windows_x86_64_gnullvm"
+version = "0.53.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a6e035dd0599267ce1ee132e51c27dd29437f63325753051e71dd9e42406c57"
+
+[[package]]
 name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "windows_x86_64_msvc"
+version = "0.53.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "271414315aff87387382ec3d271b52d7ae78726f5d44ac98b4f4030c91880486"
 
 [[package]]
 name = "winnow"

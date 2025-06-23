@@ -28,7 +28,13 @@ use roles_logic_sv2::{
     utils::Mutex,
 };
 
-use std::{collections::VecDeque, net::IpAddr, sync::Arc};
+use rand::Rng;
+use server_to_client::Notify;
+use std::{
+    collections::{hash_map::Entry, HashMap, VecDeque},
+    net::IpAddr,
+    sync::Arc,
+};
 use sv1_api::{
     client_to_server, json_rpc, server_to_client,
     utils::{Extranonce, HexU32Be},
@@ -105,14 +111,13 @@ pub struct Downstream {
     /// translation into a SV2 `SubmitSharesExtended`.
     tx_sv1_bridge: Sender<DownstreamMessages>,
     tx_outgoing: Sender<json_rpc::Message>,
-    /// True if this is the first job received from `Upstream`.
-    pub(super) first_job_received: bool,
     extranonce2_len: usize,
     pub(super) difficulty_mgmt: DownstreamDifficultyConfig,
     pub(super) upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
     pub last_call_to_update_hr: u128,
-    pub(super) recent_notifies: VecDeque<server_to_client::Notify<'static>>,
     pub(super) stats_sender: StatsSender,
+    pub recent_jobs: RecentJobs,
+    pub first_job: Notify<'static>,
 }
 
 impl Downstream {
@@ -177,11 +182,6 @@ impl Downstream {
             initial_difficulty,
         };
 
-        let mut recent_notifies = VecDeque::with_capacity(2);
-        if let Some(notify) = last_notify.clone() {
-            recent_notifies.push_back(notify);
-        }
-
         let downstream = Arc::new(Mutex::new(Downstream {
             connection_id,
             authorized_names: vec![],
@@ -190,13 +190,13 @@ impl Downstream {
             version_rolling_min_bit: None,
             tx_sv1_bridge,
             tx_outgoing,
-            first_job_received: false,
             extranonce2_len,
             difficulty_mgmt,
             upstream_difficulty_config,
             last_call_to_update_hr: 0,
-            recent_notifies: recent_notifies.clone(),
             stats_sender,
+            recent_jobs: RecentJobs::new(),
+            first_job: last_notify.expect("we have an assertion at the beginning of this function"),
         }));
 
         if let Err(e) = start_receive_downstream(
@@ -228,7 +228,6 @@ impl Downstream {
             task_manager.clone(),
             downstream.clone(),
             rx_sv1_notify,
-            recent_notifies,
             host.clone(),
             connection_id,
         )
@@ -351,7 +350,6 @@ impl Downstream {
         version_rolling_min_bit: Option<HexU32Be>,
         tx_sv1_bridge: Sender<DownstreamMessages>,
         tx_outgoing: Sender<json_rpc::Message>,
-        first_job_received: bool,
         extranonce2_len: usize,
         difficulty_mgmt: DownstreamDifficultyConfig,
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
@@ -365,13 +363,13 @@ impl Downstream {
             version_rolling_min_bit,
             tx_sv1_bridge,
             tx_outgoing,
-            first_job_received,
             extranonce2_len,
             difficulty_mgmt,
             upstream_difficulty_config,
             last_call_to_update_hr: 0,
-            recent_notifies: VecDeque::with_capacity(2),
+            first_job: Notify,
             stats_sender,
+            recent_jobs: RecentJobs::new(),
         }
     }
 }
@@ -390,6 +388,10 @@ impl IsServer<'static> for Downstream {
 
         self.version_rolling_mask = Some(version_rolling_mask.clone());
         self.version_rolling_min_bit = Some(version_rolling_min_bit_count.clone());
+        let mut first_job = self.first_job.clone();
+        self.recent_jobs
+            .add_job(&mut first_job, self.version_rolling_mask.clone());
+        self.first_job = first_job;
 
         (
             Some(server_to_client::VersionRollingParams::new(
@@ -434,66 +436,77 @@ impl IsServer<'static> for Downstream {
     /// Only [Submit](client_to_server::Submit) requests for authorized user names can be submitted.
     fn handle_submit(&self, request: &client_to_server::Submit<'static>) -> bool {
         info!(
-            "Handling mining.submit for for downstream with connection id {} and job_id {}",
-            self.connection_id, request.job_id
+            "Handling mining.submit request {} from {} with job_id {}, nonce: {:?}",
+            request.id, request.user_name, request.job_id, request.nonce
         );
 
-        // check first job received
-        if !self.first_job_received {
+        let mut request = request.clone();
+        let job_id_as_number = request.job_id.parse::<u32>();
+        if job_id_as_number.is_err() {
+            error!(
+                "Share rejected: can not convert v1 job id to number. v1 id: {}",
+                request.job_id
+            );
             self.stats_sender.update_rejected_shares(self.connection_id);
             return false;
         }
-        //check allowed to send shares
         match allow_submit_share() {
             Ok(true) => {
-                if self.recent_notifies.is_empty() {
-                    error!("Share rejected: No last job found");
-                    self.stats_sender.update_rejected_shares(self.connection_id);
-                    return false;
-                };
                 crate::translator::utils::update_share_count(self.connection_id); // update share count
-
-                //check share is valid
-                if let Some(met_difficulty) = validate_share(
-                    request,
-                    &self.recent_notifies,
-                    &self.difficulty_mgmt.current_difficulties,
-                    self.extranonce1.clone(),
-                    self.version_rolling_mask.clone(),
-                ) {
-                    // Only forward upstream if the share meets the latest difficulty
-                    if let Some(latest_difficulty) =
-                        self.difficulty_mgmt.current_difficulties.back()
-                    {
-                        if met_difficulty == *latest_difficulty {
-                            let to_send = SubmitShareWithChannelId {
-                                channel_id: self.connection_id,
-                                share: request.clone(),
-                                extranonce: self.extranonce1.clone(),
-                                extranonce2_len: self.extranonce2_len,
-                                version_rolling_mask: self.version_rolling_mask.clone(),
-                            };
-                            if let Err(e) = self
-                                .tx_sv1_bridge
-                                .try_send(DownstreamMessages::SubmitShares(to_send))
-                            {
-                                error!("Failed to start receive downstream task: {e:?}");
-                                self.stats_sender.update_rejected_shares(self.connection_id);
-                                // Return false because submit was not properly handled
-                                return false;
+                if let Some(job) = self
+                    .recent_jobs
+                    .get_matching_job(job_id_as_number.expect("checked above"))
+                {
+                    request.job_id = job.job_id.clone();
+                    //check share is valid
+                    if let Some(met_difficulty) = validate_share(
+                        &request,
+                        &job,
+                        &self.difficulty_mgmt.current_difficulties,
+                        self.extranonce1.clone(),
+                        self.version_rolling_mask.clone(),
+                    ) {
+                        // Only forward upstream if the share meets the latest difficulty
+                        if let Some(latest_difficulty) =
+                            self.difficulty_mgmt.current_difficulties.back()
+                        {
+                            if met_difficulty == *latest_difficulty {
+                                let to_send = SubmitShareWithChannelId {
+                                    channel_id: self.connection_id,
+                                    share: request.clone(),
+                                    extranonce: self.extranonce1.clone(),
+                                    extranonce2_len: self.extranonce2_len,
+                                    version_rolling_mask: self.version_rolling_mask.clone(),
+                                };
+                                if let Err(e) = self
+                                    .tx_sv1_bridge
+                                    .try_send(DownstreamMessages::SubmitShares(to_send))
+                                {
+                                    error!("Failed to start receive downstream task: {e:?}");
+                                    self.stats_sender.update_rejected_shares(self.connection_id);
+                                    // Return false because submit was not properly handled
+                                    return false;
+                                }
                             }
                         }
+                        self.stats_sender.update_accepted_shares(self.connection_id);
+                        info!(
+                            "Share for Job {} and difficulty {} is accepted",
+                            request.job_id, met_difficulty
+                        );
+                        return true;
+                    } else {
+                        error!("Share rejected: Invalid share");
+                        self.stats_sender.update_rejected_shares(self.connection_id);
+                        return false;
                     }
-                    self.stats_sender.update_accepted_shares(self.connection_id);
-                    info!(
-                        "Share for Job {} and difficulty {} is accepted",
-                        request.job_id, met_difficulty
-                    );
-                    true
                 } else {
-                    error!("Share rejected: Invalid share");
+                    error!(
+                        "Share rejected: can not find job with id {}",
+                        request.job_id
+                    );
                     self.stats_sender.update_rejected_shares(self.connection_id);
-                    false
+                    return false;
                 }
             }
             Ok(false) => {
@@ -575,6 +588,133 @@ impl IsDownstream for Downstream {
         &self,
     ) -> roles_logic_sv2::common_properties::CommonDownstreamData {
         todo!()
+    }
+}
+
+#[derive(Debug)]
+pub struct RecentJobs {
+    v1_to_v2: HashMap<u32, u32>,
+    v2_to_v1: HashMap<u32, Vec<u32>>,
+    jobs: VecDeque<Notify<'static>>,
+    last_v2s: CircularBuffer<u32, 3>,
+    tracked_jobs: usize,
+}
+fn apply_mask(mask: Option<HexU32Be>, message: &mut server_to_client::Notify<'static>) {
+    if let Some(mask) = mask {
+        message.version = HexU32Be(message.version.0 & !mask.0);
+    }
+}
+impl RecentJobs {
+    pub fn add_job(&mut self, notify: &mut Notify<'static>, mask: Option<HexU32Be>) {
+        apply_mask(mask, notify);
+        // save it with the v2 id
+        self.jobs.push_back(notify.clone());
+        let new_id = self.new_v1(notify.job_id.parse::<u32>().unwrap());
+        // send it with the v1 id
+        notify.job_id = new_id.to_string();
+        if self.jobs.len() > self.tracked_jobs {
+            self.jobs.pop_front();
+        };
+    }
+
+    pub fn clone_last(&mut self) -> Option<Notify<'static>> {
+        if let Some(job) = self.jobs.back() {
+            let mut job = job.clone();
+            let new_id = self.new_v1(job.job_id.parse::<u32>().unwrap());
+            job.job_id = new_id.to_string();
+            Some(job.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn current_jobs(&self) -> VecDeque<Notify<'static>> {
+        self.jobs.clone()
+    }
+
+    pub fn get_matching_job(&self, v1_id: u32) -> Option<Notify<'static>> {
+        let v2_id = self.get_v2(v1_id)?;
+        self.current_jobs()
+            .iter()
+            .find(|notify| notify.job_id == v2_id)
+            .cloned()
+    }
+
+    fn new_v1(&mut self, v2_id: u32) -> u32 {
+        let mut v1_id = rand::thread_rng().gen();
+        while self.v1_to_v2.contains_key(&v1_id) {
+            v1_id = rand::thread_rng().gen();
+        }
+        match self.v2_to_v1.entry(v2_id) {
+            Entry::Occupied(mut v) => {
+                v.get_mut().push(v1_id);
+            }
+            Entry::Vacant(v) => {
+                v.insert(vec![v1_id]);
+                if let Some(first) = self.last_v2s.push_back(v2_id) {
+                    self.remove_v2(first);
+                }
+            }
+        }
+        self.v1_to_v2.insert(v1_id, v2_id);
+        v1_id
+    }
+    fn remove_v2(&mut self, v2_id: u32) {
+        if let Some(v1_ids) = self.v2_to_v1.remove(&v2_id) {
+            for v1_id in v1_ids {
+                self.v1_to_v2.remove(&v1_id);
+            }
+        }
+    }
+    fn get_v2(&self, v1_id: u32) -> Option<String> {
+        self.v1_to_v2.get(&v1_id).cloned().map(|v| v.to_string())
+    }
+    pub fn new() -> Self {
+        Self {
+            v1_to_v2: HashMap::new(),
+            v2_to_v1: HashMap::new(),
+            last_v2s: CircularBuffer::new(),
+            jobs: VecDeque::new(),
+            tracked_jobs: 3,
+        }
+    }
+}
+
+impl Default for RecentJobs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug)]
+struct CircularBuffer<T, const N: usize> {
+    buffer: [Option<T>; N],
+    len: usize,
+    start: usize,
+}
+
+impl<T, const N: usize> CircularBuffer<T, N> {
+    pub fn new() -> Self {
+        Self {
+            buffer: std::array::from_fn(|_| None),
+            len: 0,
+            start: 0,
+        }
+    }
+
+    pub fn push_back(&mut self, value: T) -> Option<T> {
+        let end = (self.start + self.len) % N;
+
+        if self.len < N {
+            self.buffer[end] = Some(value);
+            self.len += 1;
+            None
+        } else {
+            let evicted = self.buffer[self.start].take();
+            self.buffer[self.start] = Some(value);
+            self.start = (self.start + 1) % N;
+            evicted
+        }
     }
 }
 

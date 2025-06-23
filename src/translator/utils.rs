@@ -99,7 +99,7 @@ pub fn allow_submit_share() -> crate::translator::error::ProxyResult<'static, bo
 
 pub fn validate_share(
     request: &client_to_server::Submit<'static>,
-    recent_notifies: &VecDeque<Notify<'static>>,
+    job: &Notify<'static>,
     difficulties: &VecDeque<f32>,
     extranonce1: Vec<u8>,
     version_rolling_mask: Option<sv1_api::utils::HexU32Be>,
@@ -108,29 +108,6 @@ pub fn validate_share(
         "Validating share from request {} and job {}",
         request.id, request.job_id
     );
-    let recent_notifies = recent_notifies.clone();
-    let matching_job = recent_notifies
-        .iter()
-        .find(|notify| notify.job_id == request.job_id);
-
-    let job = match matching_job {
-        Some(job) => {
-            info!("Found matching job: {:?}", job.job_id);
-            job
-        }
-        None => {
-            error!(
-                "Share rejected: Job ID {} not found in recent notify msgs",
-                request.job_id
-            );
-            return None;
-        }
-    };
-    // Check job ID match
-    if request.job_id != job.job_id {
-        error!("Share rejected: Job ID mismatch");
-        return None;
-    }
 
     let prev_hash_vec: Vec<u8> = job.prev_hash.clone().into();
     let prev_hash = match binary_sv2::U256::from_vec_(prev_hash_vec) {

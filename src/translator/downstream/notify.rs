@@ -7,22 +7,14 @@ use roles_logic_sv2::utils::Mutex;
 use std::sync::Arc;
 use sv1_api::json_rpc;
 use sv1_api::server_to_client;
-use sv1_api::utils::HexU32Be;
 use tokio::sync::broadcast;
 use tokio::task;
 use tracing::{debug, error, warn};
-
-fn apply_mask(mask: Option<HexU32Be>, message: &mut server_to_client::Notify<'static>) {
-    if let Some(mask) = mask {
-        message.version = HexU32Be(message.version.0 & !mask.0);
-    }
-}
 
 pub async fn start_notify(
     task_manager: Arc<Mutex<TaskManager>>,
     downstream: Arc<Mutex<Downstream>>,
     mut rx_sv1_notify: broadcast::Receiver<server_to_client::Notify<'static>>,
-    recent_notifies: std::collections::VecDeque<server_to_client::Notify<'static>>,
     host: String,
     connection_id: u32,
 ) -> Result<(), Error<'static>> {
@@ -42,100 +34,95 @@ pub async fn start_notify(
         stats_sender.setup_stats(connection_id);
         task::spawn(async move {
             let timeout_timer = std::time::Instant::now();
-            let mut first_sent = false;
+            let mut authorized_in_time = true;
+            // Initilization loop
             loop {
-                let mask = downstream
-                    .safe_lock(|d| d.version_rolling_mask.clone())
+                let is_a = downstream
+                    .safe_lock(|d| !d.authorized_names.is_empty())
                     .unwrap();
-                let is_a = match downstream.safe_lock(|d| !d.authorized_names.is_empty()) {
-                    Ok(is_a) => is_a,
-                    Err(e) => {
-                        error!("{e}");
-                        ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
-                        break;
-                    }
-                };
-                if is_a && !first_sent && !recent_notifies.is_empty() {
-                    if let Err(e) = Downstream::init_difficulty_management(&downstream).await {
-                        error!("Failed to initailize difficulty managemant {e}")
-                    };
-
-                    let mut sv1_mining_notify_msg = match recent_notifies.back().cloned() {
-                        Some(sv1_mining_notify_msg) => sv1_mining_notify_msg,
-                        None => {
-                            error!("sv1_mining_notify_msg is None");
-                            ProxyState::update_downstream_state(
-                                DownstreamType::TranslatorDownstream,
-                            );
-                            break;
+                if !is_a {
+                    warn!("Downstream {}: waiting for auth", connection_id);
+                }
+                if let Some(job) = downstream
+                    .safe_lock(|d| d.recent_jobs.clone_last())
+                    .unwrap()
+                {
+                    if is_a {
+                        if let Err(e) = Downstream::init_difficulty_management(&downstream).await {
+                            error!("Failed to initailize difficulty managemant {e}")
+                        } else {
+                            let message: json_rpc::Message = job.into();
+                            Downstream::send_message_downstream(downstream.clone(), message).await;
                         }
-                    };
-                    apply_mask(mask, &mut sv1_mining_notify_msg);
-                    let message: json_rpc::Message = sv1_mining_notify_msg.into();
-                    Downstream::send_message_downstream(downstream.clone(), message).await;
-                    if downstream
-                        .clone()
-                        .safe_lock(|s| {
-                            s.first_job_received = true;
-                        })
-                        .is_err()
-                    {
-                        error!("Translator Downstream Mutex Poisoned");
-                        ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
                         break;
                     }
-                    first_sent = true;
-                } else if is_a && !recent_notifies.is_empty() {
-                    if let Err(e) =
-                        start_update(task_manager, downstream.clone(), connection_id).await
-                    {
-                        warn!("Translator impossible to start update task: {e}");
-                        break;
-                    };
-
-                    while let Ok(mut sv1_mining_notify_msg) = rx_sv1_notify.recv().await {
-                        if downstream
-                            .safe_lock(|d| {
-                                d.recent_notifies.push_back(sv1_mining_notify_msg.clone());
-                                debug!(
-                                    "Downstream {}: Added job_id {} to recent_notifies. Current jobs: {:?}", 
-                                    connection_id,
-                                    sv1_mining_notify_msg.job_id,
-                                    d.recent_notifies.iter().map(|n| &n.job_id).collect::<Vec<_>>()
-                                );
-                                if d.recent_notifies.len() > 2 {
-                                    if let Some(removed) = d.recent_notifies.pop_front() {
-                                        debug!("Downstream {}: Removed oldest job_id {}", connection_id, removed.job_id);
-                                    }
-                                }})
-                            .is_err()
-                        {
-                            error!("Translator Downstream Mutex Poisoned");
-                            ProxyState::update_downstream_state(
-                                DownstreamType::TranslatorDownstream,
-                            );
-                            break;
-                        }
-
-                        apply_mask(mask.clone(), &mut sv1_mining_notify_msg);
-                        debug!(
-                            "Sending Job {:?} to miner. Difficulty: {:?}",
-                            &sv1_mining_notify_msg, latest_diff
-                        );
-                        let message: json_rpc::Message = sv1_mining_notify_msg.into();
-                        Downstream::send_message_downstream(downstream.clone(), message).await;
-                    }
-                    break;
                 } else {
-                    // timeout connection if miner does not send the authorize message after sending a subscribe
-                    if timeout_timer.elapsed().as_secs() > SUBSCRIBE_TIMEOUT_SECS {
+                    warn!("Downstream {}: waiting for first job", connection_id);
+                }
+                // timeout connection if miner does not send the authorize message after sending a subscribe
+                if timeout_timer.elapsed().as_secs() > SUBSCRIBE_TIMEOUT_SECS {
+                    if is_a {
+                        warn!("No configure received after timeout, use initial first job");
+                        let job = downstream
+                            .safe_lock(|d| {
+                                let mut first_job = d.first_job.clone();
+                                d.recent_jobs
+                                    .add_job(&mut first_job, d.version_rolling_mask.clone());
+                                d.first_job = first_job;
+                                d.first_job.clone()
+                            })
+                            .unwrap();
+                        if let Err(e) = Downstream::init_difficulty_management(&downstream).await {
+                            error!("Failed to initailize difficulty managemant {e}")
+                        } else {
+                            let message: json_rpc::Message = job.into();
+                            Downstream::send_message_downstream(downstream.clone(), message).await;
+                        }
+                    } else {
                         warn!(
                             "Downstream: miner.subscribe/miner.authorize TIMEOUT for {} {}",
                             &host, connection_id
                         );
+                        authorized_in_time = false;
+                    }
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            if let Err(e) =
+                start_update(task_manager, downstream.clone(), connection_id).await
+            {
+                warn!("Translator impossible to start update task: {e}");
+            } else if authorized_in_time {
+                // Get the mask after initialization since is set by configure message
+                let mask = downstream
+                    .safe_lock(|d| d.version_rolling_mask.clone())
+                    .unwrap();
+                while let Ok(mut sv1_mining_notify_msg) = rx_sv1_notify.recv().await {
+                    if downstream
+                        .safe_lock(|d| {
+                            d.recent_jobs.add_job(&mut sv1_mining_notify_msg,mask.clone());
+                            debug!(
+                                "Downstream {}: Added job_id {} to recent_notifies. Current jobs: {:?}", 
+                                connection_id,
+                                sv1_mining_notify_msg.job_id,
+                                d.recent_jobs.current_jobs()
+                            );
+                            })
+                        .is_err()
+                    {
+                        error!("Translator Downstream Mutex Poisoned");
+                        ProxyState::update_downstream_state(
+                            DownstreamType::TranslatorDownstream,
+                        );
                         break;
                     }
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    debug!(
+                        "Sending Job {:?} to miner. Difficulty: {:?}",
+                        &sv1_mining_notify_msg, latest_diff
+                    );
+                    let message: json_rpc::Message = sv1_mining_notify_msg.into();
+                    Downstream::send_message_downstream(downstream.clone(), message).await;
                 }
             }
             // TODO here we want to be sure that on drop this is called
@@ -173,14 +160,6 @@ async fn start_update(
 
             tokio::time::sleep(sleep_duration).await;
 
-            let recent_notifies = match downstream.safe_lock(|d| d.recent_notifies.clone()) {
-                Ok(ln) => ln,
-                Err(e) => {
-                    error!("{e}");
-                    return;
-                }
-            };
-            assert!(!recent_notifies.is_empty());
             // if hashrate has changed, update difficulty management, and send new
             // mining.set_difficulty
             if let Err(e) = Downstream::try_update_difficulty_settings(&downstream).await {

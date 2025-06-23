@@ -261,7 +261,10 @@ impl Bridge {
             .map_err(|_| Error::BridgeMutexPoisoned)?
             .try_into()
             .expect("Internal error: this operation can not fail because the Vec<U8> can always be converted into Inner");
-        debug!("Upstream target: {:?}", upstream_target.to_vec().as_hex());
+
+        let mut dbg_target = upstream_target.clone().to_vec();
+        dbg_target.reverse();
+        debug!("Pool target: {:?}", dbg_target.as_hex());
         let mut upstream_target: Target = upstream_target.into();
         let res = self_
             .safe_lock(|s| {
