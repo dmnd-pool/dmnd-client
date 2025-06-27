@@ -2,10 +2,7 @@ mod routes;
 pub mod stats;
 mod utils;
 use crate::{
-    api::mempool::{
-        start_zmq_block_stream, start_zmq_tx_stream, submit_tx_list, BlockBroadcaster,
-        TxBroadcaster,
-    },
+    api::mempool::{spawn_zmq_events, submit_tx_list, ws_events_handler, EventBroadcaster},
     router::Router,
     API_SERVER_PORT,
 };
@@ -28,8 +25,7 @@ pub struct AppState {
     router: Router,
     stats_sender: StatsSender,
     rpc: Arc<Client>,
-    tx_broadcaster: TxBroadcaster,
-    block_broadcaster: BlockBroadcaster,
+    event_broadcaster: EventBroadcaster,
     tx_list_sender: TSender<Seq064K<'static, B016M<'static>>>,
 }
 
@@ -50,21 +46,17 @@ pub(crate) async fn start(
     .expect("Failed to connect to Bitcoin RPC");
 
     let rpc = Arc::new(rpc);
-
-    let (tx_broadcaster, _) = broadcast::channel(300);
-    let (blk_broadcaster, _) = broadcast::channel(300);
+    let (event_broadcaster, _) = broadcast::channel(300);
 
     let state = AppState {
         router,
         stats_sender,
         rpc: rpc.clone(),
-        tx_broadcaster: tx_broadcaster.clone(),
-        block_broadcaster: blk_broadcaster.clone(),
+        event_broadcaster: event_broadcaster.clone(),
         tx_list_sender,
     };
 
-    start_zmq_tx_stream(rpc.clone(), tx_broadcaster, "tcp://127.0.0.1:28332");
-    start_zmq_block_stream(blk_broadcaster, "tcp://127.0.0.1:28333");
+    spawn_zmq_events(rpc.clone(), event_broadcaster, "tcp://127.0.0.1:28334");
 
     let app = AxumRouter::new()
         .route("/api/health", get(Api::health_check))
@@ -73,11 +65,7 @@ pub(crate) async fn start(
         .route("/api/stats/aggregate", get(Api::get_aggregate_stats))
         .route("/api/stats/system", get(Api::system_stats))
         .route("/api/mempool", get(mempool::fetch_mempool))
-        .route("/ws/txs/new", get(mempool::ws_new_transactions))
-        .route(
-            "/ws/blocks/confirmed/txids",
-            get(mempool::ws_block_transactions),
-        )
+        .route("/ws/bitcoin/stream", get(ws_events_handler))
         .route("/api/job-declaration", post(submit_tx_list))
         .with_state(state)
         .layer(cors);
