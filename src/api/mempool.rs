@@ -123,10 +123,16 @@ pub async fn ws_events_handler(
 }
 
 pub async fn fetch_mempool(State(state): State<AppState>) -> Json<Vec<MempoolTransaction>> {
-    match state.rpc.get_raw_mempool_verbose() {
-        Ok(entries) => Json(entries.into_iter().map(MempoolTransaction::from).collect()),
-        Err(e) => {
-            error!("Failed to fetch mempool: {e}");
+    match &state.rpc {
+        Some(rpc) => match rpc.get_raw_mempool_verbose() {
+            Ok(entries) => Json(entries.into_iter().map(MempoolTransaction::from).collect()),
+            Err(e) => {
+                error!("Failed to fetch mempool: {e}");
+                Json(Vec::new())
+            }
+        },
+        None => {
+            warn!("Bitcoin RPC not available, returning empty mempool");
             Json(Vec::new())
         }
     }
@@ -296,19 +302,29 @@ pub async fn submit_tx_list(
                 );
             }
         };
-        match state.rpc.get_raw_transaction(&txid, None) {
-            Ok(tx) => {
-                let bytes = encode::serialize(&tx);
-                let serialized: B016M<'static> = bytes.try_into().unwrap();
-                txs.push(serialized);
-            }
-            Err(e) => {
+        match &state.rpc {
+            Some(rpc) => match rpc.get_raw_transaction(&txid, None) {
+                Ok(tx) => {
+                    let bytes = encode::serialize(&tx);
+                    let serialized: B016M<'static> = bytes.try_into().unwrap();
+                    txs.push(serialized);
+                }
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(APIResponse::error(Some(format!(
+                            "Failed to fetch tx {}: {}",
+                            txid, e
+                        )))),
+                    );
+                }
+            },
+            None => {
                 return (
-                    StatusCode::BAD_REQUEST,
-                    Json(APIResponse::error(Some(format!(
-                        "Failed to fetch tx {}: {}",
-                        txid, e
-                    )))),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(APIResponse::error(Some(
+                        "Bitcoin RPC not available".to_string(),
+                    ))),
                 );
             }
         }

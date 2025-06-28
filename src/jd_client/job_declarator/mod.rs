@@ -17,6 +17,8 @@ use task_manager::TaskManager;
 use tokio::sync::mpsc::{Receiver as TReceiver, Sender as TSender};
 use tracing::{error, info};
 
+use crate::config::Configuration;
+
 use async_recursion::async_recursion;
 use nohash_hasher::BuildNoHashHasher;
 use roles_logic_sv2::{
@@ -220,9 +222,10 @@ impl JobDeclarator {
         self_mutex: &Arc<Mutex<Self>>,
         template: NewTemplate<'static>,
         token: Vec<u8>,
-        tx_list_receiver: Arc<tokio::sync::Mutex<TReceiver<Seq064K<'static, B016M<'static>>>>>,
+        tx_list_receiver: Arc<Mutex<TReceiver<Seq064K<'static, B016M<'static>>>>>,
         excess_data: B064K<'static>,
         coinbase_pool_output: Vec<u8>,
+        fallback_tx_list: Option<Seq064K<'static, B016M<'static>>>,
     ) -> Result<(), Error> {
         let now = std::time::Instant::now();
         while !super::IS_CUSTOM_JOB_SET.load(std::sync::atomic::Ordering::Acquire) {
@@ -235,14 +238,49 @@ impl JobDeclarator {
         }
         super::IS_CUSTOM_JOB_SET.store(false, std::sync::atomic::Ordering::Release);
 
-        let tx_list_ = {
-            let mut receiver = tx_list_receiver.lock().await;
-            match receiver.recv().await {
-                Some(tx_list) => tx_list,
-                None => {
-                    error!("Failed to receive tx list from backend");
+        let transaction_timeout = Configuration::custom_job_timeout();
+        let timeout_start = std::time::Instant::now();
+
+        info!("Waiting for transaction list from backend (Custom Job)...");
+        let tx_list_ = loop {
+            // Try to receive transaction list from backend (Custom Job)
+            match tx_list_receiver
+                .safe_lock(|r| {
+                    r.try_recv()
+                        .map_err(|_| Error::Unrecoverable)
+                        .and_then(|tx_list| {
+                            if tx_list.inner_as_ref().len() == 0 {
+                                error!("Received empty custom job transaction list");
+                                Err(Error::Unrecoverable)
+                            } else {
+                                Ok(tx_list)
+                            }
+                        })
+                })
+                .map_err(|_| Error::JobDeclaratorMutexCorrupted)
+            {
+                Ok(Ok(tx_list)) => {
+                    info!("Received custom job transaction list");
+                    break tx_list;
+                }
+                Ok(Err(_)) => {
+                    if timeout_start.elapsed().as_secs() >= transaction_timeout {
+                        if let Some(fallback_tx_list) = fallback_tx_list {
+                            info!("Transaction timeout reached ({}s), using transaction list from template provider", transaction_timeout);
+                            break fallback_tx_list;
+                        } else {
+                            error!("Transaction timeout reached and no template provider transaction list available");
+                            ProxyState::update_pool_state(PoolState::Down);
+                            return Err(Error::Unrecoverable);
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                Err(e) => {
+                    error!("Failed to receive tx list from backend: {}", e);
                     ProxyState::update_pool_state(PoolState::Down);
-                    return Err(Error::Unrecoverable);
+                    return Err(e);
                 }
             }
         };

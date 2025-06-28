@@ -3,6 +3,7 @@ pub mod stats;
 mod utils;
 use crate::{
     api::mempool::{spawn_zmq_events, submit_tx_list, ws_events_handler, EventBroadcaster},
+    bitcoin_rpc, config,
     router::Router,
     API_SERVER_PORT,
 };
@@ -11,7 +12,7 @@ use axum::{
     Router as AxumRouter,
 };
 use binary_sv2::{Seq064K, B016M};
-use bitcoincore_rpc::{Auth, Client};
+use bitcoincore_rpc::Client;
 pub mod mempool;
 use routes::Api;
 use stats::StatsSender;
@@ -19,12 +20,14 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::Sender as TSender;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tracing::{info, warn};
+
 // Holds shared state (like the router) that so that it can be accessed in all routes.
 #[derive(Clone)]
 pub struct AppState {
     router: Router,
     stats_sender: StatsSender,
-    rpc: Arc<Client>,
+    rpc: Option<Arc<Client>>,
     event_broadcaster: EventBroadcaster,
     tx_list_sender: TSender<Seq064K<'static, B016M<'static>>>,
 }
@@ -39,13 +42,27 @@ pub(crate) async fn start(
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let rpc = Client::new(
-        "http://127.0.0.1:8332",
-        Auth::UserPass("username".to_string(), "password".to_string()),
-    )
-    .expect("Failed to connect to Bitcoin RPC");
+    let rpc = match bitcoin_rpc::create_rpc_client() {
+        Ok(client) => {
+            info!("Successfully connected to Bitcoin RPC");
+            Some(client)
+        }
+        Err(e) => {
+            let datadir = config::Configuration::bitcoin_datadir();
+            warn!("{e}");
+            println!("Possible reasons:");
+            println!("1. Bitcoin Core is not running");
+            println!("2. Incorrect RPC credentials in bitcoin.conf");
+            println!(
+                "3. RPC port {} is not accessible",
+                config::Configuration::rpc_port()
+            );
+            println!("4. Incorrect Bitcoin data directory path in config.toml");
+            println!("   Data directory: {}", datadir.display());
+            None
+        }
+    };
 
-    let rpc = Arc::new(rpc);
     let (event_broadcaster, _) = broadcast::channel(300);
 
     let state = AppState {
@@ -56,7 +73,13 @@ pub(crate) async fn start(
         tx_list_sender,
     };
 
-    spawn_zmq_events(rpc.clone(), event_broadcaster, "tcp://127.0.0.1:28334");
+    let zmq_pub_sequence = config::Configuration::zmq_pub_sequence();
+
+    if let Some(rpc_client) = rpc {
+        spawn_zmq_events(rpc_client, event_broadcaster, zmq_pub_sequence);
+    } else {
+        eprintln!("Skipping ZMQ events setup due to missing Bitcoin RPC connection");
+    }
 
     let app = AxumRouter::new()
         .route("/api/health", get(Api::health_check))

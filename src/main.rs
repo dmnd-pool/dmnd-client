@@ -16,6 +16,7 @@ use std::{net::SocketAddr, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{debug, error, info, warn};
 mod api;
+mod bitcoin_rpc;
 
 mod config;
 mod ingress;

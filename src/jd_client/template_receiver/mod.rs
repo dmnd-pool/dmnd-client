@@ -120,7 +120,7 @@ impl TemplateRx {
         let main_task = match Self::start_templates(
             self_mutex,
             receiver,
-            Arc::new(tokio::sync::Mutex::new(tx_list_receiver)),
+            Arc::new(Mutex::new(tx_list_receiver)),
         )
         .await
         {
@@ -203,7 +203,7 @@ impl TemplateRx {
     pub async fn start_templates(
         self_mutex: Arc<Mutex<Self>>,
         mut receiver: TReceiver<EitherFrame>,
-        tx_list_receiver: Arc<tokio::sync::Mutex<TReceiver<Seq064K<'static, B016M<'static>>>>>,
+        tx_list_receiver: Arc<Mutex<TReceiver<Seq064K<'static, B016M<'static>>>>>,
     ) -> Result<AbortOnDrop, Error> {
         let jd = self_mutex
             .safe_lock(|s| s.jd.clone())
@@ -353,6 +353,7 @@ impl TemplateRx {
                                             ) => {
                                                 // safe to unwrap because this message is received after the new
                                                 // template message
+                                                let transactions_data = m.transaction_list;
                                                 let excess_data = m.excess_data;
                                                 let expected_template_id = m.template_id;
                                                 let m = match self_mutex
@@ -384,6 +385,7 @@ impl TemplateRx {
                                                 tx_list_receiver.clone(),
                                                 excess_data,
                                                 pool_coinbase_out,
+                                                Some(transactions_data),
                                             )
                                             .await {
                                                 error!("{e:?}");

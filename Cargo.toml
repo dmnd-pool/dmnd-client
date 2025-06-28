@@ -68,6 +68,7 @@ bitcoincore-rpc = "0.19.0"
 zmq = "0.10.0"
 tokio-stream = { version = "0.1.17", features = ["sync"] }
 tower-http = { version = "0.6.6", features = ["cors"] }
+rust-ini = "0.21.1"
 
 
 [dev-dependencies]
