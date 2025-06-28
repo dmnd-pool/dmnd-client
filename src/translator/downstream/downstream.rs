@@ -354,6 +354,7 @@ impl Downstream {
         difficulty_mgmt: DownstreamDifficultyConfig,
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
         stats_sender: StatsSender,
+        first_job: Notify<'static>,
     ) -> Self {
         Downstream {
             connection_id,
@@ -367,7 +368,7 @@ impl Downstream {
             difficulty_mgmt,
             upstream_difficulty_config,
             last_call_to_update_hr: 0,
-            first_job: Notify,
+            first_job,
             stats_sender,
             recent_jobs: RecentJobs::new(),
         }
@@ -494,11 +495,11 @@ impl IsServer<'static> for Downstream {
                             "Share for Job {} and difficulty {} is accepted",
                             request.job_id, met_difficulty
                         );
-                        return true;
+                        true
                     } else {
                         error!("Share rejected: Invalid share");
                         self.stats_sender.update_rejected_shares(self.connection_id);
-                        return false;
+                        false
                     }
                 } else {
                     error!(
@@ -506,7 +507,7 @@ impl IsServer<'static> for Downstream {
                         request.job_id
                     );
                     self.stats_sender.update_rejected_shares(self.connection_id);
-                    return false;
+                    false
                 }
             }
             Ok(false) => {

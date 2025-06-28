@@ -89,9 +89,7 @@ pub async fn start_notify(
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
-            if let Err(e) =
-                start_update(task_manager, downstream.clone(), connection_id).await
-            {
+            if let Err(e) = start_update(task_manager, downstream.clone(), connection_id).await {
                 warn!("Translator impossible to start update task: {e}");
             } else if authorized_in_time {
                 // Get the mask after initialization since is set by configure message
