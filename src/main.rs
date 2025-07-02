@@ -13,9 +13,11 @@ use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
 use self_update::{backends, cargo_crate_version, update::UpdateStatus, TempDir};
 use std::{net::SocketAddr, time::Duration};
-use tokio::sync::mpsc::channel;
+use tokio::sync::{broadcast, mpsc::channel};
 use tracing::{debug, error, info, warn};
 mod api;
+use api::TxListWithResponse;
+mod assets;
 mod bitcoin_rpc;
 
 mod config;
@@ -184,7 +186,9 @@ async fn initialize_proxy(
                 return;
             }
         };
-        let (tx_list_sender, tx_list_receiver) = channel(10);
+        let (tx_list_sender, tx_list_receiver) = channel::<TxListWithResponse>(10);
+        let (jd_event_broadcaster, _) = broadcast::channel(100);
+
         if let Some(_tp_addr) = tp {
             jdc_abortable = jd_client::start(
                 jdc_from_translator_receiver,
@@ -192,6 +196,7 @@ async fn initialize_proxy(
                 from_share_accounter_to_jdc_recv,
                 from_jdc_to_share_accounter_send,
                 tx_list_receiver,
+                jd_event_broadcaster.clone(),
             )
             .await;
             if jdc_abortable.is_none() {
@@ -240,7 +245,12 @@ async fn initialize_proxy(
         if let Some(jdc_handle) = jdc_abortable {
             abort_handles.push((jdc_handle, "jdc".to_string()));
         }
-        let server_handle = tokio::spawn(api::start(router.clone(), stats_sender, tx_list_sender));
+        let server_handle = tokio::spawn(api::start(
+            router.clone(),
+            stats_sender,
+            tx_list_sender,
+            jd_event_broadcaster,
+        ));
         match monitor(router, abort_handles, epsilon, server_handle).await {
             Reconnect::NewUpstream(new_pool_addr) => {
                 ProxyState::update_proxy_state_up();

@@ -15,9 +15,18 @@ use roles_logic_sv2::{
 use std::{collections::HashMap, convert::TryInto};
 use task_manager::TaskManager;
 use tokio::sync::mpsc::{Receiver as TReceiver, Sender as TSender};
+use tokio::sync::oneshot;
 use tracing::{error, info};
 
-use crate::config::Configuration;
+use crate::{
+    api::{
+        jd_event_ws::{
+            JobDeclarationData, NewTemplateNotification, TemplateNotificationBroadcaster,
+        },
+        TxListWithResponse,
+    },
+    config::Configuration,
+};
 
 use async_recursion::async_recursion;
 use nohash_hasher::BuildNoHashHasher;
@@ -77,6 +86,9 @@ pub struct JobDeclarator {
     pub coinbase_tx_prefix: B064K<'static>,
     pub coinbase_tx_suffix: B064K<'static>,
     pub task_manager: Arc<Mutex<TaskManager>>,
+    // Track job responses: request_id -> (job_data, response_sender)
+    pub custom_job_responses:
+        HashMap<u32, (JobDeclarationData, oneshot::Sender<JobDeclarationData>)>,
 }
 
 impl JobDeclarator {
@@ -114,12 +126,18 @@ impl JobDeclarator {
             last_declare_mining_jobs_sent: HashMap::with_capacity(2),
             last_set_new_prev_hash: None,
             future_jobs: HashMap::with_hasher(BuildNoHashHasher::default()),
-            up,
+            up: up.clone(),
             coinbase_tx_prefix: vec![].try_into().expect("Internal error: this operation can not fail because Vec can always be converted into Inner"),
             coinbase_tx_suffix: vec![].try_into().expect("Internal error: this operation can not fail because Vec can always be converted into Inner"),
             set_new_prev_hash_counter: 0,
             task_manager,
+            custom_job_responses: HashMap::new(),
         }));
+
+        // Set up the connection with the upstream for job response notifications
+        if let Err(e) = Upstream::set_job_declarator(&up, &self_) {
+            error!("Failed to set job declarator reference in upstream: {}", e);
+        }
 
         Self::allocate_tokens(&self_, 2).await;
         Self::on_upstream_message(self_.clone(), receiver).await?;
@@ -222,7 +240,8 @@ impl JobDeclarator {
         self_mutex: &Arc<Mutex<Self>>,
         template: NewTemplate<'static>,
         token: Vec<u8>,
-        tx_list_receiver: Arc<Mutex<TReceiver<Seq064K<'static, B016M<'static>>>>>,
+        tx_list_receiver: Arc<Mutex<TReceiver<TxListWithResponse>>>,
+        jd_event_broadcaster: TemplateNotificationBroadcaster,
         excess_data: B064K<'static>,
         coinbase_pool_output: Vec<u8>,
         fallback_tx_list: Option<Seq064K<'static, B016M<'static>>>,
@@ -238,36 +257,70 @@ impl JobDeclarator {
         }
         super::IS_CUSTOM_JOB_SET.store(false, std::sync::atomic::Ordering::Release);
 
+        // Notify the dashboard that a new template is available and request the transaction list
+        let template_notification = NewTemplateNotification::new(
+            "new_template".to_string(),
+            "Send the transaction list".to_string(),
+            template.template_id,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        );
+
+        if jd_event_broadcaster.send(template_notification).is_err() {
+            error!("Failed to send template notification: no receivers available");
+        }
+
         let transaction_timeout = Configuration::custom_job_timeout();
         let timeout_start = std::time::Instant::now();
 
         info!("Waiting for transaction list from backend (Custom Job)...");
-        let tx_list_ = loop {
-            // Try to receive transaction list from backend (Custom Job)
+        let (tx_list_, job_response_sender_opt) = loop {
+            // Try to receive transaction list with response sender from backend (Custom Job)
             match tx_list_receiver
                 .safe_lock(|r| {
                     r.try_recv()
                         .map_err(|_| Error::Unrecoverable)
-                        .and_then(|tx_list| {
-                            if tx_list.inner_as_ref().len() == 0 {
-                                error!("Received empty custom job transaction list");
-                                Err(Error::Unrecoverable)
-                            } else {
-                                Ok(tx_list)
-                            }
-                        })
+                        .and_then(|(tx_list, response_sender)| Ok((tx_list, response_sender)))
                 })
                 .map_err(|_| Error::JobDeclaratorMutexCorrupted)
             {
-                Ok(Ok(tx_list)) => {
-                    info!("Received custom job transaction list");
-                    break tx_list;
+                Ok(Ok((tx_list, response_sender))) => {
+                    info!("Received custom job transaction list {:?}", tx_list);
+                    let tx_list_received_notification = NewTemplateNotification::new(
+                        "RequestTransactionDataSuccess".to_string(),
+                        "Transaction list received from miner".to_string(),
+                        template.template_id,
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    );
+                    if let Err(e) = jd_event_broadcaster.send(tx_list_received_notification) {
+                        error!("Failed to send tx list received notification: {}", e);
+                    }
+                    break (tx_list, response_sender);
                 }
                 Ok(Err(_)) => {
                     if timeout_start.elapsed().as_secs() >= transaction_timeout {
                         if let Some(fallback_tx_list) = fallback_tx_list {
                             info!("Transaction timeout reached ({}s), using transaction list from template provider", transaction_timeout);
-                            break fallback_tx_list;
+
+                            let no_list_notification = NewTemplateNotification::new(
+                                "RequestTransactionDataSuccess".to_string(),
+                                "No transaction list from miner, using template provider list"
+                                    .to_string(),
+                                template.template_id,
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                            );
+                            if let Err(e) = jd_event_broadcaster.send(no_list_notification) {
+                                error!("Failed to send no tx list provided notification: {}", e);
+                            }
+                            break (fallback_tx_list, None);
                         } else {
                             error!("Transaction timeout reached and no template provider transaction list available");
                             ProxyState::update_pool_state(PoolState::Down);
@@ -315,6 +368,20 @@ impl JobDeclarator {
         let coinbase_suffix = self_mutex
             .safe_lock(|s| s.coinbase_tx_suffix.clone())
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
+
+        let mut job_data = JobDeclarationData::new();
+        job_data.template_id = Some(template.template_id);
+        job_data.req_id = Some(id);
+
+        // Store the job response tracking if we have a response sender
+        if let Some(response_sender) = job_response_sender_opt {
+            self_mutex
+                .safe_lock(|s| {
+                    s.custom_job_responses
+                        .insert(id, (job_data.clone(), response_sender));
+                })
+                .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
+        }
 
         let declare_job = DeclareMiningJob {
             request_id: id,
@@ -381,7 +448,20 @@ impl JobDeclarator {
                     );
                 match next_message_to_send {
                     Ok(SendTo::None(Some(JobDeclaration::DeclareMiningJobSuccess(m)))) => {
-                        let new_token = m.new_mining_job_token;
+                        let new_token = m.new_mining_job_token.clone();
+                        let mining_job_token_hex = new_token
+                            .inner_as_ref()
+                            .iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<String>();
+                        let _ = self_mutex.safe_lock(|s| {
+                            if let Some((ref mut job_data, _)) =
+                                s.custom_job_responses.get_mut(&m.request_id)
+                            {
+                                job_data.mining_job_token = Some(mining_job_token_hex);
+                            }
+                        });
+
                         let last_declare =
                             match Self::get_last_declare_job_sent(&self_mutex, m.request_id) {
                                 Ok(last_declare) => last_declare,
@@ -443,7 +523,8 @@ impl JobDeclarator {
                                     template.coinbase_tx_value_remaining,
                                     pool_outs,
                                     template.coinbase_tx_locktime,
-                                    template.template_id
+                                    template.template_id,
+                                    m.request_id
                                     ).await {error!("Failed to set custom jobd: {e}"); ProxyState::update_jd_state(JdState::Down);break;},
                                 None => panic!("Invalid state we received a NewTemplate not future, without having received a set new prev hash")
                             }
@@ -540,6 +621,7 @@ impl JobDeclarator {
                 tokio::task::yield_now().await;
             };
             let signed_token = job.mining_job_token.clone();
+            let job_request_id = job.request_id;
             let mut template_outs = template.coinbase_tx_outputs.to_vec();
             pool_outs.append(&mut template_outs);
             if let Err(e) = Upstream::set_custom_jobs(
@@ -555,6 +637,7 @@ impl JobDeclarator {
                 pool_outs,
                 template.coinbase_tx_locktime,
                 template.template_id,
+                job_request_id,
             )
             .await
             {

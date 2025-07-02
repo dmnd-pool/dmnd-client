@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use axum::{
     extract::{
         ws::{WebSocket, WebSocketUpgrade},
@@ -8,7 +6,6 @@ use axum::{
     response::IntoResponse,
 };
 use futures::StreamExt;
-use roles_logic_sv2::utils::Mutex;
 use serde::Serialize;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
@@ -34,30 +31,6 @@ impl NewTemplateNotification {
     }
 }
 
-// #[derive(Debug, Serialize, Clone)]
-// pub struct JobDeclarationResponse {
-//     pub success: bool,
-//     pub message: String,
-//     pub data: Option<JobDeclarationData>,
-// }
-
-// impl JobDeclarationResponse {
-//     pub fn success(data: Option<JobDeclarationData>) -> Self {
-//         Self {
-//             success: true,
-//             message: "Job declaration successful".to_string(),
-//             data,
-//         }
-//     }
-//     pub fn error(message: String) -> Self {
-//         Self {
-//             success: false,
-//             message,
-//             data: None,
-//         }
-//     }
-// }
-
 #[derive(Debug, Serialize, Clone)]
 pub struct JobDeclarationData {
     pub template_id: Option<u64>,
@@ -80,12 +53,6 @@ impl JobDeclarationData {
         }
     }
 }
-
-// #[derive(Debug, Deserialize)]
-// pub struct JobDeclarationRequest {
-//     pub template_id: u32,
-//     pub txids: Vec<String>,
-// }
 
 pub type TemplateNotificationBroadcaster = broadcast::Sender<NewTemplateNotification>;
 

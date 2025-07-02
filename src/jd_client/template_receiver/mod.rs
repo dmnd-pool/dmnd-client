@@ -1,12 +1,13 @@
 mod task_manager;
+use crate::api::TxListWithResponse;
 use crate::proxy_state::{DownstreamType, JdState, TpState};
 use crate::shared::utils::AbortOnDrop;
 use crate::{
+    api::jd_event_ws::TemplateNotificationBroadcaster,
     jd_client::mining_downstream::DownstreamMiningNode as Downstream, proxy_state::ProxyState,
 };
 
 use super::{error::Error, job_declarator::JobDeclarator};
-use binary_sv2::{Seq064K, B016M};
 use bitcoin::{consensus::Encodable, TxOut};
 use codec_sv2::{HandshakeRole, Initiator, StandardEitherFrame, StandardSv2Frame};
 use demand_sv2_connection::noise_connection_tokio::Connection;
@@ -43,6 +44,7 @@ pub struct TemplateRx {
     new_template_message: Option<NewTemplate<'static>>,
     miner_coinbase_output: Vec<u8>,
     test_only_do_not_send_solution_to_tp: bool,
+    jd_event_broadcaster: TemplateNotificationBroadcaster,
 }
 
 impl TemplateRx {
@@ -54,8 +56,9 @@ impl TemplateRx {
         down: Arc<Mutex<Downstream>>,
         miner_coinbase_outputs: Vec<TxOut>,
         authority_public_key: Option<Secp256k1PublicKey>,
-        tx_list_receiver: TReceiver<Seq064K<'static, B016M<'static>>>,
+        tx_list_receiver: TReceiver<crate::api::TxListWithResponse>,
         test_only_do_not_send_solution_to_tp: bool,
+        jd_event_broadcaster: TemplateNotificationBroadcaster,
     ) -> Result<AbortOnDrop, Error> {
         let mut encoded_outputs = vec![];
         miner_coinbase_outputs
@@ -104,6 +107,7 @@ impl TemplateRx {
             new_template_message: None,
             miner_coinbase_output: encoded_outputs,
             test_only_do_not_send_solution_to_tp,
+            jd_event_broadcaster,
         }));
 
         let task_manager = TaskManager::initialize();
@@ -203,7 +207,7 @@ impl TemplateRx {
     pub async fn start_templates(
         self_mutex: Arc<Mutex<Self>>,
         mut receiver: TReceiver<EitherFrame>,
-        tx_list_receiver: Arc<Mutex<TReceiver<Seq064K<'static, B016M<'static>>>>>,
+        tx_list_receiver: Arc<Mutex<TReceiver<TxListWithResponse>>>,
     ) -> Result<AbortOnDrop, Error> {
         let jd = self_mutex
             .safe_lock(|s| s.jd.clone())
@@ -356,12 +360,14 @@ impl TemplateRx {
                                                 let transactions_data = m.transaction_list;
                                                 let excess_data = m.excess_data;
                                                 let expected_template_id = m.template_id;
-                                                let m = match self_mutex
-                                                    .safe_lock(|t| t.new_template_message.clone())
-                                                {
-                                                    Ok(new_template_message) => {
-                                                        new_template_message.unwrap()
-                                                    }
+                                                let (m, jd_event_broadcaster) = match self_mutex
+                                                    .safe_lock(|t| {
+                                                        (
+                                                            t.new_template_message.clone(),
+                                                            t.jd_event_broadcaster.clone(),
+                                                        )
+                                                    }) {
+                                                    Ok(tuple) => tuple,
                                                     Err(e) => {
                                                         // Update global tp state to down
                                                         error!("TemplateRx mutex poisoned: {e}");
@@ -369,6 +375,7 @@ impl TemplateRx {
                                                         break;
                                                     }
                                                 };
+                                                let m = m.unwrap();
                                                 if m.template_id != expected_template_id {
                                                     continue;
                                                 }
@@ -379,18 +386,19 @@ impl TemplateRx {
                                                     token.coinbase_output.to_vec();
                                                 if let Some(jd) = jd.as_ref() {
                                                     if let Err(e) = super::job_declarator::JobDeclarator::on_new_template(
-                                                jd,
-                                                m.clone(),
-                                                mining_token,
-                                                tx_list_receiver.clone(),
-                                                excess_data,
-                                                pool_coinbase_out,
-                                                Some(transactions_data),
-                                            )
-                                            .await {
-                                                error!("{e:?}");
-                                                break;
-                                            };
+                                                        jd,
+                                                        m.clone(),
+                                                        mining_token,
+                                                        tx_list_receiver.clone(),
+                                                        jd_event_broadcaster,
+                                                        excess_data,
+                                                        pool_coinbase_out,
+                                                        Some(transactions_data), // If client did not provide tx list, use fallback from TP
+                                                    )
+                                                    .await {
+                                                        error!("{e:?}");
+                                                        break;
+                                                    };
                                                 }
                                             }
                                             Some(

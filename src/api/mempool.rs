@@ -17,13 +17,14 @@ use bitcoin::Txid;
 use bitcoincore_rpc::json::GetMempoolEntryResultFees;
 use bitcoincore_rpc::{Client, RpcApi};
 use futures::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use tokio::sync::oneshot;
 use tokio_stream::wrappers::BroadcastStream;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Serialize, Clone)]
 pub struct MempoolTransaction {
@@ -91,7 +92,7 @@ pub enum SequenceEvent {
     },
 }
 
-pub type EventBroadcaster = broadcast::Sender<SequenceEvent>;
+pub type MempoolEventBroadcaster = broadcast::Sender<SequenceEvent>;
 
 async fn stream_to_ws<T: Serialize + Clone + Send + 'static>(
     mut socket: WebSocket,
@@ -113,12 +114,16 @@ async fn stream_to_ws<T: Serialize + Clone + Send + 'static>(
     warn!("WebSocket closed: {}", label);
 }
 
-pub async fn ws_events_handler(
+pub async fn ws_mempool_events_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| {
-        stream_to_ws(socket, state.event_broadcaster.subscribe(), "sequence_txs")
+        stream_to_ws(
+            socket,
+            state.mempool_event_broadcaster.subscribe(),
+            "sequence_txs",
+        )
     })
 }
 
@@ -141,7 +146,7 @@ pub async fn fetch_mempool(State(state): State<AppState>) -> Json<Vec<MempoolTra
 // ZMQ sequence stream handles all events
 pub fn spawn_zmq_events(
     rpc: Arc<Client>,
-    event_broadcaster: EventBroadcaster,
+    event_broadcaster: MempoolEventBroadcaster,
     zmq_url: &'static str,
 ) {
     std::thread::spawn(move || {
@@ -284,39 +289,53 @@ pub fn spawn_zmq_events(
     });
 }
 
+#[derive(Deserialize)]
+pub struct ApiRequest {
+    pub template_id: u64,
+    pub txids: Vec<String>,
+}
+
 pub async fn submit_tx_list(
     State(state): State<AppState>,
-    Json(txids): Json<Vec<String>>,
+    Json(api_request): Json<ApiRequest>,
 ) -> impl IntoResponse {
+    let template_id = api_request.template_id;
+    let txids = api_request.txids;
+
+    info!(
+        "Received submit_tx_list request for template_id: {}, txids: {:?} from miner",
+        template_id, txids
+    );
+
     let mut txs: Vec<B016M<'static>> = Vec::new();
+    let mut invalid_tx: Vec<(String, String)> = Vec::new();
+    let mut tx_count = 0;
     for txid_str in txids {
         let txid = match txid_str.parse::<Txid>() {
             Ok(t) => t,
             Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(APIResponse::error(Some(format!(
-                        "Invalid txid: {}",
-                        txid_str
-                    )))),
-                );
+                invalid_tx.push((txid_str.clone(), "Invalid txid".to_string()));
+                continue;
             }
         };
+        tx_count += 1;
         match &state.rpc {
             Some(rpc) => match rpc.get_raw_transaction(&txid, None) {
                 Ok(tx) => {
                     let bytes = encode::serialize(&tx);
-                    let serialized: B016M<'static> = bytes.try_into().unwrap();
+                    let serialized: B016M<'static> = match bytes.try_into() {
+                        Ok(s) => s,
+                        Err(_) => {
+                            invalid_tx
+                                .push((txid.to_string(), "Serialization invalid_tx".to_string()));
+                            continue;
+                        }
+                    };
                     txs.push(serialized);
                 }
                 Err(e) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(APIResponse::error(Some(format!(
-                            "Failed to fetch tx {}: {}",
-                            txid, e
-                        )))),
-                    );
+                    invalid_tx.push((txid.to_string(), format!("Failed to fetch tx: {}", e)));
+                    continue;
                 }
             },
             None => {
@@ -329,9 +348,33 @@ pub async fn submit_tx_list(
             }
         }
     }
-    let seq: Seq064K<'static, B016M<'static>> = txs.into();
 
-    if state.tx_list_sender.send(seq).await.is_err() {
+    if tx_count == 0 {
+        // All transactions are invalid
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(APIResponse::error(Some(format!(
+                "All transactions are invalid: {:?}",
+                invalid_tx
+            )))),
+        );
+    }
+
+    let seq: Seq064K<'static, B016M<'static>> = txs.into();
+    info!(
+        "Submitting tx list for template_id: {}, tx count: {}",
+        template_id, tx_count
+    );
+
+    // Create a oneshot channel to wait for the job declaration response
+    let (response_sender, response_receiver) = oneshot::channel();
+
+    if let Err(e) = state
+        .tx_list_sender
+        .send((seq, Some(response_sender)))
+        .await
+    {
+        error!("Failed to send tx list: {}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(APIResponse::error(Some(
@@ -339,5 +382,43 @@ pub async fn submit_tx_list(
             ))),
         );
     }
-    (StatusCode::OK, Json(APIResponse::success(None::<()>)))
+
+    info!(
+        "Successfully sent tx list for template_id: {}, waiting for job declaration response...",
+        template_id
+    );
+
+    // Wait for the job declaration response with a timeout
+    match tokio::time::timeout(std::time::Duration::from_secs(30), response_receiver).await {
+        Ok(Ok(job_data)) => {
+            info!("Received job declaration response: {:?}", job_data);
+            (
+                StatusCode::OK,
+                Json(APIResponse::success(Some(serde_json::json!({
+                    "template_id": template_id,
+                    "submitted_tx_count": tx_count,
+                    "invalid_txids": invalid_tx,
+                    "job_declaration": job_data
+                })))),
+            )
+        }
+        Ok(Err(_)) => {
+            error!("Job declaration response channel was closed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(APIResponse::error(Some(
+                    "Job declaration failed - response channel closed".to_string(),
+                ))),
+            )
+        }
+        Err(_) => {
+            error!("Timeout waiting for job declaration response");
+            (
+                StatusCode::REQUEST_TIMEOUT,
+                Json(APIResponse::error(Some(
+                    "Timeout waiting for job declaration response".to_string(),
+                ))),
+            )
+        }
+    }
 }
