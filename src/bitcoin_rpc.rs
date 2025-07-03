@@ -3,6 +3,16 @@ use bitcoincore_rpc::{Auth, Client, RpcApi};
 use ini::Ini;
 use std::{fs, path::Path, sync::Arc};
 
+/// Attempts to read cookie-based authentication credentials from the Bitcoin data directory.
+///
+/// Looks for a `.cookie` file in the given `datadir`. If found, parses the file to extract the username and password.
+/// Returns `Some(Auth::UserPass)` if successful, or `None` if the file is missing or invalid.
+///
+/// # Arguments
+/// * `datadir` - Path to the Bitcoin data directory.
+///
+/// Returns
+/// * `Some(Auth)` if credentials are found, otherwise `None`.
 pub fn get_cookie_auth(datadir: &Path) -> Option<Auth> {
     let cookie_path = datadir.join(".cookie");
     println!("Looking for cookie file at: {}", cookie_path.display());
@@ -20,6 +30,16 @@ pub fn get_cookie_auth(datadir: &Path) -> Option<Auth> {
     Some(Auth::UserPass(user, pass))
 }
 
+/// Attempts to read RPC credentials from `bitcoin.conf` in the given data directory.
+///
+/// Searches for `rpcuser` and `rpcpassword` in the general section or `[main]` section of the config file.
+/// Returns `Some(Auth::UserPass)` if both are found, otherwise `None`.
+///
+/// # Arguments
+/// * `datadir` - Path to the Bitcoin data directory.
+///
+/// # Returns
+/// * `Some(Auth)` if credentials are found, otherwise `None`.
 pub fn get_basic_auth_from_conf(datadir: &Path) -> Option<Auth> {
     println!("Looking for bitcoin.conf in: {}", datadir.display());
     if !datadir.exists() {
@@ -70,6 +90,16 @@ pub fn get_basic_auth_from_conf(datadir: &Path) -> Option<Auth> {
     }
 }
 
+/// Attempts to connect to the Bitcoin RPC using available authentication methods.
+///
+/// Tries cookie-based authentication first, then falls back to credentials from `bitcoin.conf`.
+/// Returns a `Client` if authentication and connection succeed, otherwise `None`.
+///
+/// # Arguments
+/// * `datadir` - Path to the Bitcoin data directory.
+///
+/// # Returns
+/// * `Some(Client)` if connection is successful, otherwise `None`.
 pub fn connect_to_rpc(datadir: &Path) -> Option<Client> {
     let rpc_url = format!(
         "http://{}:{}",
@@ -99,6 +129,12 @@ pub fn connect_to_rpc(datadir: &Path) -> Option<Client> {
     None
 }
 
+/// Creates a shared (Arc) Bitcoin RPC client using the configured data directory.
+///
+/// Returns an error string if connection fails.
+///
+/// # Returns
+/// * `Ok(Arc<Client>)` if connection is successful, otherwise `Err(String)`.
 pub fn create_rpc_client() -> Result<Arc<Client>, String> {
     let datadir = config::Configuration::bitcoin_datadir();
     connect_to_rpc(&datadir)

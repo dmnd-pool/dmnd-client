@@ -94,6 +94,15 @@ pub enum SequenceEvent {
 
 pub type MempoolEventBroadcaster = broadcast::Sender<SequenceEvent>;
 
+/// Streams broadcast events to a WebSocket client as JSON messages.
+///
+/// This function listens for events from a broadcast channel and sends them to the connected WebSocket client.
+/// It serializes each event to JSON and sends it as a text message. If sending fails, the loop breaks and the connection is closed.
+///
+/// # Arguments
+/// * `socket` - The WebSocket connection to send messages to.
+/// * `subscriber` - The broadcast receiver for events to stream.
+/// * `label` - A label for logging purposes.
 async fn stream_to_ws<T: Serialize + Clone + Send + 'static>(
     mut socket: WebSocket,
     subscriber: broadcast::Receiver<T>,
@@ -114,6 +123,13 @@ async fn stream_to_ws<T: Serialize + Clone + Send + 'static>(
     warn!("WebSocket closed: {}", label);
 }
 
+/// WebSocket handler for mempool events.
+///
+/// Upgrades the HTTP connection to a WebSocket and streams mempool events to the client.
+///
+/// # Arguments
+/// * `ws` - The WebSocket upgrade request.
+/// * `State(state)` - The application state containing the event broadcaster.
 pub async fn ws_mempool_events_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
@@ -127,6 +143,13 @@ pub async fn ws_mempool_events_handler(
     })
 }
 
+/// Fetches the current mempool transactions from the Bitcoin node.
+///
+/// Returns a JSON array of `MempoolTransaction` objects. If the Bitcoin RPC is unavailable or an error occurs,
+/// returns an empty array and logs the error.
+///
+/// # Arguments
+/// * `State(state)` - The application state containing the Bitcoin RPC client.
 pub async fn fetch_mempool(State(state): State<AppState>) -> Json<Vec<MempoolTransaction>> {
     match &state.rpc {
         Some(rpc) => match rpc.get_raw_mempool_verbose() {
@@ -143,7 +166,15 @@ pub async fn fetch_mempool(State(state): State<AppState>) -> Json<Vec<MempoolTra
     }
 }
 
-// ZMQ sequence stream handles all events
+/// Spawns a background thread to listen for ZMQ sequence events from the Bitcoin node and broadcast them.
+///
+/// This function connects to the ZMQ socket, subscribes to sequence events, parses them, and sends them to the event broadcaster.
+/// Handles mempool additions/removals and block connect/disconnect events. Maintains a backlog if broadcasting fails.
+///
+/// # Arguments
+/// * `rpc` - Shared Bitcoin RPC client.
+/// * `event_broadcaster` - Broadcast channel for sequence events.
+/// * `zmq_url` - The ZMQ endpoint to connect to.
 pub fn spawn_zmq_events(
     rpc: Arc<Client>,
     event_broadcaster: MempoolEventBroadcaster,
@@ -295,6 +326,14 @@ pub struct ApiRequest {
     pub txids: Vec<String>,
 }
 
+/// Handles submission of a list of transaction IDs for a given template.
+///
+/// Validates and serializes each transaction, sends them to the job declaration process, and waits for a response.
+/// Returns a JSON response with the result, including any invalid transactions and the job declaration data.
+///
+/// # Arguments
+/// * `State(state)` - The application state containing the Bitcoin RPC client and job declaration sender.
+/// * `Json(api_request)` - The request payload containing the template ID and transaction IDs.
 pub async fn submit_tx_list(
     State(state): State<AppState>,
     Json(api_request): Json<ApiRequest>,

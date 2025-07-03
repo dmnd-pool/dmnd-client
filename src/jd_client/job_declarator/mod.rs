@@ -19,13 +19,11 @@ use tokio::sync::oneshot;
 use tracing::{error, info};
 
 use crate::{
-    api::{
-        jd_event_ws::{
-            JobDeclarationData, NewTemplateNotification, TemplateNotificationBroadcaster,
-        },
-        TxListWithResponse,
-    },
+    api::TxListWithResponse,
     config::Configuration,
+    dashboard::jd_event_ws::{
+        JobDeclarationData, NewTemplateNotification, TemplateNotificationBroadcaster,
+    },
 };
 
 use async_recursion::async_recursion;
@@ -134,7 +132,11 @@ impl JobDeclarator {
             custom_job_responses: HashMap::new(),
         }));
 
-        // Set up the connection with the upstream for job response notifications
+        // Sets up the connection with the upstream for job response notifications.
+        //
+        // This step registers the current `JobDeclarator` instance with the upstream connection,
+        // allowing the upstream to send job response notifications back to this declarator.
+        // If the registration fails, an error is logged.
         if let Err(e) = Upstream::set_job_declarator(&up, &self_) {
             error!("Failed to set job declarator reference in upstream: {}", e);
         }
@@ -268,6 +270,8 @@ impl JobDeclarator {
                 .as_secs(),
         );
 
+        // Send the template notification to all subscribed WebSocket clients.
+        // If no receivers are currently subscribed (via ws_event_handler), this will return an error — which is expected.
         if jd_event_broadcaster.send(template_notification).is_err() {
             error!("Failed to send template notification: no receivers available");
         }

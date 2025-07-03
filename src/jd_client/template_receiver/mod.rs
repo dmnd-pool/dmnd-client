@@ -1,9 +1,9 @@
 mod task_manager;
 use crate::api::TxListWithResponse;
+use crate::dashboard::jd_event_ws::TemplateNotificationBroadcaster;
 use crate::proxy_state::{DownstreamType, JdState, TpState};
 use crate::shared::utils::AbortOnDrop;
 use crate::{
-    api::jd_event_ws::TemplateNotificationBroadcaster,
     jd_client::mining_downstream::DownstreamMiningNode as Downstream, proxy_state::ProxyState,
 };
 

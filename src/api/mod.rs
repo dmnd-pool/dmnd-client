@@ -1,17 +1,15 @@
-mod dashboard;
-pub mod jd_event_ws;
 mod routes;
 pub mod stats;
 mod utils;
 use crate::{
-    api::{
-        dashboard::static_handler,
-        jd_event_ws::{ws_event_handler, TemplateNotificationBroadcaster},
-        mempool::{
-            spawn_zmq_events, submit_tx_list, ws_mempool_events_handler, MempoolEventBroadcaster,
-        },
+    api::mempool::{
+        spawn_zmq_events, submit_tx_list, ws_mempool_events_handler, MempoolEventBroadcaster,
     },
     bitcoin_rpc, config,
+    dashboard::{
+        dashboard::static_handler,
+        jd_event_ws::{ws_event_handler, JobDeclarationData, TemplateNotificationBroadcaster},
+    },
     router::Router,
     API_SERVER_PORT,
 };
@@ -22,7 +20,6 @@ use axum::{
 use binary_sv2::{Seq064K, B016M};
 use bitcoincore_rpc::Client;
 pub mod mempool;
-use crate::api::jd_event_ws::JobDeclarationData;
 use routes::Api;
 use stats::StatsSender;
 use std::sync::Arc;
@@ -46,7 +43,7 @@ pub struct AppState {
     rpc: Option<Arc<Client>>,
     mempool_event_broadcaster: MempoolEventBroadcaster,
     tx_list_sender: TSender<TxListWithResponse>,
-    jd_event_broadcaster: TemplateNotificationBroadcaster,
+    pub jd_event_broadcaster: TemplateNotificationBroadcaster,
 }
 
 pub(crate) async fn start(
@@ -113,6 +110,7 @@ pub(crate) async fn start(
         // Dashboard routes
         .route("/", get(static_handler))
         .route("/dashboard/{*path}", get(static_handler))
+        .route("/{*path}", get(static_handler))
         .with_state(state)
         .layer(cors);
 

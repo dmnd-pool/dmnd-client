@@ -112,34 +112,6 @@ impl ConfigFile {
         }
     }
 }
-
-impl ConfigFile {
-    pub fn default() -> Self {
-        ConfigFile {
-            token: None,
-            tp_address: None,
-            interval: None,
-            delay: None,
-            downstream_hashrate: None,
-            loglevel: None,
-            nc_loglevel: None,
-            sv1_log: None,
-            staging: None,
-            testnet3: None,
-            local: None,
-            listening_addr: None,
-            api_server_port: None,
-            monitor: None,
-            auto_update: None,
-            custom_job_timeout: u64,
-            zmq_pub_sequence: String,
-            rpc_allow_ip: String,
-            rpc_port: u16,
-            bitcoin_datadir: PathBuf,
-        }
-    }
-}
-
 pub struct Configuration {
     token: Option<String>,
     tp_address: Option<String>,

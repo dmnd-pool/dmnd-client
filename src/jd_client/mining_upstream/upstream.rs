@@ -325,6 +325,18 @@ impl Upstream {
         }
     }
 
+    /// Registers a reference to the JobDeclarator for job response notifications.
+    ///
+    /// This function injects a weak reference to the JobDeclarator into the Upstream instance.
+    /// It enables the Upstream to notify the JobDeclarator about job declaration responses,
+    /// allowing for asynchronous communication and response handling between the two components.
+    ///
+    /// # Arguments
+    /// * `self_` - Reference to the Upstream instance.
+    /// * `job_declarator` - Reference to the JobDeclarator to be registered.
+    ///
+    /// # Returns
+    /// * `ProxyResult<()>` indicating success or a mutex error.
     pub fn set_job_declarator(
         self_: &Arc<Mutex<Self>>,
         job_declarator: &Arc<Mutex<super::super::job_declarator::JobDeclarator>>,
@@ -706,6 +718,16 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
 
 // Additional methods for job declaration response handling
 impl Upstream {
+    /// Handles a successful job declaration response from the upstream pool.
+    ///
+    /// This function is called when a `SetCustomMiningJobSuccess` message is received from the pool.
+    /// It looks up the original job declaration request ID, upgrades the weak reference to the
+    /// `JobDeclarator`, and notifies it with the job/channel IDs. If the mapping or reference is
+    /// missing, it logs an error. This enables the async response flow back to the API.
+    ///
+    /// # Arguments
+    /// * `self_` - Reference to the Upstream instance.
+    /// * `success_msg` - The success message containing job/channel IDs.
     pub async fn handle_job_declaration_success(
         self_: &Arc<Mutex<Self>>,
         success_msg: roles_logic_sv2::mining_sv2::SetCustomMiningJobSuccess,
@@ -746,6 +768,20 @@ impl Upstream {
         }
     }
 
+    /// Sends the job declaration response back to the JobDeclarator and API endpoint.
+    ///
+    /// This function updates the job data with the channel and job IDs, then sends it through
+    /// the oneshot channel to the API handler waiting for a response. If the response sender or
+    /// job data is missing, or the mutex is corrupted, it logs an error.
+    ///
+    /// # Arguments
+    /// * `job_declarator` - Reference to the JobDeclarator instance.
+    /// * `jd_request_id` - The original job declaration request ID.
+    /// * `channel_id` - The channel ID assigned by the pool.
+    /// * `job_id` - The job ID assigned by the pool.
+    ///
+    /// # Returns
+    /// * `Result<(), Error>` indicating success or mutex error.
     pub async fn send_job_declaration_response(
         job_declarator: &Arc<Mutex<super::super::job_declarator::JobDeclarator>>,
         jd_request_id: u32,

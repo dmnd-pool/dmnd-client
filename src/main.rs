@@ -17,10 +17,9 @@ use tokio::sync::{broadcast, mpsc::channel};
 use tracing::{debug, error, info, warn};
 mod api;
 use api::TxListWithResponse;
-mod assets;
 mod bitcoin_rpc;
-
 mod config;
+mod dashboard;
 mod ingress;
 pub mod jd_client;
 mod minin_pool_connection;
@@ -80,7 +79,7 @@ async fn main() {
     let remote_layer = SendLogLayer::new();
     let console_layer =
         tracing_subscriber::fmt::layer().with_filter(tracing_subscriber::EnvFilter::new(format!(
-            "{},demand_sv2_connection::noise_connection_tokio={}",
+            "{},demand_sv2_connection::noise_connection_tokio={},bitcoincore_rpc=off",
             log_level, noise_connection_log_level
         )));
     //Disable noise_connection error (for now) because:
