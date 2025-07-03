@@ -261,8 +261,11 @@ impl JobDeclarator {
 
         // Notify the dashboard that a new template is available and request the transaction list
         let template_notification = NewTemplateNotification::new(
-            "new_template".to_string(),
-            "Send the transaction list".to_string(),
+            "NewTemplate".to_string(),
+            format!(
+                "Send the transaction list for template id: {}",
+                template.template_id
+            ),
             template.template_id,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -291,7 +294,6 @@ impl JobDeclarator {
                 .map_err(|_| Error::JobDeclaratorMutexCorrupted)
             {
                 Ok(Ok((tx_list, response_sender))) => {
-                    info!("Received custom job transaction list {:?}", tx_list);
                     let tx_list_received_notification = NewTemplateNotification::new(
                         "RequestTransactionDataSuccess".to_string(),
                         "Transaction list received from miner".to_string(),
@@ -313,8 +315,7 @@ impl JobDeclarator {
 
                             let no_list_notification = NewTemplateNotification::new(
                                 "RequestTransactionDataSuccess".to_string(),
-                                "No transaction list from miner, using template provider list"
-                                    .to_string(),
+                                "No transaction list received from miner within timeout; using template provider's transaction list instead".to_string(),
                                 template.template_id,
                                 std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)

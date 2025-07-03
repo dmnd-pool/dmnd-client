@@ -69,6 +69,7 @@ impl From<(Txid, bitcoincore_rpc::json::GetMempoolEntryResult)> for MempoolTrans
 
 #[derive(Debug, Serialize, Clone)]
 pub struct BlockTransactionList {
+    pub height: usize,
     pub block_hash: String,
     pub txids: Vec<String>,
 }
@@ -258,20 +259,28 @@ pub fn spawn_zmq_events(
                         'C' => {
                             // Block connected
                             if let Ok(block_hash) = bitcoin::BlockHash::from_slice(&hash_bytes) {
-                                if let Ok(block) = rpc.get_block(&block_hash) {
-                                    let block_tx_list = BlockTransactionList {
-                                        block_hash: block_hash.to_string(),
-                                        txids: block
-                                            .txdata
-                                            .into_iter()
-                                            .map(|t| t.compute_txid().to_string())
-                                            .collect(),
-                                    };
-                                    Some(SequenceEvent::BlockConnect {
-                                        block: block_tx_list,
-                                    })
-                                } else {
-                                    None
+                                match rpc.get_block_info(&block_hash) {
+                                    Ok(block_info) => {
+                                        let block_tx_list = BlockTransactionList {
+                                            block_hash: block_hash.to_string(),
+                                            height: block_info.height as usize,
+                                            txids: block_info
+                                                .tx
+                                                .iter()
+                                                .map(|t| t.to_string())
+                                                .collect(),
+                                        };
+                                        Some(SequenceEvent::BlockConnect {
+                                            block: block_tx_list,
+                                        })
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to fetch block info for {}: {}",
+                                            block_hash, e
+                                        );
+                                        None
+                                    }
                                 }
                             } else {
                                 None
@@ -340,12 +349,6 @@ pub async fn submit_tx_list(
 ) -> impl IntoResponse {
     let template_id = api_request.template_id;
     let txids = api_request.txids;
-
-    info!(
-        "Received submit_tx_list request for template_id: {}, txids: {:?} from miner",
-        template_id, txids
-    );
-
     let mut txs: Vec<B016M<'static>> = Vec::new();
     let mut invalid_tx: Vec<(String, String)> = Vec::new();
     let mut tx_count = 0;
