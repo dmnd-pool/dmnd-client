@@ -17,7 +17,6 @@ use tokio::sync::{broadcast, mpsc::channel};
 use tracing::{debug, error, info, warn};
 mod api;
 use api::TxListWithResponse;
-mod bitcoin_rpc;
 mod config;
 mod dashboard;
 mod ingress;

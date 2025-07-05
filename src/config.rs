@@ -58,8 +58,10 @@ struct Args {
     rpc_allow_ip: Option<String>,
     #[clap(long = "rpc-port")]
     rpc_port: Option<u16>,
-    #[clap(long = "bitcoin-datadir")]
-    bitcoin_datadir: Option<PathBuf>,
+    #[clap(long = "rpc-username")]
+    rpcusername: Option<String>,
+    #[clap(long = "rpc-password")]
+    rpcpassword: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -83,7 +85,8 @@ struct ConfigFile {
     zmq_pub_sequence: Option<String>,
     rpc_allow_ip: Option<String>,
     rpc_port: Option<u16>,
-    bitcoin_datadir: Option<String>,
+    rpcusername: Option<String>,
+    rpcpassword: Option<String>,
 }
 
 impl ConfigFile {
@@ -108,7 +111,8 @@ impl ConfigFile {
             zmq_pub_sequence: None,
             rpc_allow_ip: None,
             rpc_port: None,
-            bitcoin_datadir: None,
+            rpcusername: None,
+            rpcpassword: None,
         }
     }
 }
@@ -132,7 +136,8 @@ pub struct Configuration {
     zmq_pub_sequence: String,
     rpc_allow_ip: String,
     rpc_port: u16,
-    bitcoin_datadir: PathBuf,
+    rpcusername: String,
+    rpcpassword: String,
 }
 impl Configuration {
     pub fn token() -> Option<String> {
@@ -253,8 +258,12 @@ impl Configuration {
         CONFIG.rpc_port
     }
 
-    pub fn bitcoin_datadir() -> &'static PathBuf {
-        &CONFIG.bitcoin_datadir
+    pub fn rpcusername() -> &'static String {
+        &CONFIG.rpcusername
+    }
+
+    pub fn rpcpassword() -> &'static String {
+        &CONFIG.rpcpassword
     }
 
     // Loads config from CLI, file, or env vars with precedence: CLI > file > env.
@@ -388,22 +397,19 @@ impl Configuration {
             .or_else(|| std::env::var("RPC_PORT").ok().and_then(|s| s.parse().ok()))
             .unwrap_or(8332);
 
-        let bitcoin_datadir = args
-            .bitcoin_datadir
-            .or_else(|| config.bitcoin_datadir.map(PathBuf::from))
-            .or_else(|| std::env::var("BITCOIN_DATADIR").ok().map(PathBuf::from))
-            .unwrap_or_else(|| {
-                // Default Bitcoin data directory based on OS
-                if cfg!(target_os = "windows") {
-                    std::env::var("APPDATA")
-                        .map(|appdata| PathBuf::from(appdata).join("Bitcoin"))
-                        .unwrap_or_else(|_| PathBuf::from("Bitcoin"))
-                } else {
-                    std::env::var("HOME")
-                        .map(|home| PathBuf::from(home).join(".bitcoin"))
-                        .unwrap_or_else(|_| PathBuf::from(".bitcoin"))
-                }
-            });
+        let rpcusername = args
+            .rpcusername
+            .or(config.rpcusername)
+            .or_else(|| std::env::var("RPC_USERNAME").ok())
+            .map(|username| username.to_string())
+            .unwrap_or_default();
+
+        let rpcpassword = args
+            .rpcpassword
+            .or(config.rpcpassword)
+            .or_else(|| std::env::var("RPC_PASSWORD").ok())
+            .map(|password| password.to_string())
+            .unwrap_or_default();
 
         Configuration {
             token,
@@ -425,7 +431,8 @@ impl Configuration {
             zmq_pub_sequence,
             rpc_allow_ip,
             rpc_port,
-            bitcoin_datadir,
+            rpcusername,
+            rpcpassword,
         }
     }
 }

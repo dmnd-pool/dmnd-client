@@ -5,7 +5,7 @@ use crate::{
     api::mempool::{
         spawn_zmq_events, submit_tx_list, ws_mempool_events_handler, MempoolEventBroadcaster,
     },
-    bitcoin_rpc, config,
+    config,
     dashboard::{
         dashboard::static_handler,
         jd_event_ws::{ws_event_handler, JobDeclarationData, TemplateNotificationBroadcaster},
@@ -18,6 +18,7 @@ use axum::{
     Router as AxumRouter,
 };
 use binary_sv2::{Seq064K, B016M};
+mod bitcoin_rpc;
 use bitcoincore_rpc::Client;
 pub mod mempool;
 use routes::Api;
@@ -63,17 +64,7 @@ pub(crate) async fn start(
             Some(client)
         }
         Err(e) => {
-            let datadir = config::Configuration::bitcoin_datadir();
             warn!("{e}");
-            println!("Possible reasons:");
-            println!("1. Bitcoin Core is not running");
-            println!("2. Incorrect RPC credentials in bitcoin.conf");
-            println!(
-                "3. RPC port {} is not accessible",
-                config::Configuration::rpc_port()
-            );
-            println!("4. Incorrect Bitcoin data directory path in config.toml");
-            println!("   Data directory: {}", datadir.display());
             None
         }
     };
