@@ -34,7 +34,6 @@ impl NewTemplateNotification {
 #[derive(Debug, Serialize, Clone)]
 pub struct JobDeclarationData {
     pub template_id: Option<u64>,
-    pub rejected_tx: Option<Vec<String>>,
     pub channel_id: Option<u32>,
     pub req_id: Option<u32>,
     pub job_id: Option<u32>,
@@ -45,7 +44,6 @@ impl JobDeclarationData {
     pub fn new() -> Self {
         Self {
             template_id: None,
-            rejected_tx: None,
             channel_id: None,
             req_id: None,
             job_id: None,

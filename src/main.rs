@@ -19,6 +19,7 @@ mod api;
 use api::TxListWithResponse;
 mod config;
 mod dashboard;
+mod db;
 mod ingress;
 pub mod jd_client;
 mod minin_pool_connection;

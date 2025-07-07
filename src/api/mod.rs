@@ -10,6 +10,7 @@ use crate::{
         dashboard::static_handler,
         jd_event_ws::{ws_event_handler, JobDeclarationData, TemplateNotificationBroadcaster},
     },
+    db::connect_db,
     router::Router,
     API_SERVER_PORT,
 };
@@ -45,6 +46,7 @@ pub struct AppState {
     mempool_event_broadcaster: MempoolEventBroadcaster,
     tx_list_sender: TSender<TxListWithResponse>,
     pub jd_event_broadcaster: TemplateNotificationBroadcaster,
+    db: Option<sqlx::SqlitePool>,
 }
 
 pub(crate) async fn start(
@@ -69,6 +71,24 @@ pub(crate) async fn start(
         }
     };
 
+    // Connect to the database if rpc is available
+    let db = if rpc.is_some() {
+        info!("Connecting to the database");
+        match connect_db().await {
+            Ok(pool) => {
+                info!("Database connection established");
+                Some(pool)
+            }
+            Err(e) => {
+                warn!("Failed to connect to the database: {e}");
+                None
+            }
+        }
+    } else {
+        warn!("Skipping database connection due to missing Bitcoin RPC connection");
+        None
+    };
+
     let (mempool_event_broadcaster, _) = broadcast::channel(300);
 
     let state = AppState {
@@ -78,6 +98,7 @@ pub(crate) async fn start(
         mempool_event_broadcaster: mempool_event_broadcaster.clone(),
         tx_list_sender,
         jd_event_broadcaster: jd_event_broadcaster.clone(),
+        db,
     };
 
     let zmq_pub_sequence = config::Configuration::zmq_pub_sequence();
@@ -98,9 +119,10 @@ pub(crate) async fn start(
         .route("/ws/bitcoin/stream", get(ws_mempool_events_handler))
         .route("/ws/jd/stream", get(ws_event_handler))
         .route("/api/job-declaration", post(submit_tx_list))
+        .route("/api/job-history", get(Api::get_job_history))
+        .route("/api/job-txids/{template_id}", get(Api::get_job_txids))
         // Dashboard routes
         .route("/", get(static_handler))
-        .route("/dashboard/{*path}", get(static_handler))
         .route("/{*path}", get(static_handler))
         .with_state(state)
         .layer(cors);

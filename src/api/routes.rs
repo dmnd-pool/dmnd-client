@@ -1,6 +1,11 @@
 use super::{utils::get_cpu_and_memory_usage, AppState};
-use crate::proxy_state::ProxyState;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use crate::{db::handlers::JobDeclarationHandler, proxy_state::ProxyState};
+use axum::{
+    extract::{Path, Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
 use serde::Serialize;
 
 pub struct Api {}
@@ -103,6 +108,77 @@ impl Api {
             _ => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(APIResponse::error(Some("Unknown proxy state".to_string()))),
+            ),
+        }
+    }
+
+    // API endpoint: Get job declaration history with pagination
+    pub async fn get_job_history(
+        State(state): State<AppState>,
+        Query(params): Query<std::collections::HashMap<String, String>>,
+    ) -> impl IntoResponse {
+        let db = match &state.db {
+            Some(db) => db,
+            None => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(APIResponse::error(Some(
+                        "Database not available".to_string(),
+                    ))),
+                );
+            }
+        };
+
+        let page = params
+            .get("page")
+            .and_then(|p| p.parse::<i64>().ok())
+            .unwrap_or(1);
+        let per_page = params
+            .get("per_page")
+            .and_then(|p| p.parse::<i64>().ok())
+            .unwrap_or(10);
+
+        let handler = JobDeclarationHandler::new(db.clone());
+
+        match handler.get_job_history(page, per_page).await {
+            Ok(response) => (StatusCode::OK, Json(APIResponse::success(Some(response)))),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(APIResponse::error(Some(format!(
+                    "Failed to get job history: {}",
+                    e
+                )))),
+            ),
+        }
+    }
+
+    // API endpoint: Get txids for a specific template
+    pub async fn get_job_txids(
+        State(state): State<AppState>,
+        Path(template_id): Path<i64>,
+    ) -> impl IntoResponse {
+        let db = match &state.db {
+            Some(db) => db,
+            None => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(APIResponse::error(Some(
+                        "Database not available".to_string(),
+                    ))),
+                );
+            }
+        };
+
+        let handler = JobDeclarationHandler::new(db.clone());
+
+        match handler.get_job_txids(template_id).await {
+            Ok(response) => (StatusCode::OK, Json(APIResponse::success(Some(response)))),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(APIResponse::error(Some(format!(
+                    "Failed to get job txids: {}",
+                    e
+                )))),
             ),
         }
     }

@@ -56,7 +56,7 @@ impl TemplateRx {
         down: Arc<Mutex<Downstream>>,
         miner_coinbase_outputs: Vec<TxOut>,
         authority_public_key: Option<Secp256k1PublicKey>,
-        tx_list_receiver: TReceiver<crate::api::TxListWithResponse>,
+        tx_list_receiver: TReceiver<TxListWithResponse>,
         test_only_do_not_send_solution_to_tp: bool,
         jd_event_broadcaster: TemplateNotificationBroadcaster,
     ) -> Result<AbortOnDrop, Error> {

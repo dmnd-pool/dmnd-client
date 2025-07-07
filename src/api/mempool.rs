@@ -1,4 +1,7 @@
 use crate::api::routes::APIResponse;
+use crate::dashboard::jd_event_ws::JobDeclarationData;
+use crate::db::handlers::JobDeclarationHandler;
+use crate::db::model::JobDeclarationInsert;
 
 use super::AppState;
 use axum::http::StatusCode;
@@ -351,6 +354,7 @@ pub async fn submit_tx_list(
     let txids = api_request.txids;
     let mut txs: Vec<B016M<'static>> = Vec::new();
     let mut invalid_tx: Vec<(String, String)> = Vec::new();
+    let mut valid_txids: Vec<Txid> = Vec::new(); // Store valid txids for database
     let mut tx_count = 0;
     for txid_str in txids {
         let txid = match txid_str.parse::<Txid>() {
@@ -374,6 +378,7 @@ pub async fn submit_tx_list(
                         }
                     };
                     txs.push(serialized);
+                    valid_txids.push(txid); // Store valid txid
                 }
                 Err(e) => {
                     invalid_tx.push((txid.to_string(), format!("Failed to fetch tx: {}", e)));
@@ -403,10 +408,6 @@ pub async fn submit_tx_list(
     }
 
     let seq: Seq064K<'static, B016M<'static>> = txs.into();
-    info!(
-        "Submitting tx list for template_id: {}, tx count: {}",
-        template_id, tx_count
-    );
 
     // Create a oneshot channel to wait for the job declaration response
     let (response_sender, response_receiver) = oneshot::channel();
@@ -434,6 +435,8 @@ pub async fn submit_tx_list(
     match tokio::time::timeout(std::time::Duration::from_secs(30), response_receiver).await {
         Ok(Ok(job_data)) => {
             info!("Received job declaration response: {:?}", job_data);
+            store_jd_in_db(&state, &job_data, &valid_txids).await;
+
             (
                 StatusCode::OK,
                 Json(APIResponse::success(Some(serde_json::json!({
@@ -461,6 +464,46 @@ pub async fn submit_tx_list(
                     "Timeout waiting for job declaration response".to_string(),
                 ))),
             )
+        }
+    }
+}
+
+async fn store_jd_in_db(state: &AppState, job_data: &JobDeclarationData, valid_txids: &[Txid]) {
+    // Store job declaration data in database if available
+    if let Some(db) = &state.db {
+        let handler = JobDeclarationHandler::new(db.clone());
+
+        // Extract data from job_data
+        if let (
+            Some(template_id),
+            Some(channel_id),
+            Some(request_id),
+            Some(job_id),
+            Some(mining_job_token),
+        ) = (
+            job_data.template_id,
+            job_data.channel_id,
+            job_data.req_id,
+            job_data.job_id,
+            job_data.mining_job_token.as_ref(),
+        ) {
+            let txid_strings: Vec<String> = valid_txids.iter().map(|t| t.to_string()).collect();
+            let job_declaration = JobDeclarationInsert {
+                template_id: template_id as i64,
+                channel_id: channel_id as i64,
+                request_id: request_id as i64,
+                job_id: job_id as i64,
+                mining_job_token: mining_job_token.clone(),
+                txids: txid_strings,
+            };
+
+            if handler
+                .insert_job_declaration(&job_declaration)
+                .await
+                .is_err()
+            {
+                error!("Failed to store job declaration");
+            }
         }
     }
 }
