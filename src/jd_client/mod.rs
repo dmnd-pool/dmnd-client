@@ -55,12 +55,11 @@ pub async fn start(
     sender: tokio::sync::mpsc::Sender<Mining<'static>>,
     up_receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     up_sender: tokio::sync::mpsc::Sender<Mining<'static>>,
-    pool_address: SocketAddr,
 ) -> Option<AbortOnDrop> {
-    info!("JD client starting for pool address: {}", pool_address);
+    // This will not work when we implement support for multiple upstream
     IS_CUSTOM_JOB_SET.store(true, std::sync::atomic::Ordering::Release);
     IS_NEW_TEMPLATE_HANDLED.store(true, std::sync::atomic::Ordering::Release);
-    initialize_jd(receiver, sender, up_receiver, up_sender, pool_address).await
+    initialize_jd(receiver, sender, up_receiver, up_sender).await
 }
 
 async fn initialize_jd(
@@ -68,15 +67,12 @@ async fn initialize_jd(
     sender: tokio::sync::mpsc::Sender<Mining<'static>>,
     up_receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     up_sender: tokio::sync::mpsc::Sender<Mining<'static>>,
-    pool_address: SocketAddr,
 ) -> Option<AbortOnDrop> {
-    info!("Initializing JD client for pool address: {}", pool_address);
-
     let task_manager = TaskManager::initialize();
     let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
         Ok(abortable) => abortable?,
         Err(e) => {
-            error!("Jdc task manager mutex corrupt: {e} (pool: {})", pool_address);
+            error!("Jdc task manager mutex corrupt: {e}");
             return None;
         }
     };
@@ -91,7 +87,7 @@ async fn initialize_jd(
     {
         Ok(upstream) => upstream,
         Err(e) => {
-            error!("Failed to instantiate new Upstream for pool {}: {e}", pool_address);
+            error!("Failed to instantiate new Upstream: {e}");
             drop(abortable);
             return None;
         }
@@ -102,7 +98,7 @@ async fn initialize_jd(
         Ok(tp_address) => tp_address
             .expect("Unreachable code, jdc is not instantiated when TP_ADDRESS not present"),
         Err(e) => {
-            error!("TP_ADDRESS mutex corrupted for pool {}: {e}", pool_address);
+            error!("TP_ADDRESS mutex corrupted: {e}");
             drop(abortable);
             return None;
         }
@@ -131,7 +127,7 @@ async fn initialize_jd(
         match JobDeclarator::new(address, auth_pub_k.into_bytes(), upstream.clone(), true).await {
             Ok(c) => c,
             Err(e) => {
-                error!("Failed to initialize JobDeclarator for pool {}: {e}", pool_address);
+                error!("Failed to intialize Jd: {e}");
                 drop(abortable);
                 return None;
             }
@@ -142,8 +138,7 @@ async fn initialize_jd(
         .is_err()
     {
         error!(
-            "Task manager failed while trying to add job declarator task for pool {}: {}",
-            pool_address,
+            "Task manager failed while trying to add job declarator task{}",
             error::Error::TaskManagerFailed
         );
         drop(abortable);
@@ -162,7 +157,7 @@ async fn initialize_jd(
     {
         Ok(abortable) => abortable,
         Err(e) => {
-            error!("Cannot start downstream mining node for pool {}: {e}", pool_address);
+            error!("Can not start downstream mining node: {e}");
             ProxyState::update_downstream_state(DownstreamType::JdClientMiningDownstream);
             return None;
         }
@@ -172,8 +167,7 @@ async fn initialize_jd(
         .is_err()
     {
         error!(
-            "Task manager failed while trying to add mining downstream task for pool {}: {}",
-            pool_address,
+            "Task manager failed while trying to add mining downstream task{}",
             error::Error::TaskManagerFailed
         );
         drop(abortable);
@@ -183,7 +177,7 @@ async fn initialize_jd(
         .safe_lock(|u| u.downstream = Some(donwstream.clone()))
         .is_err()
     {
-        error!("Upstream mutex failed for pool {}", pool_address);
+        error!("Upstream mutex failed");
         drop(abortable); // drop all tasks initailzed upto this point
         return None;
     };
@@ -193,7 +187,7 @@ async fn initialize_jd(
         match mining_upstream::Upstream::parse_incoming(upstream.clone(), up_receiver).await {
             Ok(abortable) => abortable,
             Err(e) => {
-                error!("Failed to get jdc upstream abortable for pool {}: {e}", pool_address);
+                error!("Failed to get jdc upstream abortable: {e}");
                 drop(abortable); // drop all tasks initailzed upto this point
                 return None;
             }
@@ -203,8 +197,7 @@ async fn initialize_jd(
         .is_err()
     {
         error!(
-            "Task manager failed while trying to add mining upstream task for pool {}: {}",
-            pool_address,
+            "Task manager failed while trying to add mining upstream task{}",
             error::Error::TaskManagerFailed
         );
         drop(abortable); // drop all tasks initailzed upto this point
@@ -225,13 +218,13 @@ async fn initialize_jd(
     {
         Ok(abortable) => abortable,
         Err(_) => {
-            info!("Dropping jd abortable for pool {}", pool_address);
-            eprintln!("TP is unreachable, the proxy is not in JD mode");
+            info!("Dropping jd abortable");
+            eprintln!("TP is unreachable, the proxy is in not in JD mode");
             drop(abortable);
             // Temporaily set TP_ADDRESS to None so that proxy can restart without it.
             // that means we will start mining without jd
             if crate::TP_ADDRESS.safe_lock(|tp| *tp = None).is_err() {
-                error!("TP_ADDRESS mutex corrupt for pool {}", pool_address);
+                error!("TP_ADDRESS mutex corrupt");
                 return None;
             };
             tokio::spawn(retry_connection(tp_address));
@@ -244,14 +237,12 @@ async fn initialize_jd(
         .is_err()
     {
         error!(
-            "Task manager failed while trying to add template receiver task for pool {}: {}",
-            pool_address,
+            "Task manager failed while trying to add template receiver task{}",
             error::Error::TaskManagerFailed
         );
         drop(abortable);
         return None;
     };
-    info!("JD client successfully started for pool address: {}", pool_address);
     Some(abortable)
 }
 

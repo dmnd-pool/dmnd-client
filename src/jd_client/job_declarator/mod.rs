@@ -94,7 +94,7 @@ impl JobDeclarator {
         SetupConnectionHandler::setup(&mut receiver, &mut sender, address).await?;
 
         if should_log_when_connected {
-            info!("JD CONNECTED to {}", address);
+            info!("JD CONNECTED");
         }
 
         let min_extranonce_size = crate::MIN_EXTRANONCE_SIZE;
