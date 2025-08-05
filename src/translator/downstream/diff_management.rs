@@ -63,17 +63,24 @@ impl Downstream {
         self_: &Arc<Mutex<Self>>,
         router: Option<Arc<crate::router::Router>>,
     ) -> ProxyResult<'static, ()> {
-        let (upstream_diff, estimated_downstream_hash_rate, assigned_pool, connection_id) = self_.safe_lock(|d| {
-                (
-                    d.upstream_difficulty_config.clone(),
-                    d.difficulty_mgmt.estimated_downstream_hash_rate,
-                    d.assigned_pool,
-                    d.connection_id,
-                )
-            })?;
+        let (
+            upstream_diff,
+            estimated_downstream_hash_rate,
+            assigned_pool,
+            connection_id,
+            pool_address,
+        ) = self_.safe_lock(|d| {
+            (
+                d.upstream_difficulty_config.clone(),
+                d.difficulty_mgmt.estimated_downstream_hash_rate,
+                d.assigned_pool,
+                d.connection_id,
+                d.pool_address,
+            )
+        })?;
         info!(
-            "Removing downstream hashrate from channel upstream_diff: {:?}, downstream_diff: {:?}",
-            upstream_diff, estimated_downstream_hash_rate
+            "Pool {}: Removing downstream hashrate from channel upstream_diff: {:?}, downstream_diff: {:?}",
+            pool_address, upstream_diff, estimated_downstream_hash_rate
         );
 
         // Remove miner from pool assignment when they disconnect
@@ -83,8 +90,8 @@ impl Downstream {
                     router.remove_miner_from_pool(pool_addr).await;
                 });
                 info!(
-                    "REMOVED: Miner {} disconnected from pool {}",
-                    connection_id, pool_addr
+                    "Pool {}: REMOVED: Miner {} disconnected",
+                    pool_address, connection_id
                 );
             }
         }
@@ -338,6 +345,10 @@ mod test {
         sync::Arc,
         time::{Duration, Instant},
     };
+    use sv1_api::{
+        server_to_client::Notify,
+        utils::{HexU32Be, MerkleNode, PrevHash},
+    };
     use tokio::sync::mpsc::channel;
 
     #[test]
@@ -457,6 +468,19 @@ mod test {
         };
         let (tx_sv1_submit, _rx_sv1_submit) = tokio::sync::mpsc::channel(10);
         let (tx_outgoing, _rx_outgoing) = channel(10);
+        let random_str = rand::thread_rng().gen::<[u8; 32]>().to_vec();
+        let first_job = Notify {
+            job_id: "ciao".to_string(),
+            prev_hash: PrevHash::try_from("0".repeat(64).as_str()).unwrap(),
+            coin_base1: "ffff".try_into().unwrap(),
+            coin_base2: "ffff".try_into().unwrap(),
+            merkle_branch: vec![MerkleNode::try_from(random_str).unwrap()],
+            version: HexU32Be(5667),
+            bits: HexU32Be(5678),
+            time: HexU32Be(5609),
+            clean_jobs: true,
+        };
+        let pool_address = "127.0.0.1:4444".parse().unwrap();
         let mut downstream = Downstream::new(
             1,
             vec![],
@@ -469,7 +493,9 @@ mod test {
             downstream_conf.clone(),
             Arc::new(Mutex::new(upstream_config)),
             crate::api::stats::StatsSender::new(),
+            first_job,
             None,
+            pool_address,
         );
         downstream.difficulty_mgmt.estimated_downstream_hash_rate = start_hashrate as f32;
 

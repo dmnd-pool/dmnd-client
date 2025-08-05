@@ -108,7 +108,7 @@ pub async fn connect_pool(
 pub fn relay_up(
     mut recv: Receiver<PoolExtMessages<'static>>,
     send: Sender<EitherFrame>,
-    pool_address: SocketAddr, 
+    pool_address: SocketAddr,
 ) -> AbortOnDrop {
     let task = tokio::spawn(async move {
         while let Some(msg) = recv.recv().await {
@@ -121,7 +121,10 @@ pub fn relay_up(
                     break;
                 };
             } else {
-                panic!("Internal Mining downstream tried to send invalid message to pool {}", pool_address);
+                panic!(
+                    "Internal Mining downstream tried to send invalid message to pool {}",
+                    pool_address
+                );
             }
         }
     });
@@ -131,7 +134,7 @@ pub fn relay_up(
 pub fn relay_down(
     mut recv: Receiver<EitherFrame>,
     send: Sender<PoolExtMessages<'static>>,
-    pool_address: SocketAddr, 
+    pool_address: SocketAddr,
 ) -> AbortOnDrop {
     let task = tokio::spawn(async move {
         while let Some(msg) = recv.recv().await {
@@ -146,17 +149,26 @@ pub fn relay_down(
                     if let Ok(msg) = msg {
                         let msg = msg.into_static();
                         if send.send(msg).await.is_err() {
-                            error!("Internal Mining downstream not available for pool {}", pool_address);
+                            error!(
+                                "Internal Mining downstream not available for pool {}",
+                                pool_address
+                            );
 
                             // Update Proxy state to reflect Internal inconsistency
                             ProxyState::update_inconsistency(Some(1));
                         }
                     } else {
-                        error!("Pool {} sent non-Mining message. Disconnecting", pool_address);
+                        error!(
+                            "Pool {} sent non-Mining message. Disconnecting",
+                            pool_address
+                        );
                         break;
                     }
                 } else {
-                    error!("Pool {} sent invalid message with no header. Disconnecting", pool_address);
+                    error!(
+                        "Pool {} sent invalid message with no header. Disconnecting",
+                        pool_address
+                    );
                     break;
                 }
             } else {

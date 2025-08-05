@@ -58,9 +58,9 @@ impl Router {
         let (latency_tx, latency_rx) = watch::channel(None);
 
         let multi_pool_configs = Configuration::pool_configs();
-        let weighted_dist = multi_pool_configs.as_ref().map(|configs| Arc::new(
-                (0..configs.len()).map(|_| AtomicU32::new(0)).collect(),
-            ));
+        let weighted_dist = multi_pool_configs
+            .as_ref()
+            .map(|configs| Arc::new((0..configs.len()).map(|_| AtomicU32::new(0)).collect()));
 
         Self {
             pool_addresses,
@@ -453,7 +453,8 @@ impl PoolLatency {
                             return Err(());
                         }
 
-                        let relay_up_task = minin_pool_connection::relay_up(recv_to_up, sender, self.pool);
+                        let relay_up_task =
+                            minin_pool_connection::relay_up(recv_to_up, sender, self.pool);
                         let relay_down_task =
                             minin_pool_connection::relay_down(receiver, send_to_down, self.pool);
 

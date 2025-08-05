@@ -25,6 +25,8 @@ pub async fn start_accept_connection(
     mut downstreams: Receiver<(Sender<String>, Receiver<String>, IpAddr)>,
     stats_sender: crate::api::stats::StatsSender,
     router: Arc<crate::router::Router>,
+    //for logging purposes
+    pool_address: std::net::SocketAddr,
 ) -> Result<(), Error<'static>> {
     let handle = {
         let task_manager = task_manager.clone();
@@ -37,13 +39,13 @@ pub async fn start_accept_connection(
                 // The initial difficulty is derived from the formula: difficulty = hash_rate / (shares_per_second * 2^32)
                 let initial_hash_rate = *crate::EXPECTED_SV1_HASHPOWER;
                 info!(
-                    "Translator initial hash rate for ip {} is {} H/s",
-                    addr, initial_hash_rate
+                    "Pool {}: Translator initial hash rate for ip {} is {} H/s",
+                    pool_address, addr, initial_hash_rate
                 );
                 let share_per_second = crate::SHARE_PER_MIN / 60.0;
                 info!(
-                    "Translator share per second for ip {} is {} shares/s",
-                    addr, share_per_second
+                    "Pool {}: Translator share per second for ip {} is {} shares/s",
+                    pool_address, addr, share_per_second
                 );
                 let initial_difficulty = initial_hash_rate / (share_per_second * 2f32.powf(32.0));
                 let initial_difficulty =
@@ -51,15 +53,15 @@ pub async fn start_accept_connection(
                         initial_difficulty,
                     );
                 info!(
-                    "Translator initial difficulty for ip {} is {}",
-                    addr, initial_difficulty
+                    "Pool {}: Translator initial difficulty for ip {} is {}",
+                    pool_address, addr, initial_difficulty
                 );
                 // Formula: expected_hash_rate = (shares_per_second) * initial_difficulty * 2^32, where shares_per_second = SHARE_PER_MIN / 60
                 let expected_hash_rate =
                     (crate::SHARE_PER_MIN / 60.0) * initial_difficulty * 2f32.powf(32.0);
                 info!(
-                    "Translator expected hash rate for ip {} is {} H/s",
-                    addr, expected_hash_rate
+                    "Pool {}: Translator expected hash rate for ip {} is {} H/s",
+                    pool_address, addr, expected_hash_rate
                 );
 
                 match Bridge::ready(&bridge).await {
@@ -84,8 +86,8 @@ pub async fn start_accept_connection(
                 match open_sv1_downstream {
                     Ok(opened) => {
                         info!(
-                            "Translator opening connection for ip {} with id {}",
-                            addr, opened.channel_id
+                            "Pool {}: Translator opening connection for ip {} with id {}",
+                            pool_address, addr, opened.channel_id
                         );
                         Downstream::new_downstream(
                             opened.channel_id,
@@ -102,6 +104,7 @@ pub async fn start_accept_connection(
                             initial_difficulty,
                             stats_sender.clone(),
                             router.clone(),
+                            pool_address,
                         )
                         .await
                     }

@@ -104,7 +104,7 @@ pub async fn start(
         target.clone(),
         diff_config.clone(),
         send_to_up,
-        pool_address, 
+        pool_address,
     )
     .await?;
 
@@ -149,6 +149,7 @@ pub async fn start(
                 extended_extranonce,
                 target,
                 up_id,
+                pool_address,
             ) {
                 Ok(b) => b,
                 Err(e) => {
@@ -180,6 +181,7 @@ pub async fn start(
                 downstreams,
                 stats_sender,
                 router,
+                pool_address,
             )
             .await
             {

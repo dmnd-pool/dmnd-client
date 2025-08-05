@@ -149,7 +149,7 @@ async fn initialize_proxy(
 
                         // Create per-pool downstream channels
                         let (pool_downs_tx, pool_downs_rx) = channel(10);
-                        
+
                         // Create per-pool translator channels
                         let (translator_up_tx, mut translator_up_rx) = channel(10);
 
@@ -165,7 +165,10 @@ async fn initialize_proxy(
                         {
                             Ok(abortable) => abortable,
                             Err(e) => {
-                                error!("Impossible to initialize translator for pool {}: {e}", pool_addr);
+                                error!(
+                                    "Impossible to initialize translator for pool {}: {e}",
+                                    pool_addr
+                                );
                                 continue;
                             }
                         };
@@ -205,7 +208,6 @@ async fn initialize_proxy(
                                 jdc_to_translator_sender,
                                 from_share_accounter_to_jdc_recv,
                                 from_jdc_to_share_accounter_send,
-                                pool_addr,
                             )
                             .await;
                             if jdc_abortable.is_none() {
@@ -216,7 +218,6 @@ async fn initialize_proxy(
                                 from_share_accounter_to_jdc_send,
                                 recv_from_pool,
                                 send_to_pool.clone(),
-                                pool_addr,
                             )
                             .await
                             {
@@ -236,7 +237,6 @@ async fn initialize_proxy(
                                 jdc_to_translator_sender,
                                 recv_from_pool,
                                 send_to_pool.clone(),
-                                pool_addr,
                             )
                             .await
                             {
@@ -259,10 +259,8 @@ async fn initialize_proxy(
                             pool_connection_abortable,
                             format!("pool_connection_{}", pool_id),
                         ));
-                        abort_handles.push((
-                            translator_abortable,
-                            format!("translator_{}", pool_id),
-                        ));
+                        abort_handles
+                            .push((translator_abortable, format!("translator_{}", pool_id)));
                         abort_handles.push((
                             share_accounter_abortable,
                             format!("share_accounter_{}", pool_id),
@@ -291,16 +289,29 @@ async fn initialize_proxy(
             let pool_translators_for_distribution = pool_translators.clone();
             let distribution_task = tokio::spawn(async move {
                 let mut recv = downs_sv1_rx;
-                
-                while let Some((send_to_downstream, recv_from_downstream, ip_addr)) = recv.recv().await {
+
+                while let Some((send_to_downstream, recv_from_downstream, ip_addr)) =
+                    recv.recv().await
+                {
                     info!("New downstream connection from {}", ip_addr);
-                    
+
                     // Calling router to assign pool
-                    if let Some(assigned_pool) = router_for_distribution.assign_miner_to_pool().await {
+                    if let Some(assigned_pool) =
+                        router_for_distribution.assign_miner_to_pool().await
+                    {
                         // Send to the appropriate translator
-                        if let Some((_, _, pool_downs_tx)) = pool_translators_for_distribution.iter().find(|(_, addr, _)| *addr == assigned_pool) {
-                            if let Err(e) = pool_downs_tx.send((send_to_downstream, recv_from_downstream, ip_addr)).await {
-                                error!("Failed to send downstream connection to pool {}: {}", assigned_pool, e);
+                        if let Some((_, _, pool_downs_tx)) = pool_translators_for_distribution
+                            .iter()
+                            .find(|(_, addr, _)| *addr == assigned_pool)
+                        {
+                            if let Err(e) = pool_downs_tx
+                                .send((send_to_downstream, recv_from_downstream, ip_addr))
+                                .await
+                            {
+                                error!(
+                                    "Failed to send downstream connection to pool {}: {}",
+                                    assigned_pool, e
+                                );
                             }
                         }
                     } else {
@@ -308,7 +319,10 @@ async fn initialize_proxy(
                     }
                 }
             });
-            abort_handles.push((distribution_task.into(), "downstream_distribution".to_string()));
+            abort_handles.push((
+                distribution_task.into(),
+                "downstream_distribution".to_string(),
+            ));
 
             if !any_success {
                 error!("No upstream available. Retrying in 5 seconds...");
@@ -395,7 +409,6 @@ async fn initialize_proxy(
                     jdc_to_translator_sender,
                     from_share_accounter_to_jdc_recv,
                     from_jdc_to_share_accounter_send,
-                    pool_addr.expect("Best latency pool address should be available"),
                 )
                 .await;
                 if jdc_abortable.is_none() {
@@ -406,7 +419,6 @@ async fn initialize_proxy(
                     from_share_accounter_to_jdc_send,
                     recv_from_pool,
                     send_to_pool,
-                    pool_addr.expect("Best latency pool address should be available"),
                 )
                 .await
                 {
@@ -424,7 +436,6 @@ async fn initialize_proxy(
                     jdc_to_translator_sender,
                     recv_from_pool,
                     send_to_pool,
-                    pool_addr.expect("Best latency pool address should be available"),
                 )
                 .await
                 {

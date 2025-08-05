@@ -26,6 +26,7 @@ use super::{
 use crate::{
     proxy_state::{ProxyState, TranslatorState, UpstreamType},
     shared::utils::AbortOnDrop,
+    translator::utils::allow_submit_share,
 };
 use lazy_static::lazy_static;
 use roles_logic_sv2::{channel_logic::channel_factory::OnNewShare, Error as RolesLogicError};
@@ -62,6 +63,8 @@ pub struct Bridge {
     future_jobs: Vec<NewExtendedMiningJob<'static>>,
     last_p_hash: Option<SetNewPrevHash<'static>>,
     target: Arc<Mutex<Vec<u8>>>,
+    /// Pool address for logging purposes
+    pub pool_address: std::net::SocketAddr,
 }
 
 impl Bridge {
@@ -83,6 +86,7 @@ impl Bridge {
         extranonces: ExtendedExtranonce,
         target: Arc<Mutex<Vec<u8>>>,
         channel_id: u32,
+        pool_address: std::net::SocketAddr,
     ) -> Result<Arc<Mutex<Self>>, Error<'static>> {
         info!("Creating new bridge for channel_id {}:", channel_id);
         let ids = Arc::new(Mutex::new(GroupId::new()));
@@ -106,6 +110,7 @@ impl Bridge {
             future_jobs: vec![],
             last_p_hash: None,
             target,
+            pool_address,
         })))
     }
 
@@ -249,9 +254,14 @@ impl Bridge {
         let channel_id = share.channel_id;
         let job_id = share.share.job_id.clone();
         let share_id = share.share.id;
+
+        let pool_address = self_
+            .safe_lock(|s| s.pool_address)
+            .map_err(|_| Error::BridgeMutexPoisoned)?;
+
         info!(
-            "Bridge received share {:?} for channel {:?} and job {:?}",
-            &share_id, &channel_id, &job_id
+            "Pool {}: Bridge received share {:?} for channel {:?} and job {:?}",
+            pool_address, &share_id, &channel_id, &job_id
         );
         let (tx_sv2_submit_shares_ext, target_mutex) = self_
             .safe_lock(|s| (s.tx_sv2_submit_shares_ext.clone(), s.target.clone()))
@@ -296,32 +306,42 @@ impl Bridge {
                     .unwrap_or("unparsable error code")
                     .to_string();
                 error!(
-                    "Submit share {} from channel {} and job {} error {}",
-                    &share_id, &channel_id, &job_id, error_code
+                    "Pool {}: Submit share {} from channel {} and job {} error {}",
+                    pool_address, &share_id, &channel_id, &job_id, error_code
                 );
             }
             Ok(OnNewShare::SendSubmitShareUpstream((s, _))) => {
-                info!(
-                    "Share with id {} meets upstream target from channel {} and job {}",
-                    &share_id, &channel_id, &job_id
-                );
-                match s {
-                    Share::Extended(share) => {
-                        if tx_sv2_submit_shares_ext.send(share).await.is_err() {
-                            error!("Failed to send SubmitShareExtended downstream");
-                            return Err(Error::AsyncChannelError);
-                        }
+                if let Ok(is_rate_limited) = allow_submit_share() {
+                    if !is_rate_limited {
+                        warn!("Share will not be sent upstream: Exceeded 70 shares/min limit");
+                        return Ok(());
                     }
-                    // We are in an extended channel shares are extended
-                    Share::Standard(_) => unreachable!(),
+                    info!(
+                    "Pool {}: Share with id {} meets upstream target from channel {} and job {}",
+                    pool_address, &share_id, &channel_id, &job_id
+                );
+                    match s {
+                        Share::Extended(share) => {
+                            if tx_sv2_submit_shares_ext.send(share).await.is_err() {
+                                error!("Failed to send SubmitShareExtended downstream");
+                                return Err(Error::AsyncChannelError);
+                            }
+                        }
+                        // We are in an extended channel shares are extended
+                        Share::Standard(_) => unreachable!(),
+                    }
+                } else {
+                    error!("Failed to record share: Bridge mutex poisoned");
+                    ProxyState::update_inconsistency(Some(1));
+                    return Err(Error::BridgeMutexPoisoned);
                 }
             }
             // We are in an extended channel this variant is group channle only
             Ok(OnNewShare::RelaySubmitShareUpstream) => unreachable!(),
             Ok(OnNewShare::ShareMeetDownstreamTarget) => {
                 info!(
-                    "Share with id {} meets downstream target from channel {} and job {}",
-                    &share_id, &channel_id, &job_id
+                    "Pool {}: Share with id {} meets downstream target from channel {} and job {}",
+                    pool_address, &share_id, &channel_id, &job_id
                 );
             }
             // Proxy do not have JD capabilities
@@ -652,12 +672,16 @@ mod test {
                 0, 0, 0, 0, 0, 0, 0,
             ];
 
+            // Define pool_address for tests
+            let pool_address = "127.0.0.1:4444".parse().unwrap();
+
             let b = Bridge::new(
                 tx_sv2_submit_shares_ext.clone(),
                 tx_sv1_notify,
                 extranonces,
                 Arc::new(Mutex::new(upstream_target)),
                 1,
+                pool_address, // Add pool_address parameter
             )
             .map_err(|_| ())?;
             Ok(b)

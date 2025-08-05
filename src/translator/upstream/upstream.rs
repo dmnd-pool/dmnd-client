@@ -520,8 +520,8 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
         m: roles_logic_sv2::mining_sv2::OpenExtendedMiningChannelSuccess,
     ) -> Result<SendTo<Downstream>, RolesLogicError> {
         info!(
-            "Handling OpenExtendedMiningChannelSuccess message from Pool for Channel Id: {}",
-            m.channel_id
+            "Pool {}: Handling OpenExtendedMiningChannelSuccess message for Channel Id: {}",
+            self.pool_address, m.channel_id
         );
         let tproxy_e1_len =
             proxy_extranonce1_len(m.extranonce_size as usize, self.min_extranonce_size.into())
@@ -539,8 +539,8 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
             ));
         }
         info!(
-            "Extended Channel with Channel Id {} has Target: {:?}",
-            m.channel_id, m.target
+            "Pool {}: Extended Channel with Channel Id {} has Target: {:?}",
+            self.pool_address, m.channel_id, m.target
         );
         self.target
             .safe_lock(|t| *t = m.target.to_vec())

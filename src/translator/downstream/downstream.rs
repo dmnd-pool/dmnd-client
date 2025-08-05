@@ -119,6 +119,8 @@ pub struct Downstream {
     pub recent_jobs: RecentJobs,
     pub first_job: Notify<'static>,
     pub assigned_pool: Option<SocketAddr>,
+    /// Pool address for logging purposes
+    pub pool_address: std::net::SocketAddr,
 }
 
 impl Downstream {
@@ -139,6 +141,7 @@ impl Downstream {
         initial_difficulty: f32,
         stats_sender: StatsSender,
         router: Arc<crate::router::Router>,
+        pool_address: std::net::SocketAddr,
     ) {
         assert!(last_notify.is_some());
 
@@ -219,6 +222,7 @@ impl Downstream {
             recent_jobs: RecentJobs::new(),
             first_job: last_notify.expect("we have an assertion at the beginning of this function"),
             assigned_pool,
+            pool_address,
         }));
 
         if let Err(e) = start_receive_downstream(
@@ -272,6 +276,7 @@ impl Downstream {
         downstreams: Receiver<(Sender<String>, Receiver<String>, IpAddr)>,
         stats_sender: StatsSender,
         router: Arc<crate::router::Router>,
+        pool_address: std::net::SocketAddr,
     ) -> Result<AbortOnDrop, Error<'static>> {
         let task_manager = TaskManager::initialize();
         let abortable = task_manager
@@ -287,6 +292,7 @@ impl Downstream {
             downstreams,
             stats_sender,
             router,
+            pool_address,
         )
         .await
         {
@@ -380,7 +386,9 @@ impl Downstream {
         difficulty_mgmt: DownstreamDifficultyConfig,
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
         stats_sender: StatsSender,
+        first_job: Notify<'static>,
         assigned_pool: Option<SocketAddr>,
+        pool_address: std::net::SocketAddr,
     ) -> Self {
         Downstream {
             connection_id,
@@ -394,10 +402,11 @@ impl Downstream {
             difficulty_mgmt,
             upstream_difficulty_config,
             last_call_to_update_hr: 0,
-            first_job: Notify,
+            first_job,
             stats_sender,
             recent_jobs: RecentJobs::new(),
             assigned_pool,
+            pool_address,
         }
     }
 }
@@ -464,8 +473,8 @@ impl IsServer<'static> for Downstream {
     /// Only [Submit](client_to_server::Submit) requests for authorized user names can be submitted.
     fn handle_submit(&self, request: &client_to_server::Submit<'static>) -> bool {
         info!(
-            "Handling mining.submit request {} from {} with job_id {}, nonce: {:?}",
-            request.id, request.user_name, request.job_id, request.nonce
+            "Pool {}: Handling mining.submit request {} from {} with job_id {}, nonce: {:?}",
+            self.pool_address, request.id, request.user_name, request.job_id, request.nonce
         );
 
         let mut request = request.clone();
@@ -493,6 +502,7 @@ impl IsServer<'static> for Downstream {
                         &self.difficulty_mgmt.current_difficulties,
                         self.extranonce1.clone(),
                         self.version_rolling_mask.clone(),
+                        self.pool_address,
                     ) {
                         // Only forward upstream if the share meets the latest difficulty
                         if let Some(latest_difficulty) =
