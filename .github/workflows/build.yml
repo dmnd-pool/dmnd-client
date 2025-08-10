@@ -134,6 +134,10 @@ jobs:
           name: windows-artifact
           path: .
 
+      - name: Generate Checksum
+        run:
+          sha256sum demand-cli-linux demand-cli-macos demand-cli-windows.exe > checksums.sha256
+
       - name: Create GitHub Release and Upload Binaries
         uses: softprops/action-gh-release@v1
         with:
@@ -142,5 +146,6 @@ jobs:
             demand-cli-linux
             demand-cli-macos
             demand-cli-windows.exe
+            checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
