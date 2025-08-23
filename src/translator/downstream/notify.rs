@@ -133,7 +133,7 @@ pub async fn start_notify(
             );
         })
     };
-    TaskManager::add_notify(task_manager, handle.into())
+    TaskManager::add_notify(task_manager, handle.into(), connection_id)
         .await
         .map_err(|_| Error::TranslatorTaskManagerFailed)
 }
@@ -167,7 +167,7 @@ async fn start_update(
             };
         }
     });
-    TaskManager::add_update(task_manager, handle.into())
+    TaskManager::add_update(task_manager, handle.into(), connection_id)
         .await
         .map_err(|_| Error::TranslatorTaskManagerFailed)
 }

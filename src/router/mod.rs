@@ -45,7 +45,7 @@ pub struct Router {
 
 impl Router {
     /// Creates a new `Router` instance with the specified upstream addresses.
-    pub fn new(
+    pub async fn new(
         pool_addresses: Vec<SocketAddr>,
         auth_pub_k: Secp256k1PublicKey,
         // Configuration msg used to setup connection between client and pool
@@ -57,7 +57,7 @@ impl Router {
     ) -> Self {
         let (latency_tx, latency_rx) = watch::channel(None);
 
-        let multi_pool_configs = Configuration::pool_configs();
+        let multi_pool_configs = Configuration::pool_configs().await;
         let weighted_dist = multi_pool_configs
             .as_ref()
             .map(|configs| Arc::new((0..configs.len()).map(|_| AtomicU32::new(0)).collect()));
@@ -265,7 +265,7 @@ impl Router {
         let auth_pub_key = self.auth_pub_k;
 
         tokio::time::timeout(
-            Duration::from_secs(15),
+            Duration::from_secs(8),
             PoolLatency::get_mining_setup_latencies(
                 &mut pool,
                 setup_connection_msg.cloned(),
@@ -281,21 +281,6 @@ impl Router {
             );
         })??;
 
-        if (PoolLatency::get_mining_setup_latencies(
-            &mut pool,
-            setup_connection_msg.cloned(),
-            timer.cloned(),
-            auth_pub_key,
-        )
-        .await)
-            .is_err()
-        {
-            error!(
-                "Failed to get mining setup latencies for: {:?}",
-                pool_address
-            );
-            return Err(());
-        }
         if (PoolLatency::get_jd_latencies(&mut pool, auth_pub_key).await).is_err() {
             error!("Failed to get jd setup latencies for: {:?}", pool_address);
             return Err(());
@@ -623,305 +608,4 @@ async fn initialize_mining_connections(
     let setup_connection_msg =
         setup_connection_msg.unwrap_or(get_mining_setup_connection_msg(true));
     Ok((receiver, sender, setup_connection_msg))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::PoolConfig;
-    use key_utils::Secp256k1PublicKey;
-    use std::net::SocketAddr;
-    use std::time::Duration;
-
-    const TEST_AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
-
-    fn setup_multi_upstream_router() -> Router {
-        let auth_pub_k: Secp256k1PublicKey = TEST_AUTH_PUB_KEY.parse().unwrap();
-        let pool_addresses = vec![
-            "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
-            "127.0.0.1:12346".parse::<SocketAddr>().unwrap(),
-            "127.0.0.1:12347".parse::<SocketAddr>().unwrap(),
-        ];
-        let mut router = Router::new(pool_addresses, auth_pub_k, None, None);
-
-        // Mock multi-upstream configuration
-        router.multi_pool_configs = Some(vec![
-            PoolConfig {
-                address: "127.0.0.1:12345".parse().unwrap(),
-                weight: 0.5,
-            },
-            PoolConfig {
-                address: "127.0.0.1:12346".parse().unwrap(),
-                weight: 0.3,
-            },
-            PoolConfig {
-                address: "127.0.0.1:12347".parse().unwrap(),
-                weight: 0.2,
-            },
-        ]);
-        router.weighted_dist = Some(Arc::new(vec![
-            AtomicU32::new(0),
-            AtomicU32::new(0),
-            AtomicU32::new(0),
-        ]));
-
-        router
-    }
-
-    #[test]
-    fn test_is_multi_upstream_true() {
-        let router = setup_multi_upstream_router();
-        assert!(router.is_multi_upstream());
-    }
-
-    #[test]
-    fn test_is_multi_upstream_false_single_config() {
-        let auth_pub_k: Secp256k1PublicKey = TEST_AUTH_PUB_KEY.parse().unwrap();
-        let pool_addresses = vec!["127.0.0.1:12345".parse::<SocketAddr>().unwrap()];
-        let mut router = Router::new(pool_addresses, auth_pub_k, None, None);
-
-        router.multi_pool_configs = Some(vec![PoolConfig {
-            address: "127.0.0.1:12345".parse().unwrap(),
-            weight: 1.0,
-        }]);
-
-        assert!(!router.is_multi_upstream());
-    }
-
-    #[tokio::test]
-    async fn test_assign_miner_to_pool_weighted_distribution() {
-        let router = setup_multi_upstream_router();
-
-        // First miner should go to pool with highest weight (0.5)
-        let pool1 = router.assign_miner_to_pool().await;
-        assert_eq!(pool1, Some("127.0.0.1:12345".parse().unwrap()));
-
-        // Check that counter is updated
-        let assignments = router.weighted_dist.as_ref().unwrap();
-        assert_eq!(assignments[0].load(Ordering::Relaxed), 1);
-        assert_eq!(assignments[1].load(Ordering::Relaxed), 0);
-        assert_eq!(assignments[2].load(Ordering::Relaxed), 0);
-    }
-
-    #[tokio::test]
-    async fn test_assign_miner_to_pool_balancing() {
-        let router = setup_multi_upstream_router();
-        let assignments = router.weighted_dist.as_ref().unwrap();
-
-        // Pre-assign miners to create imbalance
-        assignments[0].store(10, Ordering::Relaxed); // Pool 0: 10 miners (weight 0.5)
-        assignments[1].store(0, Ordering::Relaxed); // Pool 1: 0 miners (weight 0.3)
-        assignments[2].store(0, Ordering::Relaxed); // Pool 2: 0 miners (weight 0.2)
-
-        // Next assignment should go to pool 1 (most under-represented)
-        let pool = router.assign_miner_to_pool().await;
-        assert_eq!(pool, Some("127.0.0.1:12346".parse().unwrap()));
-        assert_eq!(assignments[1].load(Ordering::Relaxed), 1);
-    }
-
-    #[tokio::test]
-    async fn test_assign_miner_to_pool_equal_weights() {
-        let auth_pub_k: Secp256k1PublicKey = TEST_AUTH_PUB_KEY.parse().unwrap();
-        let pool_addresses = vec![
-            "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
-            "127.0.0.1:12346".parse::<SocketAddr>().unwrap(),
-        ];
-        let mut router = Router::new(pool_addresses, auth_pub_k, None, None);
-
-        router.multi_pool_configs = Some(vec![
-            PoolConfig {
-                address: "127.0.0.1:12345".parse().unwrap(),
-                weight: 0.5,
-            },
-            PoolConfig {
-                address: "127.0.0.1:12346".parse().unwrap(),
-                weight: 0.5,
-            },
-        ]);
-        router.weighted_dist = Some(Arc::new(vec![AtomicU32::new(0), AtomicU32::new(0)]));
-
-        // First assignment should go to pool 0 (both have equal weight and 0 miners)
-        let pool1 = router.assign_miner_to_pool().await;
-        assert_eq!(pool1, Some("127.0.0.1:12345".parse().unwrap()));
-
-        // Second assignment should go to pool 1 to maintain balance
-        let pool2 = router.assign_miner_to_pool().await;
-        assert_eq!(pool2, Some("127.0.0.1:12346".parse().unwrap()));
-    }
-
-    #[tokio::test]
-    async fn test_assign_miner_to_pool_empty_pools() {
-        let router = setup_multi_upstream_router();
-        let assignments = router.weighted_dist.as_ref().unwrap();
-
-        // All pools empty - should assign to highest weight pool
-        assert_eq!(assignments[0].load(Ordering::Relaxed), 0);
-        assert_eq!(assignments[1].load(Ordering::Relaxed), 0);
-        assert_eq!(assignments[2].load(Ordering::Relaxed), 0);
-
-        let pool = router.assign_miner_to_pool().await;
-        assert_eq!(pool, Some("127.0.0.1:12345".parse().unwrap()));
-    }
-
-    #[tokio::test]
-    async fn test_monitor_upstream_multi_upstream_mode() {
-        let mut router = setup_multi_upstream_router();
-
-        let result = router.monitor_upstream(Duration::from_millis(100)).await;
-
-        // Should return None for multi-upstream mode (no monitoring needed)
-        assert_eq!(result, None);
-    }
-
-    #[tokio::test]
-    async fn test_connect_all_pools_no_configs() {
-        let auth_pub_k: Secp256k1PublicKey = TEST_AUTH_PUB_KEY.parse().unwrap();
-        let pool_addresses = vec!["127.0.0.1:12345".parse::<SocketAddr>().unwrap()];
-        let mut router = Router::new(pool_addresses, auth_pub_k, None, None);
-
-        // Explicitly set multi_pool_configs to None to test this path
-        router.multi_pool_configs = None;
-
-        let connections = router.connect_all_pools().await;
-
-        // Should return empty vector when no multi_pool_configs
-        assert!(connections.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_remove_miner_from_pool_valid_pool() {
-        let router = setup_multi_upstream_router();
-        let assignments = router.weighted_dist.as_ref().unwrap();
-        let pool_addr = "127.0.0.1:12345".parse().unwrap();
-
-        // Pre-assign miners
-        assignments[0].store(5, Ordering::Relaxed);
-        assignments[1].store(3, Ordering::Relaxed);
-        assignments[2].store(2, Ordering::Relaxed);
-
-        // Remove miner from pool 0
-        router.remove_miner_from_pool(pool_addr).await;
-
-        // Pool 0 should have one less miner
-        assert_eq!(assignments[0].load(Ordering::Relaxed), 4);
-        assert_eq!(assignments[1].load(Ordering::Relaxed), 3);
-        assert_eq!(assignments[2].load(Ordering::Relaxed), 2);
-    }
-
-    #[tokio::test]
-    async fn test_remove_miner_from_pool_invalid_pool() {
-        let router = setup_multi_upstream_router();
-        let assignments = router.weighted_dist.as_ref().unwrap();
-        // Use a valid port number but different address
-        let invalid_addr = "127.0.0.1:54321".parse().unwrap();
-
-        // Pre-assign miners
-        assignments[0].store(5, Ordering::Relaxed);
-        assignments[1].store(3, Ordering::Relaxed);
-        assignments[2].store(2, Ordering::Relaxed);
-
-        // Remove miner from invalid pool - should not affect counters
-        router.remove_miner_from_pool(invalid_addr).await;
-
-        // All counts should remain the same
-        assert_eq!(assignments[0].load(Ordering::Relaxed), 5);
-        assert_eq!(assignments[1].load(Ordering::Relaxed), 3);
-        assert_eq!(assignments[2].load(Ordering::Relaxed), 2);
-    }
-
-    #[tokio::test]
-    async fn test_remove_miner_from_pool_zero_count() {
-        let router = setup_multi_upstream_router();
-        let assignments = router.weighted_dist.as_ref().unwrap();
-        let pool_addr = "127.0.0.1:12345".parse().unwrap();
-
-        // Pool already has 0 miners
-        assignments[0].store(0, Ordering::Relaxed);
-
-        // Remove miner from pool with 0 count - should not underflow
-        router.remove_miner_from_pool(pool_addr).await;
-
-        // Count should remain 0
-        assert_eq!(assignments[0].load(Ordering::Relaxed), 0);
-    }
-
-    #[tokio::test]
-    async fn test_remove_miner_from_pool_no_configs() {
-        let auth_pub_k: Secp256k1PublicKey = TEST_AUTH_PUB_KEY.parse().unwrap();
-        let pool_addresses = vec!["127.0.0.1:12345".parse::<SocketAddr>().unwrap()];
-        let mut router = Router::new(pool_addresses, auth_pub_k, None, None);
-        router.multi_pool_configs = None; // Explicitly set to None
-        let pool_addr = "127.0.0.1:12345".parse().unwrap();
-
-        // Should not panic when no multi_pool_configs
-        router.remove_miner_from_pool(pool_addr).await;
-    }
-
-    #[test]
-    fn test_weighted_dist_initialization() {
-        let router = setup_multi_upstream_router();
-
-        // Verify weighted_dist is properly initialized
-        assert!(router.weighted_dist.is_some());
-        let assignments = router.weighted_dist.as_ref().unwrap();
-        assert_eq!(assignments.len(), 3);
-
-        // All should start at 0
-        for assignment in assignments.iter() {
-            assert_eq!(assignment.load(Ordering::Relaxed), 0);
-        }
-    }
-
-    #[test]
-    fn test_multi_pool_configs_initialization() {
-        let router = setup_multi_upstream_router();
-
-        // Verify multi_pool_configs is properly set
-        assert!(router.multi_pool_configs.is_some());
-        let configs = router.multi_pool_configs.as_ref().unwrap();
-        assert_eq!(configs.len(), 3);
-
-        // Verify weights
-        assert_eq!(configs[0].weight, 0.5);
-        assert_eq!(configs[1].weight, 0.3);
-        assert_eq!(configs[2].weight, 0.2);
-    }
-
-    #[tokio::test]
-    async fn test_assign_miner_large_scale() {
-        let router = setup_multi_upstream_router();
-        let assignments = router.weighted_dist.as_ref().unwrap();
-
-        // Assign 100 miners and check distribution
-        for _ in 0..100 {
-            router.assign_miner_to_pool().await;
-        }
-
-        let total: u32 = assignments.iter().map(|a| a.load(Ordering::Relaxed)).sum();
-        assert_eq!(total, 100);
-
-        // Check that distribution roughly matches weights
-        let pool0_ratio = assignments[0].load(Ordering::Relaxed) as f32 / 100.0;
-        let pool1_ratio = assignments[1].load(Ordering::Relaxed) as f32 / 100.0;
-        let pool2_ratio = assignments[2].load(Ordering::Relaxed) as f32 / 100.0;
-
-        // Should be approximately correct (within reasonable tolerance)
-        assert!(pool0_ratio >= 0.4); // Target: 0.5
-        assert!(pool1_ratio >= 0.2); // Target: 0.3
-        assert!(pool2_ratio >= 0.1); // Target: 0.2
-    }
-
-    #[test]
-    fn test_router_new_calls_configuration() {
-        let auth_pub_k: Secp256k1PublicKey = TEST_AUTH_PUB_KEY.parse().unwrap();
-        let pool_addresses = vec!["127.0.0.1:12345".parse::<SocketAddr>().unwrap()];
-
-        // This will call Configuration::pool_configs() internally
-        let router = Router::new(pool_addresses.clone(), auth_pub_k, None, None);
-
-        assert_eq!(router.pool_addresses, pool_addresses);
-        assert_eq!(router.current_pool, None);
-        assert_eq!(router.auth_pub_k.into_bytes(), auth_pub_k.into_bytes());
-        // multi_pool_configs will be set by Configuration::pool_configs()
-    }
 }

@@ -33,7 +33,7 @@ pub async fn start_send_to_downstream(
             connection_id
         );
     });
-    TaskManager::add_send_downstream(task_manager, handle.into())
+    TaskManager::add_send_downstream(task_manager, handle.into(), connection_id)
         .await
         .map_err(|_| Error::TranslatorTaskManagerFailed)
 }
