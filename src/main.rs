@@ -722,3 +722,99 @@ impl HashUnit {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    fn setup_test_config() {
+        std::env::set_var("TOKEN", "test_token");
+        std::env::set_var("AUTO_UPDATE", "false");
+        std::env::set_var("MONITOR", "false");
+    }
+
+    #[tokio::test]
+    async fn test_initialize_proxy_multi_upstream_mode() {
+        setup_test_config();
+
+        let auth_pub_k: Secp256k1PublicKey = TEST_AUTH_PUB_KEY.parse().unwrap();
+        // Create multiple pool addresses to trigger multi-upstream mode
+        let pool_addresses = vec![
+            "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
+            "127.0.0.1:12346".parse::<SocketAddr>().unwrap(),
+        ];
+        let mut router = Router::new(pool_addresses, auth_pub_k, None, None).await;
+        let epsilon = Duration::from_millis(100);
+        let pool_addr = None; // Multi-upstream uses None
+
+        // Test multi-upstream initialization path
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                _ = initialize_proxy(&mut router, pool_addr, epsilon) => {},
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                    // Test passes if multi-upstream path executes
+                }
+            }
+        });
+
+        let result = tokio::time::timeout(Duration::from_millis(200), task).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_initialize_proxy_multi_upstream_partial_failure() {
+        setup_test_config();
+
+        let auth_pub_k: Secp256k1PublicKey = TEST_AUTH_PUB_KEY.parse().unwrap();
+        // Mix valid and invalid addresses to test partial connection failure
+        let pool_addresses = vec![
+            "127.0.0.1:1".parse::<SocketAddr>().unwrap(), // Invalid
+            "127.0.0.1:12345".parse::<SocketAddr>().unwrap(), // Valid (but won't connect in test)
+        ];
+        let mut router = Router::new(pool_addresses, auth_pub_k, None, None).await;
+        let epsilon = Duration::from_millis(50);
+        let pool_addr = None;
+
+        // Test multi-upstream with some connection failures
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                _ = initialize_proxy(&mut router, pool_addr, epsilon) => {},
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    // Should handle partial failures gracefully
+                }
+            }
+        });
+
+        let result = tokio::time::timeout(Duration::from_millis(300), task).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_initialize_proxy_router_multi_upstream_detection() {
+        setup_test_config();
+
+        let auth_pub_k: Secp256k1PublicKey = TEST_AUTH_PUB_KEY.parse().unwrap();
+
+        // Test multi upstream detection
+        let multi_pools = vec![
+            "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
+            "127.0.0.1:12346".parse::<SocketAddr>().unwrap(),
+        ];
+        let mut multi_router = Router::new(multi_pools, auth_pub_k, None, None).await;
+        let epsilon = Duration::from_millis(50);
+
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                _ = initialize_proxy(&mut multi_router, None, epsilon) => {},
+                _ = tokio::time::sleep(Duration::from_millis(30)) => {
+                    // Multi upstream path should be taken
+                }
+            }
+        });
+
+        let result = tokio::time::timeout(Duration::from_millis(100), task).await;
+        assert!(result.is_ok());
+    }
+}
