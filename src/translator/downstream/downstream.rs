@@ -30,7 +30,7 @@ use rand::Rng;
 use server_to_client::Notify;
 use std::{
     collections::{hash_map::Entry, HashMap, VecDeque},
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     sync::Arc,
 };
 use sv1_api::{
@@ -116,6 +116,9 @@ pub struct Downstream {
     pub(super) stats_sender: StatsSender,
     pub recent_jobs: RecentJobs,
     pub first_job: Notify<'static>,
+    pub assigned_pool: Option<SocketAddr>,
+    /// Pool address for logging purposes
+    pub pool_address: std::net::SocketAddr,
     pub share_monitor: SharesMonitor,
 }
 
@@ -136,6 +139,8 @@ impl Downstream {
         task_manager: Arc<Mutex<TaskManager>>,
         initial_difficulty: f32,
         stats_sender: StatsSender,
+        router: Arc<crate::router::Router>,
+        pool_address: std::net::SocketAddr,
     ) {
         assert!(last_notify.is_some());
 
@@ -181,6 +186,25 @@ impl Downstream {
             initial_difficulty,
         };
 
+        let mut recent_notifies = VecDeque::with_capacity(2);
+        if let Some(notify) = last_notify.clone() {
+            recent_notifies.push_back(notify);
+        }
+        // Add this check to prevent router calls in multi-upstream mode
+        let assigned_pool = if !router.is_multi_upstream() {
+            // Only assign pool in single-upstream mode
+            router.assign_miner_to_pool().await
+        } else {
+            // In multi-upstream mode, pool is already determined by distribution
+            // Skip router calls entirely
+            None
+        };
+        if let Some(pool_addr) = assigned_pool {
+            info!(
+                "New miner (ID: {}) assigned to pool {}",
+                connection_id, pool_addr
+            );
+        }
         let downstream = Arc::new(Mutex::new(Downstream {
             connection_id,
             authorized_names: vec![],
@@ -196,6 +220,8 @@ impl Downstream {
             stats_sender,
             recent_jobs: RecentJobs::new(),
             first_job: last_notify.expect("we have an assertion at the beginning of this function"),
+            assigned_pool,
+            pool_address,
             share_monitor: SharesMonitor::new(),
         }));
 
@@ -204,6 +230,7 @@ impl Downstream {
             downstream.clone(),
             recv_from_down,
             connection_id,
+            router.clone(),
         )
         .await
         {
@@ -230,6 +257,7 @@ impl Downstream {
             rx_sv1_notify,
             host.clone(),
             connection_id,
+            router.clone(),
         )
         .await
         {
@@ -272,6 +300,8 @@ impl Downstream {
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
         downstreams: Receiver<(Sender<String>, Receiver<String>, IpAddr)>,
         stats_sender: StatsSender,
+        router: Arc<crate::router::Router>,
+        pool_address: std::net::SocketAddr,
     ) -> Result<AbortOnDrop, Error<'static>> {
         let task_manager = TaskManager::initialize();
         let abortable = task_manager
@@ -286,6 +316,8 @@ impl Downstream {
             upstream_difficulty_config,
             downstreams,
             stats_sender,
+            router,
+            pool_address,
         )
         .await
         {
@@ -380,6 +412,8 @@ impl Downstream {
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
         stats_sender: StatsSender,
         first_job: Notify<'static>,
+        assigned_pool: Option<SocketAddr>,
+        pool_address: std::net::SocketAddr,
     ) -> Self {
         use crate::monitor::shares::SharesMonitor;
 
@@ -398,6 +432,8 @@ impl Downstream {
             first_job,
             stats_sender,
             recent_jobs: RecentJobs::new(),
+            assigned_pool,
+            pool_address,
             share_monitor: SharesMonitor::new(),
         }
     }
@@ -465,8 +501,8 @@ impl IsServer<'static> for Downstream {
     /// Only [Submit](client_to_server::Submit) requests for authorized user names can be submitted.
     fn handle_submit(&self, request: &client_to_server::Submit<'static>) -> bool {
         info!(
-            "Handling mining.submit request {} from {} with job_id {}, nonce: {:?}",
-            request.id, request.user_name, request.job_id, request.nonce
+            "Pool {}: Handling mining.submit request {} from {} with job_id {}, nonce: {:?}",
+            self.pool_address, request.id, request.user_name, request.job_id, request.nonce
         );
 
         let mut request = request.clone();
@@ -488,8 +524,10 @@ impl IsServer<'static> for Downstream {
             self.stats_sender.update_rejected_shares(self.connection_id);
             return false;
         }
+
         let job_id = job_id_as_number.clone().expect("checked above") as i64;
         crate::translator::utils::update_share_count(self.connection_id); // update share count
+
         if let Some(job) = self
             .recent_jobs
             .get_matching_job(job_id_as_number.expect("checked above"))
@@ -502,6 +540,7 @@ impl IsServer<'static> for Downstream {
                 &self.difficulty_mgmt.current_difficulties,
                 self.extranonce1.clone(),
                 self.version_rolling_mask.clone(),
+                self.pool_address,
             ) {
                 // Only forward upstream if the share meets the latest difficulty
                 if let Some(latest_difficulty) = self.difficulty_mgmt.current_difficulties.back() {

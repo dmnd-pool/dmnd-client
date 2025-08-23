@@ -15,6 +15,7 @@ pub async fn start_receive_downstream(
     downstream: Arc<Mutex<Downstream>>,
     mut recv_from_down: mpsc::Receiver<String>,
     connection_id: u32,
+    router: Arc<crate::router::Router>,
 ) -> Result<(), Error<'static>> {
     let task_manager_clone = task_manager.clone();
     let handle = task::spawn(async move {
@@ -55,9 +56,13 @@ pub async fn start_receive_downstream(
             connection_id
         );
 
-        if let Err(e) = Downstream::remove_downstream_hashrate_from_channel(&downstream) {
+        // Call disconnect handler with router
+        if let Err(e) =
+            Downstream::remove_downstream_hashrate_from_channel(&downstream, Some(router))
+        {
             error!("Failed to remove downstream hashrate from channel: {}", e)
         };
+
         if task_manager_clone
             .safe_lock(|tm| tm.abort_tasks_for_connection_id(connection_id))
             .is_err()

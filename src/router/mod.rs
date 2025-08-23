@@ -10,6 +10,8 @@ use demand_sv2_connection::noise_connection_tokio::Connection;
 use key_utils::Secp256k1PublicKey;
 use noise_sv2::Initiator;
 use roles_logic_sv2::{common_messages_sv2::SetupConnection, parsers::Mining};
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use tokio::{
     net::TcpStream,
     sync::{
@@ -20,11 +22,14 @@ use tokio::{
 use tracing::{error, info};
 
 use crate::{
+    config::{Configuration, PoolConfig},
     minin_pool_connection::{self, get_mining_setup_connection_msg, mining_setup_connection},
     shared::utils::AbortOnDrop,
 };
 
 /// Router handles connection to Multiple upstreams.
+use std::sync::Arc;
+
 #[derive(Clone)]
 pub struct Router {
     pool_addresses: Vec<SocketAddr>,
@@ -34,11 +39,13 @@ pub struct Router {
     timer: Option<Duration>,
     latency_tx: watch::Sender<Option<Duration>>,
     pub latency_rx: watch::Receiver<Option<Duration>>,
+    multi_pool_configs: Option<Vec<PoolConfig>>,
+    pub weighted_dist: Option<Arc<Vec<AtomicU32>>>,
 }
 
 impl Router {
     /// Creates a new `Router` instance with the specified upstream addresses.
-    pub fn new(
+    pub async fn new(
         pool_addresses: Vec<SocketAddr>,
         auth_pub_k: Secp256k1PublicKey,
         // Configuration msg used to setup connection between client and pool
@@ -49,6 +56,12 @@ impl Router {
         timer: Option<Duration>,
     ) -> Self {
         let (latency_tx, latency_rx) = watch::channel(None);
+
+        let multi_pool_configs = Configuration::pool_configs().await;
+        let weighted_dist = multi_pool_configs
+            .as_ref()
+            .map(|configs| Arc::new((0..configs.len()).map(|_| AtomicU32::new(0)).collect()));
+
         Self {
             pool_addresses,
             current_pool: None,
@@ -57,6 +70,62 @@ impl Router {
             timer,
             latency_tx,
             latency_rx,
+            multi_pool_configs,
+            weighted_dist,
+        }
+    }
+
+    pub fn is_multi_upstream(&self) -> bool {
+        self.multi_pool_configs
+            .as_ref()
+            .is_some_and(|configs| configs.len() > 1)
+    }
+
+    pub async fn assign_miner_to_pool(&self) -> Option<SocketAddr> {
+        if self.is_multi_upstream() {
+            if let Some(configs) = &self.multi_pool_configs {
+                let assignments = self.weighted_dist.as_ref().unwrap();
+                let total_miners: u32 = assignments.iter().map(|a| a.load(Ordering::Relaxed)).sum();
+
+                let mut best_pool_id = 0;
+                let mut best_difference = f32::NEG_INFINITY;
+
+                for (pool_id, config) in configs.iter().enumerate() {
+                    let current_count = assignments[pool_id].load(Ordering::Relaxed);
+                    let current_ratio = if total_miners == 0 {
+                        0.0
+                    } else {
+                        current_count as f32 / total_miners as f32
+                    };
+                    let target_ratio = config.weight;
+                    let difference = target_ratio - current_ratio;
+
+                    if difference > best_difference {
+                        best_difference = difference;
+                        best_pool_id = pool_id;
+                    }
+                }
+
+                // Assign to most under-represented pool
+                let new_count = assignments[best_pool_id].fetch_add(1, Ordering::Relaxed) + 1;
+                let total_after = total_miners + 1;
+                let selected_pool = configs[best_pool_id].address;
+
+                info!(
+                    "✅ Miner {} → Pool {} ({}) [Pool:{}, Total:{}]",
+                    total_after, best_pool_id, selected_pool, new_count, total_after
+                );
+
+                Some(selected_pool)
+            } else {
+                // Fallback to existing logic
+                self.current_pool
+                    .or_else(|| self.pool_addresses.first().copied())
+            }
+        } else {
+            // Single pool fallback
+            self.current_pool
+                .or_else(|| self.pool_addresses.first().copied())
         }
     }
 
@@ -232,6 +301,10 @@ impl Router {
 
     /// Checks for faster upstream switch to it if found
     pub async fn monitor_upstream(&mut self, epsilon: Duration) -> Option<SocketAddr> {
+        if self.is_multi_upstream() {
+            info!("Multi-upstream mode: No monitoring required");
+            return None;
+        }
         if let Some(best_pool) = self.select_pool_monitor(epsilon).await {
             if Some(best_pool) != self.current_pool {
                 info!("Switching to faster upstreamn {:?}", best_pool);
@@ -241,6 +314,55 @@ impl Router {
             }
         }
         None
+    }
+
+    /// Connect to all configured pools
+    pub async fn connect_all_pools(
+        &self,
+    ) -> Vec<(
+        usize,
+        SocketAddr,
+        Result<
+            (
+                tokio::sync::mpsc::Sender<PoolExtMessages<'static>>,
+                tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>,
+                crate::shared::utils::AbortOnDrop,
+            ),
+            crate::minin_pool_connection::errors::Error,
+        >,
+    )> {
+        if let Some(configs) = &self.multi_pool_configs {
+            let mut connections = Vec::new();
+            for (id, config) in configs.iter().enumerate() {
+                info!(
+                    "Connecting to pool {} with weight {}",
+                    config.address, config.weight
+                );
+                let result = self.clone().connect_pool(Some(config.address)).await;
+                connections.push((id, config.address, result));
+            }
+            connections
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Removes a miner from the assigned pool, allowing for rebalancing
+    pub async fn remove_miner_from_pool(&self, pool_address: SocketAddr) {
+        if let Some(configs) = &self.multi_pool_configs {
+            if let Some(pool_id) = configs.iter().position(|c| c.address == pool_address) {
+                let assignments = self.weighted_dist.as_ref().unwrap();
+                let old = assignments[pool_id].load(Ordering::Relaxed);
+                if old > 0 {
+                    let new = assignments[pool_id].fetch_sub(1, Ordering::Relaxed) - 1;
+                    let total: u32 = assignments.iter().map(|a| a.load(Ordering::Relaxed)).sum();
+                    info!(
+                        "Miner disconnected from Pool {}. New: {}/{} total",
+                        pool_id, new, total
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -316,9 +438,10 @@ impl PoolLatency {
                             return Err(());
                         }
 
-                        let relay_up_task = minin_pool_connection::relay_up(recv_to_up, sender);
+                        let relay_up_task =
+                            minin_pool_connection::relay_up(recv_to_up, sender, self.pool);
                         let relay_down_task =
-                            minin_pool_connection::relay_down(receiver, send_to_down);
+                            minin_pool_connection::relay_down(receiver, send_to_down, self.pool);
 
                         let timer = Instant::now();
                         let mut received_new_job = false;
@@ -485,4 +608,150 @@ async fn initialize_mining_connections(
     let setup_connection_msg =
         setup_connection_msg.unwrap_or(get_mining_setup_connection_msg(true));
     Ok((receiver, sender, setup_connection_msg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PoolConfig;
+    use key_utils::Secp256k1PublicKey;
+    use std::net::SocketAddr;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    const TEST_AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
+
+    async fn setup_multi_upstream_router() -> Router {
+        let auth_pub_k: Secp256k1PublicKey = TEST_AUTH_PUB_KEY.parse().unwrap();
+        let pool_addresses = vec![
+            "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
+            "127.0.0.1:12346".parse::<SocketAddr>().unwrap(),
+            "127.0.0.1:12347".parse::<SocketAddr>().unwrap(),
+        ];
+        let mut router = Router::new(pool_addresses, auth_pub_k, None, None).await;
+
+        // Mock multi-upstream configuration
+        router.multi_pool_configs = Some(vec![
+            PoolConfig {
+                address: "127.0.0.1:12345".parse().unwrap(),
+                weight: 0.5,
+            },
+            PoolConfig {
+                address: "127.0.0.1:12346".parse().unwrap(),
+                weight: 0.3,
+            },
+            PoolConfig {
+                address: "127.0.0.1:12347".parse().unwrap(),
+                weight: 0.2,
+            },
+        ]);
+        router.weighted_dist = Some(Arc::new(vec![
+            AtomicU32::new(0),
+            AtomicU32::new(0),
+            AtomicU32::new(0),
+        ]));
+
+        router
+    }
+
+    #[tokio::test]
+    async fn test_is_multi_upstream_detection() {
+        let router = setup_multi_upstream_router().await;
+        assert!(router.is_multi_upstream());
+
+        // Test single upstream
+        let auth_pub_k: Secp256k1PublicKey = TEST_AUTH_PUB_KEY.parse().unwrap();
+        let single_pool = vec!["127.0.0.1:12345".parse::<SocketAddr>().unwrap()];
+        let mut single_router = Router::new(single_pool, auth_pub_k, None, None).await;
+        single_router.multi_pool_configs = Some(vec![PoolConfig {
+            address: "127.0.0.1:12345".parse().unwrap(),
+            weight: 1.0,
+        }]);
+        assert!(!single_router.is_multi_upstream());
+    }
+
+    #[tokio::test]
+    async fn test_assign_miner_weighted_distribution() {
+        let router = setup_multi_upstream_router().await;
+
+        // First miner should go to pool with highest weight (0.5)
+        let pool1 = router.assign_miner_to_pool().await;
+        assert_eq!(pool1, Some("127.0.0.1:12345".parse().unwrap()));
+
+        // Check that counter is updated
+        let assignments = router.weighted_dist.as_ref().unwrap();
+        assert_eq!(assignments[0].load(Ordering::Relaxed), 1);
+        assert_eq!(assignments[1].load(Ordering::Relaxed), 0);
+        assert_eq!(assignments[2].load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn test_assign_miner_load_balancing() {
+        let router = setup_multi_upstream_router().await;
+        let assignments = router.weighted_dist.as_ref().unwrap();
+
+        // Pre-assign miners to create imbalance
+        assignments[0].store(10, Ordering::Relaxed); // Pool 0: 10 miners (weight 0.5)
+        assignments[1].store(0, Ordering::Relaxed); // Pool 1: 0 miners (weight 0.3)
+        assignments[2].store(0, Ordering::Relaxed); // Pool 2: 0 miners (weight 0.2)
+
+        // Next assignment should go to pool 1 (most under-represented)
+        let pool = router.assign_miner_to_pool().await;
+        assert_eq!(pool, Some("127.0.0.1:12346".parse().unwrap()));
+        assert_eq!(assignments[1].load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_multi_upstream_no_monitoring() {
+        let mut router = setup_multi_upstream_router().await;
+
+        let result = router.monitor_upstream(Duration::from_millis(100)).await;
+
+        // Should return None for multi-upstream mode (no monitoring needed)
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn test_remove_miner_from_pool_multi_upstream() {
+        let router = setup_multi_upstream_router().await;
+        let assignments = router.weighted_dist.as_ref().unwrap();
+        let pool_addr = "127.0.0.1:12345".parse().unwrap();
+
+        // Pre-assign miners
+        assignments[0].store(5, Ordering::Relaxed);
+        assignments[1].store(3, Ordering::Relaxed);
+        assignments[2].store(2, Ordering::Relaxed);
+
+        // Remove miner from pool 0
+        router.remove_miner_from_pool(pool_addr).await;
+
+        // Pool 0 should have one less miner
+        assert_eq!(assignments[0].load(Ordering::Relaxed), 4);
+        assert_eq!(assignments[1].load(Ordering::Relaxed), 3);
+        assert_eq!(assignments[2].load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn test_weighted_distribution_large_scale() {
+        let router = setup_multi_upstream_router().await;
+        let assignments = router.weighted_dist.as_ref().unwrap();
+
+        // Assign 100 miners and check distribution
+        for _ in 0..100 {
+            router.assign_miner_to_pool().await;
+        }
+
+        let total: u32 = assignments.iter().map(|a| a.load(Ordering::Relaxed)).sum();
+        assert_eq!(total, 100);
+
+        // Check that distribution roughly matches weights
+        let pool0_ratio = assignments[0].load(Ordering::Relaxed) as f32 / 100.0;
+        let pool1_ratio = assignments[1].load(Ordering::Relaxed) as f32 / 100.0;
+        let pool2_ratio = assignments[2].load(Ordering::Relaxed) as f32 / 100.0;
+
+        // Should be approximately correct (within reasonable tolerance)
+        assert!(pool0_ratio >= 0.4 && pool0_ratio <= 0.6); // Target: 0.5
+        assert!(pool1_ratio >= 0.2 && pool1_ratio <= 0.4); // Target: 0.3
+        assert!(pool2_ratio >= 0.1 && pool2_ratio <= 0.3); // Target: 0.2
+    }
 }

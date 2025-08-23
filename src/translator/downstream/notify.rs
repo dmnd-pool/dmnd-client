@@ -17,6 +17,7 @@ pub async fn start_notify(
     mut rx_sv1_notify: broadcast::Receiver<server_to_client::Notify<'static>>,
     host: String,
     connection_id: u32,
+    router: Arc<crate::router::Router>,
 ) -> Result<(), Error<'static>> {
     let handle = {
         let task_manager = task_manager.clone();
@@ -123,6 +124,9 @@ pub async fn start_notify(
                     Downstream::send_message_downstream(downstream.clone(), message).await;
                 }
             }
+            // TODO here we want to be sure that on drop this is called
+            let _ = Downstream::remove_downstream_hashrate_from_channel(&downstream, Some(router));
+            // TODO here we want to kill the tasks
             warn!(
                 "Downstream: Shutting down sv1 downstream job notifier for {}",
                 &host

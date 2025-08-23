@@ -103,10 +103,11 @@ pub fn validate_share(
     difficulties: &VecDeque<f32>,
     extranonce1: Vec<u8>,
     version_rolling_mask: Option<sv1_api::utils::HexU32Be>,
+    pool_address: std::net::SocketAddr,
 ) -> Option<f32> {
     info!(
-        "Validating share from request {} and job {}",
-        request.id, request.job_id
+        "Pool {}: Validating share from request {} and job {}",
+        pool_address, request.id, request.job_id
     );
 
     let prev_hash_vec: Vec<u8> = job.prev_hash.clone().into();
@@ -149,7 +150,11 @@ pub fn validate_share(
     );
 
     hash.reverse(); //convert to little-endian
-    info!("Share Hash: {:?}", hash.to_vec().as_hex());
+    info!(
+        "Pool {}: Share Hash: {:?}",
+        pool_address,
+        hash.to_vec().as_hex()
+    );
     // Check against difficulties from latest to earliest
     // TODO: This is not a sound check - We should check against the difficulty of the specific job
     for &difficulty in difficulties.iter().rev() {
