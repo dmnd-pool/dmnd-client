@@ -37,6 +37,7 @@ pub async fn static_handler(path: Option<Path<String>>) -> impl IntoResponse {
     let asset_path = match path.as_str() {
         "overview" => "dashboard/overview.html".to_string(),
         "history" => "dashboard/history.html".to_string(),
+        "settings" => "dashboard/settings.html".to_string(),
         p if p.starts_with("dashboard/") && !p.ends_with(".html") => format!("{}.html", p),
         _ => path.clone(),
     };

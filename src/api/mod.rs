@@ -1,5 +1,6 @@
 mod routes;
 pub mod stats;
+pub mod transaction_selector;
 mod utils;
 use crate::{
     api::mempool::{
@@ -19,7 +20,7 @@ use axum::{
     Router as AxumRouter,
 };
 use binary_sv2::{Seq064K, B016M};
-mod bitcoin_rpc;
+pub mod bitcoin_rpc;
 use bitcoincore_rpc::Client;
 pub mod mempool;
 use routes::Api;
@@ -121,6 +122,9 @@ pub(crate) async fn start(
         .route("/api/job-declaration", post(submit_tx_list))
         .route("/api/job-history", get(Api::get_job_history))
         .route("/api/job-txids/{template_id}", get(Api::get_job_txids))
+        .route("/api/auto-select", get(Api::get_auto_selected_transactions))
+        .route("/api/settings", get(Api::get_settings))
+        .route("/api/settings", post(Api::update_settings))
         // Dashboard routes
         .route("/", get(static_handler))
         .route("/{*path}", get(static_handler))

@@ -1,7 +1,8 @@
 use crate::db::model::{
     JobDeclarationInsert, JobDeclarationWithTxids, JobHistoryItem, JobHistoryResponse,
-    JobTxidsResponse,
+    JobTxidsResponse, Settings, SettingsRequest, SettingsResponse,
 };
+use crate::db::settings_updater::SettingsUpdater;
 use sqlx::SqlitePool;
 
 pub struct JobDeclarationHandler {
@@ -131,5 +132,81 @@ impl JobDeclarationHandler {
                 total: 0,
             }),
         }
+    }
+}
+
+pub struct SettingsHandler {
+    pool: SqlitePool,
+}
+
+impl SettingsHandler {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    /// Get settings, create default settings if none exist
+    pub async fn get_or_create_settings(&self) -> Result<SettingsResponse, sqlx::Error> {
+        // Try to get existing settings (there should only be one row)
+        let existing_settings: Option<Settings> = sqlx::query_as(
+            r#"
+            SELECT id, created_at, updated_at,
+                   auto_selection_enabled, selection_strategy, min_fee_rate, max_size, min_base_fee,
+                   max_ancestor_count, max_descendant_count, exclude_bip125_replaceable, exclude_unbroadcast,
+                   max_transaction_count, require_template, clear_existing_selections, periodic_enabled,
+                   periodic_interval, auto_job_declaration, auto_scroll_to_table, show_notifications,
+                   pause_on_selection, clear_selection_on_job_declaration, preserve_existing_selections,
+                   auto_clean_invalid_transactions
+            FROM settings
+            LIMIT 1
+            "#,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match existing_settings {
+            Some(settings) => Ok(settings.into()),
+            None => {
+                // Create default settings
+                let result = sqlx::query(
+                    r#"
+                    INSERT INTO settings DEFAULT VALUES
+                    "#,
+                )
+                .execute(&self.pool)
+                .await?;
+
+                // Fetch the newly created settings
+                let settings: Settings = sqlx::query_as(
+                    r#"
+                    SELECT id, created_at, updated_at,
+                           auto_selection_enabled, selection_strategy, min_fee_rate, max_size, min_base_fee,
+                           max_ancestor_count, max_descendant_count, exclude_bip125_replaceable, exclude_unbroadcast,
+                           max_transaction_count, require_template, clear_existing_selections, periodic_enabled,
+                           periodic_interval, auto_job_declaration, auto_scroll_to_table, show_notifications,
+                           pause_on_selection, clear_selection_on_job_declaration, preserve_existing_selections,
+                           auto_clean_invalid_transactions
+                    FROM settings
+                    WHERE id = ?
+                    "#,
+                )
+                .bind(result.last_insert_rowid())
+                .fetch_one(&self.pool)
+                .await?;
+
+                Ok(settings.into())
+            }
+        }
+    }
+
+    pub async fn update_settings(
+        &self,
+        settings_request: &SettingsRequest,
+    ) -> Result<SettingsResponse, sqlx::Error> {
+        // Ensure settings exist first
+        self.get_or_create_settings().await?;
+
+        let updater = SettingsUpdater::new(self.pool.clone());
+        updater.update_fields(settings_request).await?;
+        self.get_or_create_settings().await
     }
 }

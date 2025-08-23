@@ -1,4 +1,6 @@
+use crate::api;
 use crate::api::routes::APIResponse;
+use crate::api::transaction_selector::{TransactionSelectionConfig, TransactionSelector};
 use crate::dashboard::jd_event_ws::JobDeclarationData;
 use crate::db::handlers::JobDeclarationHandler;
 use crate::db::model::JobDeclarationInsert;
@@ -40,16 +42,20 @@ pub struct MempoolTransaction {
     pub descendant_size: u64,
     pub ancestor_count: u64,
     pub ancestor_size: u64,
-    pub wtxid: Txid,
+    pub wtxid: String,
     pub fees: GetMempoolEntryResultFees,
-    pub depends: Vec<Txid>,
-    pub spent_by: Vec<Txid>,
+    #[serde(rename = "feeRate")]
+    pub fee_rate: f64,
+    pub depends: Vec<String>,
+    pub spent_by: Vec<String>,
     pub bip125_replaceable: bool,
-    pub unbroadcast: Option<bool>,
+    pub unbroadcast: bool,
 }
 
 impl From<(Txid, bitcoincore_rpc::json::GetMempoolEntryResult)> for MempoolTransaction {
     fn from((txid, entry): (Txid, bitcoincore_rpc::json::GetMempoolEntryResult)) -> Self {
+        let fee_rate = entry.fees.base.to_sat() as f64 / entry.vsize as f64;
+
         Self {
             txid: txid.to_string(),
             vsize: entry.vsize,
@@ -60,12 +66,13 @@ impl From<(Txid, bitcoincore_rpc::json::GetMempoolEntryResult)> for MempoolTrans
             descendant_size: entry.descendant_size,
             ancestor_count: entry.ancestor_count,
             ancestor_size: entry.ancestor_size,
-            wtxid: entry.wtxid,
+            wtxid: entry.wtxid.to_string(),
             fees: entry.fees,
-            depends: entry.depends,
-            spent_by: entry.spent_by,
+            fee_rate,
+            depends: entry.depends.iter().map(|d| d.to_string()).collect(),
+            spent_by: entry.spent_by.iter().map(|s| s.to_string()).collect(),
             bip125_replaceable: entry.bip125_replaceable,
-            unbroadcast: entry.unbroadcast,
+            unbroadcast: entry.unbroadcast.unwrap_or(false),
         }
     }
 }
@@ -506,4 +513,44 @@ async fn store_jd_in_db(state: &AppState, job_data: &JobDeclarationData, valid_t
             }
         }
     }
+}
+
+/// Automatically select transactions for mining when in auto-selection mode
+/// This function creates a valid transaction list using DAG-based selection algorithm
+pub async fn auto_select_transactions(
+    rpc_client: Option<Arc<Client>>,
+    params: api::routes::AutoSelectParams,
+) -> Result<Vec<MempoolTransaction>, String> {
+    info!("Starting auto-selection with custom parameters");
+
+    let rpc = rpc_client
+        .clone()
+        .ok_or_else(|| "Bitcoin RPC client not available".to_string())?;
+
+    // Fetch current mempool
+    let mempool_entries = rpc
+        .get_raw_mempool_verbose()
+        .map_err(|e| format!("Failed to fetch mempool: {}", e))?;
+
+    let mut mempool_transactions: Vec<MempoolTransaction> = mempool_entries
+        .into_iter()
+        .map(MempoolTransaction::from)
+        .collect();
+
+    // Apply filtering based on parameters
+    mempool_transactions.retain(|tx| api::utils::filter_mempool_transaction(tx, &params));
+
+    let config = TransactionSelectionConfig::from_params(&params);
+    let selector = TransactionSelector::new(config);
+    let selection_result = selector
+        .select_transactions(mempool_transactions.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let selected_transactions: Vec<MempoolTransaction> = mempool_transactions
+        .into_iter()
+        .filter(|tx| selection_result.selected_txids.contains(&tx.txid))
+        .collect();
+
+    Ok(selected_transactions)
 }

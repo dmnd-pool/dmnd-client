@@ -1,5 +1,6 @@
 pub mod handlers;
 pub mod model;
+pub mod settings_updater;
 use sqlx::{migrate::MigrateDatabase, Sqlite, SqlitePool};
 
 pub async fn connect_db() -> Result<SqlitePool, sqlx::Error> {

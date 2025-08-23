@@ -275,8 +275,21 @@ impl JobDeclarator {
 
         // Send the template notification to all subscribed WebSocket clients.
         // If no receivers are currently subscribed (via ws_event_handler), this will return an error — which is expected.
-        if jd_event_broadcaster.send(template_notification).is_err() {
-            error!("Failed to send template notification: no receivers available");
+        // Try to send the template notification, retrying if there are no receivers available.
+        let mut sent = false;
+        let start = std::time::Instant::now();
+        while !sent && start.elapsed().as_secs_f32() < 5.0 {
+            if jd_event_broadcaster
+                .send(template_notification.clone())
+                .is_ok()
+            {
+                sent = true;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+        if !sent {
+            error!("Failed to send template notification after multiple attempts, no receivers available");
         }
 
         let transaction_timeout = Configuration::custom_job_timeout();
