@@ -1,2 +1,14 @@
-/target
+/target/
+# Local environment and config files
+.env
+config.toml
+
+# Mining software
+cpuminer-opt/
+cpuminer-opt
+
+# Other local files that shouldn't be tracked
+*.local
+.DS_Store
+
 

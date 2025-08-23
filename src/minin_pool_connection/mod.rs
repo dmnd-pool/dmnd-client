@@ -90,12 +90,12 @@ pub async fn connect_pool(
 
             let (send_to_down, recv_from_down) = tokio::sync::mpsc::channel(10);
             let (send_from_down, recv_to_up) = tokio::sync::mpsc::channel(10);
-            let relay_up_task = relay_up(recv_to_up, sender);
+            let relay_up_task = relay_up(recv_to_up, sender, address);
             TaskManager::add_sv2_relay_up(task_manager.clone(), relay_up_task)
                 .await
                 .map_err(|_| Error::MiningPoolTaskManagerFailed)?;
 
-            let relay_down_task = relay_down(receiver, send_to_down);
+            let relay_down_task = relay_down(receiver, send_to_down, address);
             TaskManager::add_sv2_relay_down(task_manager.clone(), relay_down_task)
                 .await
                 .map_err(|_| Error::MiningPoolTaskManagerFailed)?;
@@ -108,6 +108,7 @@ pub async fn connect_pool(
 pub fn relay_up(
     mut recv: Receiver<PoolExtMessages<'static>>,
     send: Sender<EitherFrame>,
+    pool_address: SocketAddr,
 ) -> AbortOnDrop {
     let task = tokio::spawn(async move {
         while let Some(msg) = recv.recv().await {
@@ -115,12 +116,15 @@ pub fn relay_up(
             if let Ok(std_frame) = std_frame {
                 let either_frame: EitherFrame = std_frame.into();
                 if send.send(either_frame).await.is_err() {
-                    error!("Mining upstream failed");
+                    error!("Failed to send message to pool {}", pool_address);
                     ProxyState::update_pool_state(PoolState::Down);
                     break;
                 };
             } else {
-                panic!("Internal Mining downstream try to send invalid message");
+                panic!(
+                    "Internal Mining downstream tried to send invalid message to pool {}",
+                    pool_address
+                );
             }
         }
     });
@@ -130,6 +134,7 @@ pub fn relay_up(
 pub fn relay_down(
     mut recv: Receiver<EitherFrame>,
     send: Sender<PoolExtMessages<'static>>,
+    pool_address: SocketAddr,
 ) -> AbortOnDrop {
     let task = tokio::spawn(async move {
         while let Some(msg) = recv.recv().await {
@@ -144,25 +149,34 @@ pub fn relay_down(
                     if let Ok(msg) = msg {
                         let msg = msg.into_static();
                         if send.send(msg).await.is_err() {
-                            error!("Internal Mining downstream not available");
+                            error!(
+                                "Internal Mining downstream not available for pool {}",
+                                pool_address
+                            );
 
                             // Update Proxy state to reflect Internal inconsistency
                             ProxyState::update_inconsistency(Some(1));
                         }
                     } else {
-                        error!("Mining Upstream send non Mining message. Disconnecting");
+                        error!(
+                            "Pool {} sent non-Mining message. Disconnecting",
+                            pool_address
+                        );
                         break;
                     }
                 } else {
-                    error!("Mining Upstream send invalid message no header. Disconnecting");
+                    error!(
+                        "Pool {} sent invalid message with no header. Disconnecting",
+                        pool_address
+                    );
                     break;
                 }
             } else {
-                error!("Mining Upstream down.");
+                error!("Pool {} connection down", pool_address);
                 break;
             }
         }
-        error!("Failed to receive msg from Pool");
+        error!("Failed to receive msg from Pool {}", pool_address);
         ProxyState::update_pool_state(PoolState::Down);
     });
     task.into()

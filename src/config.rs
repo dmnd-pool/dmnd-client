@@ -50,12 +50,21 @@ struct Args {
     monitor: bool,
     #[clap(long, short = 'u')]
     auto_update: bool,
+    #[clap(long = "hashrate-dist", value_delimiter = ',')]
+    hashrate_distribution: Option<Vec<f32>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct PoolConfig {
+    pub address: SocketAddr,
+    pub weight: f32,
 }
 
 #[derive(Serialize, Deserialize)]
 struct ConfigFile {
     token: Option<String>,
     tp_address: Option<String>,
+    hashrate_distribution: Option<Vec<f32>>,
     interval: Option<u64>,
     delay: Option<u64>,
     downstream_hashrate: Option<String>,
@@ -76,6 +85,7 @@ impl ConfigFile {
         ConfigFile {
             token: None,
             tp_address: None,
+            hashrate_distribution: None,
             interval: None,
             delay: None,
             downstream_hashrate: None,
@@ -96,6 +106,7 @@ impl ConfigFile {
 pub struct Configuration {
     token: Option<String>,
     tp_address: Option<String>,
+    hashrate_distribution: Option<Vec<f32>>,
     interval: u64,
     delay: u64,
     downstream_hashrate: f32,
@@ -213,6 +224,76 @@ impl Configuration {
         CONFIG.auto_update
     }
 
+    pub fn hashrate_distribution() -> Option<Vec<f32>> {
+        CONFIG.hashrate_distribution.clone()
+    }
+
+    pub async fn pool_configs() -> Option<Vec<PoolConfig>> {
+        let hashrate_dist = Self::hashrate_distribution();
+        if let Some(distribution) = hashrate_dist {
+            // Get pool addresses dynamically
+            let addresses = Self::pool_address().await.unwrap_or_default();
+
+            if addresses.is_empty() {
+                warn!("No pool addresses provided for hashrate distribution");
+                return None;
+            }
+
+            let mut pools = Vec::new();
+            let total_dist = distribution.iter().sum::<f32>();
+
+            if addresses.len() != distribution.len() {
+                warn!(
+                    "Hashrate distribution length ({}) doesn't match pools ({}). Normalizing.",
+                    distribution.len(),
+                    addresses.len()
+                );
+            }
+
+            let min_len = addresses.len().min(distribution.len());
+            for i in 0..min_len {
+                let weight = if total_dist > 0.0 {
+                    distribution[i] / total_dist
+                } else {
+                    1.0 / addresses.len() as f32
+                };
+                pools.push(PoolConfig {
+                    address: addresses[i],
+                    weight,
+                });
+            }
+
+            // Assign 0.0 weight to extra addresses (if any)
+            for addr in addresses.into_iter().skip(min_len) {
+                pools.push(PoolConfig {
+                    address: addr,
+                    weight: 0.0,
+                });
+            }
+
+            Some(Self::normalize_pool_weights(pools))
+        } else {
+            None
+        }
+    }
+
+    /// Normalize weights to sum to 1.0
+    fn normalize_pool_weights(mut pools: Vec<PoolConfig>) -> Vec<PoolConfig> {
+        let total_weight: f32 = pools.iter().map(|p| p.weight).sum();
+        if total_weight <= 0.0 {
+            warn!("Total weight is zero or negative. Assigning equal weights.");
+            let equal_weight = 1.0 / pools.len() as f32;
+            for pool in &mut pools {
+                pool.weight = equal_weight;
+            }
+        } else {
+            for pool in &mut pools {
+                pool.weight /= total_weight;
+            }
+        }
+        pools
+    }
+
     // Loads config from CLI, file, or env vars with precedence: CLI > file > env.
     fn load_config() -> Self {
         let args = Args::parse();
@@ -316,9 +397,21 @@ impl Configuration {
             || config.auto_update.unwrap_or(true)
             || std::env::var("AUTO_UPDATE").is_ok();
 
+        let hashrate_distribution = args
+            .hashrate_distribution
+            .or(config.hashrate_distribution)
+            .or_else(|| {
+                std::env::var("HASHRATE_DISTRIBUTION").ok().and_then(|s| {
+                    s.split(',')
+                        .map(|x| x.trim().parse::<f32>().ok())
+                        .collect::<Option<Vec<f32>>>()
+                })
+            });
+
         Configuration {
             token,
             tp_address,
+            hashrate_distribution,
             interval,
             delay,
             downstream_hashrate,
