@@ -153,23 +153,6 @@ async fn initialize_proxy(
 
         info!("Pool connection established, starting extension negotiation...");
 
-        let ext_handler = share_accounter::ext_negotiation::negotiate_extension_after_connection(
-            send_to_pool.clone(),
-            &mut recv_from_pool,
-            std::time::Duration::from_secs(10),
-        )
-        .await;
-
-        match ext_handler {
-            Ok(_) => {
-                info!("Extension negotiation successful");
-            }
-            Err(e) => {
-                error!("Extension negotiation failed: {e}");
-                continue;
-            }
-        }
-
         let (downs_sv1_tx, downs_sv1_rx) = channel(10);
         let sv1_ingress_abortable = ingress::sv1_ingress::start_listen_for_downstream(downs_sv1_tx);
 
