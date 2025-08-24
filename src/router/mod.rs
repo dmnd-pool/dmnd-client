@@ -382,9 +382,7 @@ impl PoolLatency {
                     .safe_lock(|tp| tp.clone())
                     .map_err(|_| error!(" TP_ADDRESS Mutex Corrupted"))?;
                 if let Some(_tp_addr) = tp {
-                    let initiator = Initiator::from_raw_k(authority_public_key.into_bytes())
-                        // Safe expect Key is a constant and must be right
-                        .expect("Unable to create initialtor");
+                    let initiator = Initiator::without_pk().expect("Unable to create initialtor");
                     let (mut receiver, mut sender, _, _) =
                         match Connection::new(stream, HandshakeRole::Initiator(initiator)).await {
                             Ok(connection) => connection,
