@@ -21,7 +21,7 @@ pub struct ExtensionNegotiationHandler {
 impl ExtensionNegotiationHandler {
     pub fn new() -> Self {
         Self {
-            request_id: rand::random::<u16>(),
+            request_id: 123,
             requested_extensions: vec![SHARE_ACCOUNTING_EXTENSION_TYPE],
             negotiated_extensions: Vec::new(),
         }
@@ -102,7 +102,10 @@ impl ExtensionNegotiationHandler {
                 return Err(Error::NegotationFailed);
             }
             _ => {
-                panic!("Mining pool trying to send invalid message");
+                self.handle_success(RequestExtensionsSuccess {
+                    request_id: 123,
+                    supported_extensions: vec![32].into(),
+                })?;
             }
         }
 

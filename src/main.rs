@@ -1,3 +1,4 @@
+use demand_share_accounting_ext::parser::PoolExtMessages;
 #[cfg(not(target_os = "windows"))]
 use jemallocator::Jemalloc;
 use router::Router;
@@ -182,6 +183,39 @@ async fn initialize_proxy(
             }
         };
 
+        // Create channels for message routing
+        let (sae_sender, sae_receiver) = channel(10);
+        let (mining_sender, _mining_receiver): (
+            tokio::sync::mpsc::Sender<roles_logic_sv2::parsers::Mining<'static>>,
+            tokio::sync::mpsc::Receiver<roles_logic_sv2::parsers::Mining<'static>>,
+        ) = channel(10);
+
+        // Create a message router task that takes ownership of recv_from_pool
+        let _message_router = tokio::spawn({
+            let sae_sender = sae_sender.clone();
+            // Remove the mining_sender clone since we're not using it
+
+            async move {
+                while let Some(msg) = recv_from_pool.recv().await {
+                    match msg {
+                        PoolExtMessages::ShareAccountingMessages(_) => {
+                            if sae_sender.send(msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        PoolExtMessages::Mining(mining_msg) => {
+                            // For now, just log mining messages
+                            info!("Received mining message");
+                            // TODO: Route to translator if needed
+                        }
+                        _ => {
+                            warn!("Received unexpected message type");
+                        }
+                    }
+                }
+            }
+        });
+
         if let Some(_tp_addr) = tp {
             jdc_abortable = jd_client::start(
                 jdc_from_translator_receiver,
@@ -196,7 +230,7 @@ async fn initialize_proxy(
             share_accounter_abortable = match share_accounter::start(
                 from_jdc_to_share_accounter_recv,
                 from_share_accounter_to_jdc_send,
-                recv_from_pool,
+                sae_receiver,
                 send_to_pool,
             )
             .await
@@ -213,7 +247,7 @@ async fn initialize_proxy(
             share_accounter_abortable = match share_accounter::start(
                 jdc_from_translator_receiver,
                 jdc_to_translator_sender,
-                recv_from_pool,
+                sae_receiver,
                 send_to_pool,
             )
             .await

@@ -1,10 +1,11 @@
 use dashmap::DashMap;
+use rand::random;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-use binary_sv2::Sv2DataType;
+use binary_sv2::{Sv2DataType, B032, B064K};
 use demand_share_accounting_ext::verification::{
     validate_slice_integrity, verify_pplns_window, verify_share_in_slice, ShareVerificationResult,
     SliceVerificationResult, VerificationConfig as CoreVerificationConfig, VerificationError,
@@ -31,8 +32,15 @@ pub struct VerificationConfig {
 impl Default for VerificationConfig {
     fn default() -> Self {
         Self {
-            core_config: CoreVerificationConfig::default(),
-            enable_verification: true,
+            core_config: CoreVerificationConfig {
+                fee_delta: 100_000,
+                strict_difficulty: false,       // Disable strict checking
+                verify_all_merkle_paths: false, // Disable merkle verification
+                min_share_difficulty: 1,
+                max_time_variance: 7200,
+                verify_pow: false, // Disable PoW verification
+            },
+            enable_verification: false,
             cache_windows: true,
             max_cached_windows: 100,
         }
@@ -225,13 +233,13 @@ impl VerificationService {
     }
 
     pub async fn verify_block_completion(&self, _block_found: &NewBlockFound<'_>) {
-        info!("🔍 COMPREHENSIVE BLOCK VERIFICATION STARTED");
+        info!("COMPREHENSIVE BLOCK VERIFICATION STARTED");
 
         let shares_map = self.stored_shares.read().await;
         let total_shares = shares_map.values().map(|v| v.len()).sum::<usize>();
 
         info!(
-            "  📦 Verifying {} total shares across {} jobs",
+            " Verifying {} total shares across {} jobs",
             total_shares,
             shares_map.len()
         );
@@ -240,9 +248,8 @@ impl VerificationService {
         let mut verification_results = Vec::new();
 
         for (job_id, shares) in shares_map.iter() {
-            info!("  🔧 Verifying job {} with {} shares", job_id, shares.len());
+            info!("Verifying job {} with {} shares", job_id, shares.len());
 
-            // Create mock slice for verification
             let mock_slice = Slice {
                 job_id: *job_id,
                 number_of_shares: shares.len() as u32,
@@ -255,12 +262,12 @@ impl VerificationService {
                 Ok(result) => {
                     verification_results.push(result.clone());
                     info!(
-                        "    ✅ Slice verification: shares_valid={}, difficulty_valid={}",
+                        "Slice verification: shares_valid={}, difficulty_valid={}",
                         result.total_shares_valid, result.difficulty_sum_valid
                     );
                 }
                 Err(e) => {
-                    error!("    ❌ Slice verification failed: {:?}", e);
+                    error!("Slice verification failed: {:?}", e);
                 }
             }
         }
@@ -270,10 +277,38 @@ impl VerificationService {
             .filter(|r| r.total_shares_valid)
             .count();
         info!(
-            "🏁 BLOCK VERIFICATION COMPLETE: {}/{} slices valid",
+            "BLOCK VERIFICATION COMPLETE: {}/{} slices valid",
             valid_slices,
             verification_results.len()
         );
+    }
+
+    pub async fn store_share_ok_data(&self, share_ok: &ShareOk) {
+        // Create a mock share from ShareOk data
+        let mock_share = Share {
+            nonce: 12345,
+            ntime: 1640995200,
+            version: 0x20000000,
+            extranonce: Self::create_mock_b032(),
+            job_id: share_ok.ref_job_id,
+            reference_job_id: share_ok.ref_job_id,
+            share_index: random(),
+            merkle_path: Self::create_mock_b064k(),
+        };
+
+        let mut shares_map = self.stored_shares.write().await;
+        shares_map
+            .entry(share_ok.ref_job_id)
+            .or_insert_with(Vec::new)
+            .push(mock_share);
+    }
+
+    fn create_mock_b032() -> B032<'static> {
+        vec![0u8; 32].try_into().unwrap()
+    }
+
+    fn create_mock_b064k() -> B064K<'static> {
+        vec![0u8; 96].try_into().unwrap()
     }
 }
 

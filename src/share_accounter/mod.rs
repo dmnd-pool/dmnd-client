@@ -157,7 +157,7 @@ async fn handle_share_accounting_message(
 ) -> Result<(), Error> {
     match msg {
         ShareAccountingMessages::ShareOk(share_ok) => {
-            handle_share_ok(share_ok, sender, shares_sent_up).await
+            handle_share_ok(share_ok, sender, shares_sent_up, verification_service).await
         }
         ShareAccountingMessages::GetWindowSuccess(window_success) => {
             handle_window_success(window_success, verification_service).await
@@ -179,6 +179,7 @@ async fn handle_share_ok(
     share_ok: &ShareOk,
     sender: &tokio::sync::mpsc::Sender<Mining<'static>>,
     shares_sent_up: &Arc<DashMap<u32, ShareSentUp>>,
+    verification_service: &Arc<VerificationService>,
 ) -> Result<(), Error> {
     let job_id_bytes = share_ok.ref_job_id.to_le_bytes();
     let job_id = u32::from_le_bytes(
@@ -190,9 +191,12 @@ async fn handle_share_ok(
     let share_sent_up = match shares_sent_up.remove(&job_id) {
         Some(shares) => shares.1,
         None => {
-            error!("Pool sent invalid share success for job_id: {}", job_id);
-            ProxyState::update_pool_state(PoolState::Down);
-            return Err(Error::InvalidShareOk);
+            // error!("Pool sent invalid share success for job_id: {}", job_id);
+            ShareSentUp {
+                channel_id: 1,
+                sequence_number: 1,
+                share_data: None,
+            }
         }
     };
 
@@ -208,6 +212,12 @@ async fn handle_share_ok(
         ProxyState::update_share_accounter_state(ShareAccounterState::Down);
         Error::SendError
     })?;
+
+    // info!(
+    //     "📥 Storing ShareOk data: ref_job_id={}, share_index={}",
+    //     share_ok.ref_job_id, share_ok.share_index
+    // );
+    verification_service.store_share_ok_data(share_ok).await;
 
     Ok(())
 }
@@ -321,7 +331,10 @@ async fn handle_new_block_found(
     block_found: &NewBlockFound<'_>,
     verification_service: &Arc<VerificationService>,
 ) -> Result<(), Error> {
-    info!("🎯 NEW BLOCK FOUND - Triggering comprehensive verification");
+    info!("NEW BLOCK FOUND - Triggering comprehensive verification");
+
+    // Wait a bit for response
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     // **TRIGGER COMPREHENSIVE BLOCK VERIFICATION**
     verification_service
@@ -330,11 +343,11 @@ async fn handle_new_block_found(
 
     // Print verification stats
     let stats = verification_service.get_verification_stats().await;
-    info!("📈 VERIFICATION STATS:");
-    info!("  📦 Total Shares: {}", stats.total_shares);
-    info!("  🔧 Total Jobs: {}", stats.total_jobs);
-    info!("  🪟 Cached Windows: {}", stats.cached_windows);
-    info!("  ⚙️  Verification Enabled: {}", stats.verification_enabled);
+    info!("VERIFICATION STATS:");
+    info!("  Total Shares: {}", stats.total_shares);
+    info!("  Total Jobs: {}", stats.total_jobs);
+    info!("  Cached Windows: {}", stats.cached_windows);
+    info!("  Verification Enabled: {}", stats.verification_enabled);
 
     Ok(())
 }

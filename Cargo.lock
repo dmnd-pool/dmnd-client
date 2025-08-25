@@ -738,7 +738,7 @@ dependencies = [
 [[package]]
 name = "demand-share-accounting-ext"
 version = "0.0.13"
-source = "git+https://github.com/theivess/share-accounting-ext?branch=verification#844f278b5e117c0d1cfaf38ca8d1af4291c899c8"
+source = "git+https://github.com/theivess/share-accounting-ext?branch=verification#c2e53f045faf65a411403f7465b52f8e837e199d"
 dependencies = [
  "binary_sv2",
  "framing_sv2",

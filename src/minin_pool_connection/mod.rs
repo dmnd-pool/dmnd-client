@@ -59,8 +59,7 @@ pub async fn connect_pool(
     };
 
     info!("Performing SV2 Handshake with Pool at {}", address);
-    let initiator =
-        Initiator::from_raw_k(authority_public_key.into_bytes()).expect("Invalid authority key");
+    let initiator = Initiator::without_pk().expect("Invalid authority key");
     // Channel to send and receive messages to the SV2 Upstream role
     let (mut receiver, mut sender, _, _) =
         Connection::new(socket, HandshakeRole::Initiator(initiator))
@@ -141,6 +140,7 @@ pub fn relay_down(
                     let extension = header.ext_type();
                     let msg: Result<PoolExtMessages<'_>, _> =
                         (extension, message_type, payload).try_into();
+                    // error!("HI THERE {:?}", msg);
                     if let Ok(msg) = msg {
                         let msg = msg.into_static();
                         if send.send(msg).await.is_err() {
