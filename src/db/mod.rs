@@ -2,8 +2,15 @@ pub mod handlers;
 pub mod model;
 pub mod settings_updater;
 use sqlx::{migrate::MigrateDatabase, Sqlite, SqlitePool};
+use std::fs;
 
 pub async fn connect_db() -> Result<SqlitePool, sqlx::Error> {
+    if !fs::metadata("jd_history.db").is_ok() {
+        match fs::File::create("jd_history.db") {
+            Ok(_) => println!("Created jd_history.db file"),
+            Err(e) => panic!("Failed to create jd_history.db file: {}", e),
+        }
+    }
     const DB_URL: &str = "sqlite://jd_history.db";
     if !Sqlite::database_exists(DB_URL).await.unwrap_or(false) {
         println!("Creating database {}", DB_URL);

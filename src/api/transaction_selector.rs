@@ -467,19 +467,48 @@ impl TransactionSelector {
                 }
             }
             SelectionStrategy::Balanced => {
-                let fee_rate = if node.fee_rate.is_nan() {
-                    0.0
-                } else {
-                    node.fee_rate
-                };
-                let weight_factor = 1.0 / (node.total_weight as f64).sqrt();
-                fee_rate * weight_factor
+                // Improved balanced algorithm using efficiency ratio
+                self.calculate_balanced_score(node)
             }
             SelectionStrategy::MaximizeCount => {
                 // This case is handled separately in generate_sorted_candidates
                 node.total_weight as f64
             }
         }
+    }
+
+    /// Calculate balanced score that optimizes both fees and transaction count
+    fn calculate_balanced_score(&self, node: &TransactionNode) -> f64 {
+        let fee_rate = if node.fee_rate.is_nan() {
+            0.0
+        } else {
+            node.fee_rate
+        };
+
+        // Method 1: Multi-objective score (60% fees, 40% efficiency)
+        let fee_efficiency = fee_rate / 100.0; // Normalize assuming max ~100 sat/vB
+        let space_efficiency = 25.0 / node.total_weight as f64; // Normalize assuming min ~25 weight
+
+        let fee_weight = 0.6;
+        let count_weight = 0.4;
+
+        let multi_objective_score = fee_weight * fee_efficiency + count_weight * space_efficiency;
+
+        // Method 2: Efficiency ratio (geometric mean)
+        let fee_per_weight = node.total_fee as f64 / node.total_weight as f64;
+        let space_ratio = 1000.0 / node.total_weight as f64; // Scale for better comparison
+        let efficiency_ratio = (fee_per_weight * space_ratio).sqrt();
+
+        // Method 3: Logarithmic scaling (less harsh on large transactions)
+        let log_weight_penalty = 1.0 / (1.0 + (node.total_weight as f64 / 1000.0).ln());
+        let log_balanced = fee_rate * log_weight_penalty;
+
+        // Combine all methods with weights
+        let combined_score = 0.4 * multi_objective_score * 1000.0 +  // Scale up for comparison
+            0.4 * efficiency_ratio +
+            0.2 * log_balanced;
+
+        combined_score
     }
 
     /// Core selection logic that processes a sorted list of transactions

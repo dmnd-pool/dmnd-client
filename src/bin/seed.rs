@@ -23,7 +23,7 @@ async fn main() -> Result<(), sqlx::Error> {
         let txid_count = txids.len() as i32;
         let now = chrono::Utc::now().naive_utc();
 
-        sqlx::query!(
+        sqlx::query(
             r#"
         INSERT INTO job_declarations (
             template_id, channel_id, request_id, job_id,
@@ -32,16 +32,16 @@ async fn main() -> Result<(), sqlx::Error> {
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
-            template_id,
-            channel_id,
-            request_id,
-            job_id,
-            mining_job_token,
-            txids_json,
-            txid_count,
-            now,
-            now,
         )
+        .bind(template_id)
+        .bind(channel_id)
+        .bind(request_id)
+        .bind(job_id)
+        .bind(mining_job_token)
+        .bind(txids_json)
+        .bind(txid_count)
+        .bind(now)
+        .bind(now)
         .execute(&pool)
         .await?;
     }

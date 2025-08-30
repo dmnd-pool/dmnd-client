@@ -61,11 +61,23 @@ GET /api/auto-select?selectionStrategy=maximizeCount&maxTransactionCount=1000
 
 ### 3. `balanced`
 
-**Purpose:** Balance between fees and transaction count efficiency.
+**Purpose:** Optimally balance between maximizing fees and transaction count using advanced multi-objective optimization.
 
-**Algorithm:** Uses a balanced score: `fee_rate × (1 / √weight)` to consider both profitability and efficiency.
+**Algorithm:** Uses a sophisticated hybrid scoring system that combines multiple mathematical approaches:
 
-**Best for:** General-purpose mining with good balance of revenue and network support.
+1. **Multi-Objective Score (40% weight)**: Weighted combination of normalized fee efficiency (60%) and space efficiency (40%)
+2. **Efficiency Ratio (40% weight)**: Geometric mean of fee-per-weight and space utilization ratios
+3. **Logarithmic Scaling (20% weight)**: Less harsh penalty on larger transactions using logarithmic weight scaling
+
+The combined formula: `0.4 × multi_objective_score × 1000 + 0.4 × efficiency_ratio + 0.2 × log_balanced`
+
+Where:
+
+- `multi_objective_score = 0.6 × (fee_rate/100) + 0.4 × (25/weight)`
+- `efficiency_ratio = √(fee_per_weight × 1000/weight)`
+- `log_balanced = fee_rate × (1/(1 + ln(weight/1000)))`
+
+**Best for:** True dual optimization that maximizes both revenue and network throughput efficiently. Ideal for miners who want optimal balance without sacrificing either objective.
 
 ```bash
 GET /api/auto-select?selectionStrategy=balanced&maxTransactionCount=800
@@ -75,7 +87,7 @@ GET /api/auto-select?selectionStrategy=balanced&maxTransactionCount=800
 
 ### Basic Usage
 
-```bash
+````bash
 # Default behavior (maximize fees)
 GET /api/auto-select
 
@@ -83,8 +95,9 @@ GET /api/auto-select
 GET /api/auto-select?selectionStrategy=maximizeFees&minFeeRate=10
 
 # Balanced selection with custom limits
-GET /api/auto-select?selectionStrategy=balanced&maxTransactionCount=500&minFeeRate=2
-```
+```bash
+GET /api/auto-select?selectionStrategy=balanced&maxTransactionCount=800&minFeeRate=2
+````
 
 ### Advanced Configuration
 
@@ -201,6 +214,7 @@ The system automatically handles transaction dependencies using topological sort
 - Filtering is applied before expensive selection algorithms
 - Topological sorting ensures O(V + E) complexity for dependency resolution
 - Bundle metrics are computed once per transaction to avoid redundant calculations
+- Hybrid balanced scoring provides O(1) computation per transaction while maintaining mathematical rigor
 
 ### Memory Pool Integration
 
@@ -215,7 +229,52 @@ The system automatically handles transaction dependencies using topological sort
 
 1. **MaximizeFees**: Sorts by `fee_rate` (descending)
 2. **MaximizeCount**: Sorts by `total_weight` (ascending)
-3. **Balanced**: Sorts by `fee_rate × (1 / √weight)` (descending)### Bundle Selection Algorithm
+3. **Balanced**: Uses advanced hybrid scoring combining:
+   - Multi-objective optimization (fee efficiency + space efficiency)
+   - Geometric mean efficiency ratio (fee-per-weight × space-ratio)
+   - Logarithmic weight penalty for smoother large transaction handling
+
+### Balanced Strategy Mathematical Details
+
+The balanced strategy implements a sophisticated multi-faceted approach:
+
+#### Component 1: Multi-Objective Score (40% weight)
+
+```
+multi_objective_score = 0.6 × (fee_rate/100) + 0.4 × (25/weight)
+```
+
+- Normalizes fee rates assuming typical max ~100 sat/vB
+- Normalizes space efficiency assuming min weight ~25 units
+- 60/40 split favors fees slightly while ensuring space efficiency
+
+#### Component 2: Efficiency Ratio (40% weight)
+
+```
+efficiency_ratio = √(fee_per_weight × 1000/weight)
+```
+
+- Uses geometric mean to balance fee-per-weight vs space utilization
+- Prevents extreme bias toward either very small or very profitable transactions
+- Scale factor of 1000 normalizes for typical weight ranges
+
+#### Component 3: Logarithmic Scaling (20% weight)
+
+```
+log_balanced = fee_rate × (1/(1 + ln(weight/1000)))
+```
+
+- Provides gentler penalty for larger transactions than square root
+- Allows high-fee large transactions to remain competitive
+- Logarithmic scaling creates smooth transition between optimization goals
+
+#### Final Score Calculation
+
+```
+combined_score = 0.4 × multi_objective_score × 1000 + 0.4 × efficiency_ratio + 0.2 × log_balanced
+```
+
+This hybrid approach ensures true dual optimization rather than simple fee-rate weighting.### Bundle Selection Algorithm
 
 For each candidate transaction:
 
