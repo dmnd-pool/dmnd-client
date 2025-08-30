@@ -632,6 +632,10 @@ impl IsServer<'static> for Downstream {
     fn notify(&mut self) -> Result<json_rpc::Message, sv1_api::error::Error> {
         unreachable!()
     }
+
+    fn handle_suggest_difficulty(&self, _: &sv1_api::client_to_server::SuggestDifficulty) {
+        todo!()
+    }
 }
 
 impl IsMiningDownstream for Downstream {}

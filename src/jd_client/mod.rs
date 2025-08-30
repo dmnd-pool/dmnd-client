@@ -40,6 +40,8 @@ pub static IS_NEW_TEMPLATE_HANDLED: AtomicBool = AtomicBool::new(true);
 
 pub static IS_CUSTOM_JOB_SET: AtomicBool = AtomicBool::new(true);
 
+use crate::api::TxListWithResponse;
+use crate::dashboard::jd_event_ws::TemplateNotificationBroadcaster;
 use crate::proxy_state::{DownstreamType, ProxyState, TpState};
 use roles_logic_sv2::{parsers::Mining, utils::Mutex};
 use std::{
@@ -55,11 +57,21 @@ pub async fn start(
     sender: tokio::sync::mpsc::Sender<Mining<'static>>,
     up_receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     up_sender: tokio::sync::mpsc::Sender<Mining<'static>>,
+    tx_list_receiver: tokio::sync::mpsc::Receiver<TxListWithResponse>,
+    jd_event_broadcaster: TemplateNotificationBroadcaster,
 ) -> Option<AbortOnDrop> {
     // This will not work when we implement support for multiple upstream
     IS_CUSTOM_JOB_SET.store(true, std::sync::atomic::Ordering::Release);
     IS_NEW_TEMPLATE_HANDLED.store(true, std::sync::atomic::Ordering::Release);
-    initialize_jd(receiver, sender, up_receiver, up_sender).await
+    initialize_jd(
+        receiver,
+        sender,
+        up_receiver,
+        up_sender,
+        tx_list_receiver,
+        jd_event_broadcaster,
+    )
+    .await
 }
 
 async fn initialize_jd(
@@ -67,6 +79,8 @@ async fn initialize_jd(
     sender: tokio::sync::mpsc::Sender<Mining<'static>>,
     up_receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     up_sender: tokio::sync::mpsc::Sender<Mining<'static>>,
+    tx_list_receiver: tokio::sync::mpsc::Receiver<TxListWithResponse>,
+    jd_event_broadcaster: TemplateNotificationBroadcaster,
 ) -> Option<AbortOnDrop> {
     let task_manager = TaskManager::initialize();
     let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
@@ -212,7 +226,9 @@ async fn initialize_jd(
         donwstream.clone(),
         vec![],
         None,
+        tx_list_receiver,
         test_only_do_not_send_solution_to_tp,
+        jd_event_broadcaster,
     )
     .await
     {

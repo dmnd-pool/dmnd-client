@@ -1,7 +1,19 @@
 use super::{utils::get_cpu_and_memory_usage, AppState};
-use crate::proxy_state::ProxyState;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use serde::Serialize;
+use crate::{
+    api::mempool::auto_select_transactions,
+    db::{
+        handlers::{JobDeclarationHandler, SettingsHandler},
+        model::SettingsRequest,
+    },
+    proxy_state::ProxyState,
+};
+use axum::{
+    extract::{Path, Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
+use serde::{Deserialize, Serialize};
 
 pub struct Api {}
 
@@ -106,6 +118,189 @@ impl Api {
             ),
         }
     }
+
+    // API endpoint: Get job declaration history with pagination
+    pub async fn get_job_history(
+        State(state): State<AppState>,
+        Query(params): Query<std::collections::HashMap<String, String>>,
+    ) -> impl IntoResponse {
+        let db = match &state.db {
+            Some(db) => db,
+            None => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(APIResponse::error(Some(
+                        "Database not available".to_string(),
+                    ))),
+                );
+            }
+        };
+
+        let page = params
+            .get("page")
+            .and_then(|p| p.parse::<i64>().ok())
+            .unwrap_or(1);
+        let per_page = params
+            .get("per_page")
+            .and_then(|p| p.parse::<i64>().ok())
+            .unwrap_or(10);
+
+        let handler = JobDeclarationHandler::new(db.clone());
+
+        match handler.get_job_history(page, per_page).await {
+            Ok(response) => (StatusCode::OK, Json(APIResponse::success(Some(response)))),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(APIResponse::error(Some(format!(
+                    "Failed to get job history: {}",
+                    e
+                )))),
+            ),
+        }
+    }
+
+    // API endpoint: Get txids for a specific template
+    pub async fn get_job_txids(
+        State(state): State<AppState>,
+        Path(template_id): Path<i64>,
+    ) -> impl IntoResponse {
+        let db = match &state.db {
+            Some(db) => db,
+            None => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(APIResponse::error(Some(
+                        "Database not available".to_string(),
+                    ))),
+                );
+            }
+        };
+
+        let handler = JobDeclarationHandler::new(db.clone());
+
+        match handler.get_job_txids(template_id).await {
+            Ok(response) => (StatusCode::OK, Json(APIResponse::success(Some(response)))),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(APIResponse::error(Some(format!(
+                    "Failed to get job txids: {}",
+                    e
+                )))),
+            ),
+        }
+    }
+
+    // API endpoint: Get auto-selected transactions with configurable parameters
+    pub async fn get_auto_selected_transactions(
+        State(state): State<AppState>,
+        Query(params): Query<AutoSelectParams>,
+    ) -> impl IntoResponse {
+        match auto_select_transactions(state.rpc.clone(), params).await {
+            Ok(selected_transactions) => (
+                StatusCode::OK,
+                Json(APIResponse::success(Some(selected_transactions))),
+            ),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(APIResponse::error(Some(format!(
+                    "Auto-selection failed: {}",
+                    e
+                )))),
+            ),
+        }
+    }
+
+    // API endpoint: Get settings for a user
+    pub async fn get_settings(State(state): State<AppState>) -> impl IntoResponse {
+        let db = match &state.db {
+            Some(db) => db,
+            None => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(APIResponse::error(Some(
+                        "Database not available".to_string(),
+                    ))),
+                );
+            }
+        };
+
+        let handler = SettingsHandler::new(db.clone());
+
+        match handler.get_or_create_settings().await {
+            Ok(settings) => (StatusCode::OK, Json(APIResponse::success(Some(settings)))),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(APIResponse::error(Some(format!(
+                    "Failed to get settings: {}",
+                    e
+                )))),
+            ),
+        }
+    }
+
+    // API endpoint: Update settings for a user
+    pub async fn update_settings(
+        State(state): State<AppState>,
+        Json(settings_request): Json<SettingsRequest>,
+    ) -> impl IntoResponse {
+        let db = match &state.db {
+            Some(db) => db,
+            None => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(APIResponse::error(Some(
+                        "Database not available".to_string(),
+                    ))),
+                );
+            }
+        };
+
+        let handler = SettingsHandler::new(db.clone());
+
+        match handler.update_settings(&settings_request).await {
+            Ok(settings) => (StatusCode::OK, Json(APIResponse::success(Some(settings)))),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(APIResponse::error(Some(format!(
+                    "Failed to update settings: {}",
+                    e
+                )))),
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AutoSelectParams {
+    #[serde(rename = "minFeeRate")]
+    pub min_fee_rate: Option<f64>,
+    #[serde(rename = "maxSize")]
+    pub max_size: Option<u64>,
+    #[serde(rename = "minBaseFee")]
+    pub min_base_fee: Option<u64>,
+    #[serde(rename = "maxAncestorCount")]
+    pub max_ancestor_count: Option<u64>,
+    #[serde(rename = "maxDescendantCount")]
+    pub max_descendant_count: Option<u64>,
+    #[serde(rename = "excludeBip125Replaceable")]
+    pub exclude_bip125_replaceable: Option<bool>,
+    #[serde(rename = "excludeUnbroadcast")]
+    pub exclude_unbroadcast: Option<bool>,
+    #[serde(rename = "maxTransactionCount")]
+    pub max_transaction_count: Option<usize>,
+    #[serde(rename = "selectionStrategy")]
+    pub selection_strategy: Option<SelectionStrategy>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum SelectionStrategy {
+    /// Maximize total fees collected
+    MaximizeFees,
+    /// Maximize number of transactions included
+    MaximizeCount,
+    /// Balanced approach considering both fees and count
+    Balanced,
 }
 
 #[derive(Serialize)]
@@ -118,14 +313,14 @@ struct AggregateStates {
 }
 
 #[derive(Debug, Serialize)]
-struct APIResponse<T> {
+pub struct APIResponse<T> {
     success: bool,
     message: Option<String>,
     data: Option<T>,
 }
 
 impl<T: Serialize> APIResponse<T> {
-    fn success(data: Option<T>) -> Self {
+    pub fn success(data: Option<T>) -> Self {
         APIResponse {
             success: true,
             message: None,
@@ -133,7 +328,7 @@ impl<T: Serialize> APIResponse<T> {
         }
     }
 
-    fn error(message: Option<String>) -> Self {
+    pub fn error(message: Option<String>) -> Self {
         APIResponse {
             success: false,
             message,

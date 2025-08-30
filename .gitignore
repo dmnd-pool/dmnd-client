@@ -1,2 +1,7 @@
 /target
-
+.DS_Store
+config.toml
+*.db
+*.db-wal
+*.db-shm
+.sqlx

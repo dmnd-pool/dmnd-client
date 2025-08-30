@@ -50,6 +50,18 @@ struct Args {
     monitor: bool,
     #[clap(long, short = 'u')]
     auto_update: bool,
+    #[clap(long = "custom-job-timeout")]
+    custom_job_timeout: Option<u64>,
+    #[clap(long = "zmq-pub-sequence")]
+    zmq_pub_sequence: Option<String>,
+    #[clap(long = "rpc-allow-ip")]
+    rpc_allow_ip: Option<String>,
+    #[clap(long = "rpc-port")]
+    rpc_port: Option<u16>,
+    #[clap(long = "rpc-username")]
+    rpcusername: Option<String>,
+    #[clap(long = "rpc-password")]
+    rpcpassword: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -69,6 +81,12 @@ struct ConfigFile {
     api_server_port: Option<String>,
     monitor: Option<bool>,
     auto_update: Option<bool>,
+    custom_job_timeout: Option<u64>,
+    zmq_pub_sequence: Option<String>,
+    rpc_allow_ip: Option<String>,
+    rpc_port: Option<u16>,
+    rpcusername: Option<String>,
+    rpcpassword: Option<String>,
 }
 
 impl ConfigFile {
@@ -89,10 +107,15 @@ impl ConfigFile {
             api_server_port: None,
             monitor: None,
             auto_update: None,
+            custom_job_timeout: None,
+            zmq_pub_sequence: None,
+            rpc_allow_ip: None,
+            rpc_port: None,
+            rpcusername: None,
+            rpcpassword: None,
         }
     }
 }
-
 pub struct Configuration {
     token: Option<String>,
     tp_address: Option<String>,
@@ -109,6 +132,12 @@ pub struct Configuration {
     api_server_port: String,
     monitor: bool,
     auto_update: bool,
+    custom_job_timeout: u64,
+    zmq_pub_sequence: String,
+    rpc_allow_ip: String,
+    rpc_port: u16,
+    rpcusername: String,
+    rpcpassword: String,
 }
 impl Configuration {
     pub fn token() -> Option<String> {
@@ -211,6 +240,30 @@ impl Configuration {
 
     pub fn auto_update() -> bool {
         CONFIG.auto_update
+    }
+
+    pub fn custom_job_timeout() -> u64 {
+        CONFIG.custom_job_timeout
+    }
+
+    pub fn zmq_pub_sequence() -> &'static str {
+        &CONFIG.zmq_pub_sequence
+    }
+
+    pub fn rpc_allow_ip() -> &'static str {
+        &CONFIG.rpc_allow_ip
+    }
+
+    pub fn rpc_port() -> u16 {
+        CONFIG.rpc_port
+    }
+
+    pub fn rpcusername() -> &'static String {
+        &CONFIG.rpcusername
+    }
+
+    pub fn rpcpassword() -> &'static String {
+        &CONFIG.rpcpassword
     }
 
     // Loads config from CLI, file, or env vars with precedence: CLI > file > env.
@@ -316,6 +369,48 @@ impl Configuration {
             || config.auto_update.unwrap_or(true)
             || std::env::var("AUTO_UPDATE").is_ok();
 
+        let custom_job_timeout = args
+            .custom_job_timeout
+            .or(config.custom_job_timeout)
+            .or_else(|| {
+                std::env::var("CUSTOM_JOB_TIMEOUT")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+            })
+            .unwrap_or(30);
+
+        let zmq_pub_sequence = args
+            .zmq_pub_sequence
+            .or(config.zmq_pub_sequence)
+            .or_else(|| std::env::var("ZMQ_PUB_SEQUENCE").ok())
+            .unwrap_or_else(|| "tcp://127.0.0.1:28334".to_string());
+
+        let rpc_allow_ip = args
+            .rpc_allow_ip
+            .or(config.rpc_allow_ip)
+            .or_else(|| std::env::var("RPC_ALLOW_IP").ok())
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+
+        let rpc_port = args
+            .rpc_port
+            .or(config.rpc_port)
+            .or_else(|| std::env::var("RPC_PORT").ok().and_then(|s| s.parse().ok()))
+            .unwrap_or(8332);
+
+        let rpcusername = args
+            .rpcusername
+            .or(config.rpcusername)
+            .or_else(|| std::env::var("RPC_USERNAME").ok())
+            .map(|username| username.to_string())
+            .unwrap_or_default();
+
+        let rpcpassword = args
+            .rpcpassword
+            .or(config.rpcpassword)
+            .or_else(|| std::env::var("RPC_PASSWORD").ok())
+            .map(|password| password.to_string())
+            .unwrap_or_default();
+
         Configuration {
             token,
             tp_address,
@@ -332,6 +427,12 @@ impl Configuration {
             api_server_port,
             monitor,
             auto_update,
+            custom_job_timeout,
+            zmq_pub_sequence,
+            rpc_allow_ip,
+            rpc_port,
+            rpcusername,
+            rpcpassword,
         }
     }
 }

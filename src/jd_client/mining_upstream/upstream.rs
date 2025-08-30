@@ -1,3 +1,4 @@
+use crate::jd_client::job_declarator::JobDeclarator;
 use crate::jd_client::IS_CUSTOM_JOB_SET;
 use crate::proxy_state::{DownstreamType, ProxyState, TpState, UpstreamType};
 use crate::{jd_client::error::Error, jd_client::error::ProxyResult, shared::utils::AbortOnDrop};
@@ -109,6 +110,10 @@ pub struct Upstream {
     channel_factory: Option<PoolChannelFactory>,
     template_to_job_id: TemplateToJobId,
     req_ids: Id,
+    // Track job declaration request IDs: our_request_id -> jd_request_id
+    jd_request_mapping: HashMap<u32, u32>,
+    // Communication back to JobDeclarator for job responses
+    job_declarator: Option<std::sync::Weak<Mutex<JobDeclarator>>>,
 }
 
 impl Upstream {
@@ -142,6 +147,8 @@ impl Upstream {
             channel_factory: None,
             template_to_job_id: TemplateToJobId::new(),
             req_ids: Id::new(),
+            jd_request_mapping: HashMap::new(),
+            job_declarator: None,
         })))
     }
 
@@ -159,6 +166,7 @@ impl Upstream {
         coinbase_tx_outs: Vec<u8>,
         coinbase_tx_locktime: u32,
         template_id: u64,
+        request_id_from_jd: u32,
     ) -> ProxyResult<()> {
         info!("Sending set custom mining job");
         let request_id = self_
@@ -200,7 +208,9 @@ impl Upstream {
         self_
             .safe_lock(|s| {
                 s.template_to_job_id
-                    .register_template_id(template_id, request_id)
+                    .register_template_id(template_id, request_id);
+                // Store the mapping from our upstream request_id to the job declaration request_id
+                s.jd_request_mapping.insert(request_id, request_id_from_jd);
             })
             .map_err(|_| Error::JdClientUpstreamMutexCorrupted)?;
         Self::send(self_, message).await
@@ -236,6 +246,11 @@ impl Upstream {
                             break;
                         }
                     };
+
+                    // Handle SetCustomMiningJobSuccess for job declaration responses
+                    if let Mining::SetCustomMiningJobSuccess(success_msg) = &incoming {
+                        Self::handle_job_declaration_success(&self_, success_msg.clone()).await;
+                    }
 
                     // Since this is not communicating with an SV2 proxy, but instead a custom SV1
                     // proxy where the routing logic is handled via the `Upstream`'s communication
@@ -308,6 +323,29 @@ impl Upstream {
             }
             tokio::task::yield_now().await;
         }
+    }
+
+    /// Registers a reference to the JobDeclarator for job response notifications.
+    ///
+    /// This function injects a weak reference to the JobDeclarator into the Upstream instance.
+    /// It enables the Upstream to notify the JobDeclarator about job declaration responses,
+    /// allowing for asynchronous communication and response handling between the two components.
+    ///
+    /// # Arguments
+    /// * `self_` - Reference to the Upstream instance.
+    /// * `job_declarator` - Reference to the JobDeclarator to be registered.
+    ///
+    /// # Returns
+    /// * `ProxyResult<()>` indicating success or a mutex error.
+    pub fn set_job_declarator(
+        self_: &Arc<Mutex<Self>>,
+        job_declarator: &Arc<Mutex<super::super::job_declarator::JobDeclarator>>,
+    ) -> ProxyResult<()> {
+        self_
+            .safe_lock(|s| {
+                s.job_declarator = Some(Arc::downgrade(job_declarator));
+            })
+            .map_err(|_| Error::JdClientUpstreamMutexCorrupted)
     }
 }
 
@@ -675,5 +713,94 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
         } else {
             Err(RolesLogicError::DownstreamDown)
         }
+    }
+}
+
+// Additional methods for job declaration response handling
+impl Upstream {
+    /// Handles a successful job declaration response from the upstream pool.
+    ///
+    /// This function is called when a `SetCustomMiningJobSuccess` message is received from the pool.
+    /// It looks up the original job declaration request ID, upgrades the weak reference to the
+    /// `JobDeclarator`, and notifies it with the job/channel IDs. If the mapping or reference is
+    /// missing, it logs an error. This enables the async response flow back to the API.
+    ///
+    /// # Arguments
+    /// * `self_` - Reference to the Upstream instance.
+    /// * `success_msg` - The success message containing job/channel IDs.
+    pub async fn handle_job_declaration_success(
+        self_: &Arc<Mutex<Self>>,
+        success_msg: roles_logic_sv2::mining_sv2::SetCustomMiningJobSuccess,
+    ) {
+        let jd_request_id =
+            match self_.safe_lock(|s| s.jd_request_mapping.remove(&success_msg.request_id)) {
+                Ok(Some(jd_request_id)) => jd_request_id,
+                _ => {
+                    error!(
+                        "No job declaration request mapping found for request_id: {}",
+                        success_msg.request_id
+                    );
+                    return;
+                }
+            };
+
+        let job_declarator_weak = match self_.safe_lock(|s| s.job_declarator.clone()) {
+            Ok(Some(weak_ref)) => weak_ref,
+            _ => {
+                error!("No job declarator reference available");
+                return;
+            }
+        };
+
+        if let Some(job_declarator) = job_declarator_weak.upgrade() {
+            if let Err(e) = Self::send_job_declaration_response(
+                &job_declarator,
+                jd_request_id,
+                success_msg.channel_id,
+                success_msg.job_id,
+            )
+            .await
+            {
+                error!("Failed to notify job declarator: {}", e);
+            }
+        } else {
+            error!("Job declarator reference is no longer valid");
+        }
+    }
+
+    /// Sends the job declaration response back to the JobDeclarator and API endpoint.
+    ///
+    /// This function updates the job data with the channel and job IDs, then sends it through
+    /// the oneshot channel to the API handler waiting for a response. If the response sender or
+    /// job data is missing, or the mutex is corrupted, it logs an error.
+    ///
+    /// # Arguments
+    /// * `job_declarator` - Reference to the JobDeclarator instance.
+    /// * `jd_request_id` - The original job declaration request ID.
+    /// * `channel_id` - The channel ID assigned by the pool.
+    /// * `job_id` - The job ID assigned by the pool.
+    ///
+    /// # Returns
+    /// * `Result<(), Error>` indicating success or mutex error.
+    pub async fn send_job_declaration_response(
+        job_declarator: &Arc<Mutex<super::super::job_declarator::JobDeclarator>>,
+        jd_request_id: u32,
+        channel_id: u32,
+        job_id: u32,
+    ) -> Result<(), Error> {
+        job_declarator
+            .safe_lock(|jd| {
+                if let Some((mut job_data, response_sender)) =
+                    jd.custom_job_responses.remove(&jd_request_id)
+                {
+                    job_data.channel_id = Some(channel_id);
+                    job_data.job_id = Some(job_id);
+                    // Send the response back to the API endpoint
+                    if let Err(e) = response_sender.send(job_data) {
+                        error!("Failed to send job declaration response: {:?}", e);
+                    }
+                }
+            })
+            .map_err(|_| Error::JobDeclaratorMutexCorrupted)
     }
 }
