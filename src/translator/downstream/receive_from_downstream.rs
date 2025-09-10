@@ -66,9 +66,12 @@ pub async fn start_receive_downstream(
             let send_kill_signal = task_manager
                 .safe_lock(|tm| tm.send_kill_signal.clone())
                 .unwrap();
-            if send_kill_signal.send(connection_id).await.is_err() {
+            if let Some(restart) = ProxyState::update_inconsistency(
+                Some(1),
+                send_kill_signal.send(connection_id).await.is_err(),
+            ) {
                 error!("Proxy can not abort downstreams tasks");
-                ProxyState::update_inconsistency(Some(1));
+                restart();
             }
         })
     };

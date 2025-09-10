@@ -58,7 +58,7 @@ impl TaskManager {
         });
         let kill_tasks = tokio::task::spawn(async move {
             while let Some(connection_id) = receiver_kill_signal.recv().await {
-                if tasks
+                let can_remove_tasks = tasks
                     .safe_lock(|tasks| {
                         if let Some(handles) = tasks.remove(&Some(connection_id)) {
                             for handle in handles {
@@ -66,10 +66,10 @@ impl TaskManager {
                             }
                         }
                     })
-                    .is_err()
-                {
+                    .is_err();
+                if let Some(restart) = ProxyState::update_inconsistency(Some(1), can_remove_tasks) {
                     tracing::error!("TasKManager Mutex Poisoned");
-                    ProxyState::update_inconsistency(Some(1));
+                    restart();
                 };
                 tracing::info!(
                     "Aborted all tasks for downstream connection ID {}",

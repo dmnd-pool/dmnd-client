@@ -99,7 +99,7 @@ pub struct ProxyState {
 }
 
 #[cfg(feature = "test-restart")]
-const UPDATE_POOL_STATE_TEST: usize = 10;
+const UPDATE_POOL_STATE_TEST: usize = 200;
 #[cfg(feature = "test-restart")]
 const UPDATE_TP_STATE_TEST: usize = 10;
 #[cfg(feature = "test-restart")]
@@ -109,7 +109,7 @@ const UPDATE_TRANSLATOR_STATE_TEST: usize = 10;
 #[cfg(feature = "test-restart")]
 const UPDATE_SHARE_ACCOUNTER_STATE_TEST: usize = 10;
 #[cfg(feature = "test-restart")]
-const UPDATE_INCONSISTENCY_STATE_TEST: usize = 10;
+const UPDATE_INCONSISTENCY_STATE_TEST: usize = 20;
 #[cfg(feature = "test-restart")]
 const UPDATE_DOWNSTREAM_STATE_TEST: usize = 10;
 #[cfg(feature = "test-restart")]
@@ -133,7 +133,7 @@ impl ProxyState {
         {
             use rand::Rng;
 
-            match caller {
+            let trigger_test = match caller {
                 "pool" => rand::thread_rng().gen_range(0..UPDATE_POOL_STATE_TEST) == 0,
                 "tp" => rand::thread_rng().gen_range(0..UPDATE_TP_STATE_TEST) == 0,
                 "jd" => rand::thread_rng().gen_range(0..UPDATE_JD_STATE_TEST) == 0,
@@ -147,7 +147,8 @@ impl ProxyState {
                 "downstream" => rand::thread_rng().gen_range(0..UPDATE_DOWNSTREAM_STATE_TEST) == 0,
                 "upstream" => rand::thread_rng().gen_range(0..UPDATE_UPSTREAM_STATE_TEST) == 0,
                 _ => panic!("Invalid caller: {}", caller),
-            }
+            };
+            trigger_test || _condition
         }
         #[cfg(not(feature = "test-restart"))]
         {
@@ -238,7 +239,7 @@ impl ProxyState {
         code: Option<u32>,
         should_restart: bool,
     ) -> Option<Box<dyn Fn() + Send + 'static>> {
-        if Self::test_restart("pool", should_restart) {
+        if Self::test_restart("inconsistency", should_restart) {
             Some(Box::new(move || {
                 info!("Updating Internal Inconsistency state to {:?}", code);
                 if PROXY_STATE
