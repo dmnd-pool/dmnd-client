@@ -303,72 +303,75 @@ impl JobDeclarator {
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
         let main_task = tokio::task::spawn(async move {
             loop {
-                let mut incoming: StdFrame = match receiver.recv().await {
-                    Some(msg) => msg.try_into().unwrap_or_else(|_| {
+                let msg = receiver.recv().await;
+                if let Some(restart) = ProxyState::update_pool_state(PoolState::Down, msg.is_none())
+                {
+                    error!("Failed to receive msg from Pool");
+                    restart();
+                    break;
+                } else {
+                    let incoming: Result<StdFrame, _> = msg.unwrap().try_into();
+                    if let Some(restart) =
+                        ProxyState::update_pool_state(PoolState::Down, incoming.is_err())
+                    {
                         error!("Invalid msg: Failed to convert msg to StdFrame");
-                        std::process::exit(1)
-                    }),
-                    None => {
-                        error!("Failed to receive msg from Pool");
-                        ProxyState::update_pool_state(PoolState::Down);
+                        restart();
                         break;
                     }
-                };
-                let message_type = match incoming.get_header() {
-                    Some(header) => header.msg_type(),
-                    None => {
-                        error!("Invalid msg: Failed to get msg header");
-                        std::process::exit(1)
-                    }
-                };
-                let payload = incoming.payload();
-                let next_message_to_send =
-                    ParseServerJobDeclarationMessages::handle_message_job_declaration(
-                        self_mutex.clone(),
-                        message_type,
-                        payload,
-                    );
-                match next_message_to_send {
-                    Ok(SendTo::None(Some(JobDeclaration::DeclareMiningJobSuccess(m)))) => {
-                        let new_token = m.new_mining_job_token;
-                        let last_declare =
-                            match Self::get_last_declare_job_sent(&self_mutex, m.request_id) {
-                                Ok(last_declare) => last_declare,
-                                Err(e) => {
+                    let mut incoming = incoming.unwrap();
+                    let message_type = incoming
+                        .get_header()
+                        .expect("get_header always return Some")
+                        .msg_type();
+                    let payload = incoming.payload();
+                    let next_message_to_send =
+                        ParseServerJobDeclarationMessages::handle_message_job_declaration(
+                            self_mutex.clone(),
+                            message_type,
+                            payload,
+                        );
+                    match next_message_to_send {
+                        Ok(SendTo::None(Some(JobDeclaration::DeclareMiningJobSuccess(m)))) => {
+                            let new_token = m.new_mining_job_token;
+                            let last_declare =
+                                match Self::get_last_declare_job_sent(&self_mutex, m.request_id) {
+                                    Ok(last_declare) => last_declare,
+                                    Err(e) => {
+                                        error!("{e}");
+                                        ProxyState::update_jd_state(JdState::Down);
+                                        break;
+                                    }
+                                };
+                            let mut last_declare_mining_job_sent = last_declare.declare_job;
+                            let is_future = last_declare.template.future_template;
+                            let id = last_declare.template.template_id;
+                            let merkle_path = last_declare.template.merkle_path.clone();
+                            let template = last_declare.template;
+
+                            // TODO where we should have a sort of signaling that is green after
+                            // that the token has been updated so that on_set_new_prev_hash know it
+                            // and can decide if send the set_custom_job or not
+                            if is_future {
+                                last_declare_mining_job_sent.mining_job_token = new_token;
+                                if let Err(e) = self_mutex.safe_lock(|s| {
+                                    s.future_jobs.insert(
+                                        id,
+                                        (
+                                            last_declare_mining_job_sent,
+                                            merkle_path,
+                                            template,
+                                            last_declare.coinbase_pool_output,
+                                        ),
+                                    );
+                                }) {
                                     error!("{e}");
                                     ProxyState::update_jd_state(JdState::Down);
                                     break;
-                                }
-                            };
-                        let mut last_declare_mining_job_sent = last_declare.declare_job;
-                        let is_future = last_declare.template.future_template;
-                        let id = last_declare.template.template_id;
-                        let merkle_path = last_declare.template.merkle_path.clone();
-                        let template = last_declare.template;
-
-                        // TODO where we should have a sort of signaling that is green after
-                        // that the token has been updated so that on_set_new_prev_hash know it
-                        // and can decide if send the set_custom_job or not
-                        if is_future {
-                            last_declare_mining_job_sent.mining_job_token = new_token;
-                            if let Err(e) = self_mutex.safe_lock(|s| {
-                                s.future_jobs.insert(
-                                    id,
-                                    (
-                                        last_declare_mining_job_sent,
-                                        merkle_path,
-                                        template,
-                                        last_declare.coinbase_pool_output,
-                                    ),
-                                );
-                            }) {
-                                error!("{e}");
-                                ProxyState::update_jd_state(JdState::Down);
-                                break;
-                            };
-                        } else {
-                            let set_new_prev_hash =
-                                match self_mutex.safe_lock(|s| s.last_set_new_prev_hash.clone()) {
+                                };
+                            } else {
+                                let set_new_prev_hash = match self_mutex
+                                    .safe_lock(|s| s.last_set_new_prev_hash.clone())
+                                {
                                     Ok(set_new_prev_hash) => set_new_prev_hash,
                                     Err(e) => {
                                         error!("{e}");
@@ -376,55 +379,56 @@ impl JobDeclarator {
                                         break;
                                     }
                                 };
-                            let mut template_outs = template.coinbase_tx_outputs.to_vec();
-                            let mut pool_outs = last_declare.coinbase_pool_output;
-                            pool_outs.append(&mut template_outs);
-                            match set_new_prev_hash {
-                                Some(p) => if let Err(e) =  Upstream::set_custom_jobs(
-                                    &up,
-                                    last_declare_mining_job_sent,
-                                    p,
-                                    merkle_path,
-                                    new_token,
-                                    template.coinbase_tx_version,
-                                    template.coinbase_prefix,
-                                    template.coinbase_tx_input_sequence,
-                                    template.coinbase_tx_value_remaining,
-                                    pool_outs,
-                                    template.coinbase_tx_locktime,
-                                    template.template_id
-                                    ).await {error!("Failed to set custom jobd: {e}"); ProxyState::update_jd_state(JdState::Down);break;},
-                                None => panic!("Invalid state we received a NewTemplate not future, without having received a set new prev hash")
+                                let mut template_outs = template.coinbase_tx_outputs.to_vec();
+                                let mut pool_outs = last_declare.coinbase_pool_output;
+                                pool_outs.append(&mut template_outs);
+                                match set_new_prev_hash {
+                                    Some(p) => if let Err(e) =  Upstream::set_custom_jobs(
+                                        &up,
+                                        last_declare_mining_job_sent,
+                                        p,
+                                        merkle_path,
+                                        new_token,
+                                        template.coinbase_tx_version,
+                                        template.coinbase_prefix,
+                                        template.coinbase_tx_input_sequence,
+                                        template.coinbase_tx_value_remaining,
+                                        pool_outs,
+                                        template.coinbase_tx_locktime,
+                                        template.template_id
+                                        ).await {error!("Failed to set custom jobd: {e}"); ProxyState::update_jd_state(JdState::Down);break;},
+                                    None => panic!("Invalid state we received a NewTemplate not future, without having received a set new prev hash")
+                                }
                             }
                         }
-                    }
-                    Ok(SendTo::None(Some(JobDeclaration::DeclareMiningJobError(m)))) => {
-                        error!("Job is not verified: {:?}", m);
-                    }
-                    Ok(SendTo::None(None)) => (),
-                    Ok(SendTo::Respond(m)) => {
-                        let sv2_frame: StdFrame = PoolMessages::JobDeclaration(m)
-                            .try_into()
-                            .expect("Infallable operatiion");
-                        let sender = match self_mutex.safe_lock(|self_| self_.sender.clone()) {
-                            Ok(sender) => sender,
-                            Err(e) => {
-                                error!("{e}");
+                        Ok(SendTo::None(Some(JobDeclaration::DeclareMiningJobError(m)))) => {
+                            error!("Job is not verified: {:?}", m);
+                        }
+                        Ok(SendTo::None(None)) => (),
+                        Ok(SendTo::Respond(m)) => {
+                            let sv2_frame: StdFrame = PoolMessages::JobDeclaration(m)
+                                .try_into()
+                                .expect("Infallable operatiion");
+                            let sender = match self_mutex.safe_lock(|self_| self_.sender.clone()) {
+                                Ok(sender) => sender,
+                                Err(e) => {
+                                    error!("{e}");
+                                    ProxyState::update_jd_state(JdState::Down);
+                                    break;
+                                }
+                            };
+                            if sender.send(sv2_frame.into()).await.is_err() {
+                                error!("Job declarator failed to send message");
                                 ProxyState::update_jd_state(JdState::Down);
                                 break;
-                            }
-                        };
-                        if sender.send(sv2_frame.into()).await.is_err() {
-                            error!("Job declarator failed to send message");
+                            };
+                        }
+                        Ok(_) => unreachable!(),
+                        Err(e) => {
+                            error!("{e}");
                             ProxyState::update_jd_state(JdState::Down);
                             break;
-                        };
-                    }
-                    Ok(_) => unreachable!(),
-                    Err(e) => {
-                        error!("{e}");
-                        ProxyState::update_jd_state(JdState::Down);
-                        break;
+                        }
                     }
                 }
             }

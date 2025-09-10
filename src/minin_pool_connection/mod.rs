@@ -114,11 +114,14 @@ pub fn relay_up(
             let std_frame: Result<StdFrame, _> = msg.try_into();
             if let Ok(std_frame) = std_frame {
                 let either_frame: EitherFrame = std_frame.into();
-                if send.send(either_frame).await.is_err() {
+                if let Some(restart) = ProxyState::update_pool_state(
+                    PoolState::Down,
+                    send.send(either_frame).await.is_err(),
+                ) {
                     error!("Mining upstream failed");
-                    ProxyState::update_pool_state(PoolState::Down);
+                    restart();
                     break;
-                };
+                }
             } else {
                 panic!("Internal Mining downstream try to send invalid message");
             }
@@ -132,38 +135,54 @@ pub fn relay_down(
     send: Sender<PoolExtMessages<'static>>,
 ) -> AbortOnDrop {
     let task = tokio::spawn(async move {
-        while let Some(msg) = recv.recv().await {
-            let msg: Result<StdFrame, ()> = msg.try_into().map_err(|_| ());
-            if let Ok(mut msg) = msg {
-                if let Some(header) = msg.get_header() {
-                    let message_type = header.msg_type();
-                    let payload = msg.payload();
-                    let extension = header.ext_type();
-                    let msg: Result<PoolExtMessages<'_>, _> =
-                        (extension, message_type, payload).try_into();
-                    if let Ok(msg) = msg {
-                        let msg = msg.into_static();
-                        if send.send(msg).await.is_err() {
-                            error!("Internal Mining downstream not available");
-
-                            // Update Proxy state to reflect Internal inconsistency
-                            ProxyState::update_inconsistency(Some(1));
-                        }
-                    } else {
-                        error!("Mining Upstream send non Mining message. Disconnecting");
-                        break;
-                    }
-                } else {
-                    error!("Mining Upstream send invalid message no header. Disconnecting");
-                    break;
-                }
+        //let restart = while let Some(msg) = recv.recv().await {
+        let restart = loop {
+            let msg = recv.recv().await;
+            if let Some(restart) = ProxyState::update_pool_state(PoolState::Down, msg.is_none()) {
+                error!("Failed to receive msg from Pool");
+                break restart;
             } else {
-                error!("Mining Upstream down.");
-                break;
+                let msg = msg.unwrap();
+                let msg: Result<StdFrame, ()> = msg.try_into().map_err(|_| ());
+                if let Some(restart) = ProxyState::update_pool_state(PoolState::Down, msg.is_err())
+                {
+                    error!("Mining Upstream down.");
+                    break restart;
+                } else {
+                    let mut msg = msg.unwrap();
+                    if let Some(restart) =
+                        ProxyState::update_pool_state(PoolState::Down, msg.get_header().is_none())
+                    {
+                        error!("Mining Upstream send invalid message no header. Disconnecting");
+                        break restart;
+                    } else {
+                        let header = msg.get_header().unwrap();
+                        let message_type = header.msg_type();
+                        let payload = msg.payload();
+                        let extension = header.ext_type();
+                        let msg: Result<PoolExtMessages<'_>, _> =
+                            (extension, message_type, payload).try_into();
+                        if let Some(restart) =
+                            ProxyState::update_pool_state(PoolState::Down, msg.is_err())
+                        {
+                            error!("Mining Upstream send non Mining message. Disconnecting");
+                            break restart;
+                        } else {
+                            let msg = msg.unwrap().into_static();
+                            if let Some(restart) = ProxyState::update_inconsistency(
+                                Some(1),
+                                send.send(msg).await.is_err(),
+                            ) {
+                                error!("Internal Mining downstream not available");
+                                break restart;
+                            };
+                        }
+                    }
+                }
             }
-        }
-        error!("Failed to receive msg from Pool");
-        ProxyState::update_pool_state(PoolState::Down);
+        };
+        restart();
+        //ProxyState::update_pool_state(PoolState::Down);
     });
     task.into()
 }

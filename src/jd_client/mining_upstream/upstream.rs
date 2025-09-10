@@ -589,14 +589,15 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
                         let still_mismatch = current_jd_prev_hash
                             .map(|tp| tp.prev_hash != pool_prev_hash)
                             .unwrap_or(true); // Mismatch if current_jd_prev_hash is still None
-
-                        if still_mismatch {
+                        if let Some(restart) =
+                            ProxyState::update_inconsistency(Some(1), still_mismatch)
+                        {
                             error!("Stopping job declaration due to persistent prev_hash mismatch");
                             // Set TP_ADDRESS to None and restart proxy to switch to non-jd mode
                             if crate::TP_ADDRESS.safe_lock(|tp| *tp = None).is_err() {
                                 error!("TP_ADDRESS mutex corrupt");
                             };
-                            ProxyState::update_inconsistency(Some(1));
+                            restart();
                         }
                     });
                 }

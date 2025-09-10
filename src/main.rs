@@ -92,10 +92,15 @@ async fn main() {
 
     //`self_update` performs synchronous I/O so spawn_blocking is needed
     if Configuration::auto_update() {
-        if let Err(e) = tokio::task::spawn_blocking(check_update_proxy).await {
-            error!("An error occured while trying to update Proxy; {:?}", e);
-            ProxyState::update_inconsistency(Some(1));
-        };
+        let can_check_update = tokio::task::spawn_blocking(check_update_proxy).await;
+        if let Some(restart) = ProxyState::update_inconsistency(Some(1), can_check_update.is_err())
+        {
+            error!(
+                "An error occured while trying to update Proxy; {:?}",
+                can_check_update
+            );
+            restart();
+        }
     }
 
     if Configuration::staging() {

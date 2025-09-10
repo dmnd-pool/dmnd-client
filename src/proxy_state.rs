@@ -98,6 +98,23 @@ pub struct ProxyState {
     pub upstream: UpstreamState,
 }
 
+#[cfg(feature = "test-restart")]
+const UPDATE_POOL_STATE_TEST: usize = 10;
+#[cfg(feature = "test-restart")]
+const UPDATE_TP_STATE_TEST: usize = 10;
+#[cfg(feature = "test-restart")]
+const UPDATE_JD_STATE_TEST: usize = 10;
+#[cfg(feature = "test-restart")]
+const UPDATE_TRANSLATOR_STATE_TEST: usize = 10;
+#[cfg(feature = "test-restart")]
+const UPDATE_SHARE_ACCOUNTER_STATE_TEST: usize = 10;
+#[cfg(feature = "test-restart")]
+const UPDATE_INCONSISTENCY_STATE_TEST: usize = 10;
+#[cfg(feature = "test-restart")]
+const UPDATE_DOWNSTREAM_STATE_TEST: usize = 10;
+#[cfg(feature = "test-restart")]
+const UPDATE_UPSTREAM_STATE_TEST: usize = 10;
+
 impl ProxyState {
     pub fn new() -> Self {
         Self {
@@ -111,18 +128,54 @@ impl ProxyState {
             upstream: UpstreamState::Up,
         }
     }
-
-    pub fn update_pool_state(pool_state: PoolState) {
-        info!("Updating PoolState state to {:?}", pool_state);
-        if PROXY_STATE
-            .safe_lock(|state| {
-                state.pool = pool_state;
-                // // state.update_proxy_state();
-            })
-            .is_err()
+    fn test_restart(caller: &str, _condition: bool) -> bool {
+        #[cfg(feature = "test-restart")]
         {
-            error!("Global Proxy Mutex Corrupted");
-            std::process::exit(1);
+            use rand::Rng;
+
+            match caller {
+                "pool" => rand::thread_rng().gen_range(0..UPDATE_POOL_STATE_TEST) == 0,
+                "tp" => rand::thread_rng().gen_range(0..UPDATE_TP_STATE_TEST) == 0,
+                "jd" => rand::thread_rng().gen_range(0..UPDATE_JD_STATE_TEST) == 0,
+                "translator" => rand::thread_rng().gen_range(0..UPDATE_TRANSLATOR_STATE_TEST) == 0,
+                "share_accounter" => {
+                    rand::thread_rng().gen_range(0..UPDATE_SHARE_ACCOUNTER_STATE_TEST) == 0
+                }
+                "inconsistency" => {
+                    rand::thread_rng().gen_range(0..UPDATE_INCONSISTENCY_STATE_TEST) == 0
+                }
+                "downstream" => rand::thread_rng().gen_range(0..UPDATE_DOWNSTREAM_STATE_TEST) == 0,
+                "upstream" => rand::thread_rng().gen_range(0..UPDATE_UPSTREAM_STATE_TEST) == 0,
+                _ => panic!("Invalid caller: {}", caller),
+            }
+        }
+        #[cfg(not(feature = "test-restart"))]
+        {
+            _condition
+        }
+    }
+
+    pub fn update_pool_state(
+        pool_state: PoolState,
+        should_restart: bool,
+    ) -> Option<Box<dyn Fn() + Send + 'static>> {
+        let pool_state = pool_state.clone();
+        if Self::test_restart("pool", should_restart) {
+            Some(Box::new(move || {
+                info!("Updating PoolState state to {:?}", pool_state);
+                if PROXY_STATE
+                    .safe_lock(|state| {
+                        state.pool = pool_state;
+                        // // state.update_proxy_state();
+                    })
+                    .is_err()
+                {
+                    error!("Global Proxy Mutex Corrupted");
+                    std::process::exit(1);
+                }
+            }))
+        } else {
+            None
         }
     }
 
@@ -181,16 +234,25 @@ impl ProxyState {
         }
     }
 
-    pub fn update_inconsistency(code: Option<u32>) {
-        info!("Updating Internal Inconsistency state to {:?}", code);
-        if PROXY_STATE
-            .safe_lock(|state| {
-                state.inconsistency = code;
-            })
-            .is_err()
-        {
-            error!("Global Proxy Mutex Corrupted");
-            std::process::exit(1);
+    pub fn update_inconsistency(
+        code: Option<u32>,
+        should_restart: bool,
+    ) -> Option<Box<dyn Fn() + Send + 'static>> {
+        if Self::test_restart("pool", should_restart) {
+            Some(Box::new(move || {
+                info!("Updating Internal Inconsistency state to {:?}", code);
+                if PROXY_STATE
+                    .safe_lock(|state| {
+                        state.inconsistency = code;
+                    })
+                    .is_err()
+                {
+                    error!("Global Proxy Mutex Corrupted");
+                    std::process::exit(1);
+                }
+            }))
+        } else {
+            None
         }
     }
 

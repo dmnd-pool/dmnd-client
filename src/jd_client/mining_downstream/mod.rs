@@ -627,11 +627,12 @@ impl
                                 // fastly
                                 tokio::task::spawn(async move {
                                     if let Some(jd) = jd {
-                                        if let Err(e) = JobDeclarator::on_solution(&jd, share).await
+                                        let sent = JobDeclarator::on_solution(&jd, share).await;
+                                        if let Some(restart) =
+                                            ProxyState::update_inconsistency(Some(1), sent.is_err())
                                         {
-                                            error!("Jd Error on solution: {e:?}");
-                                            // Set the proxy state to internal inconsistency
-                                            ProxyState::update_inconsistency(Some(1));
+                                            error!("Jd Error on solution: {sent:?}");
+                                            restart();
                                         }
                                     }
                                 });

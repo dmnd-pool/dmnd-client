@@ -109,141 +109,150 @@ async fn initialize_jd(
     let port_tp = parts.next().expect("The passed value for TP address is not valid. Terminating.... TP_ADDRESS should be in this format `127.0.0.1:8442`").parse::<u16>().expect("This operation should not fail because a valid port_tp should always be converted to U16");
 
     let auth_pub_k: Secp256k1PublicKey = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
-    let address = match crate::POOL_ADDRESS.safe_lock(|address| *address) {
-        Ok(Some(address)) => address,
-        Ok(None) => {
+    let address = crate::POOL_ADDRESS.safe_lock(|address| *address);
+    if let Some(restart) = ProxyState::update_inconsistency(Some(1), address.is_err()) {
+        error!("Pool address mutex is poisoned: {address:?}");
+        restart();
+        None
+    } else {
+        let address = address.unwrap();
+        if let Some(restart) = ProxyState::update_inconsistency(Some(1), address.is_none()) {
             error!("Pool address is missing");
-            ProxyState::update_inconsistency(Some(1));
+            restart();
             return None;
-        }
-        Err(e) => {
-            error!("Pool address mutex is poisoned: {e:?}");
-            ProxyState::update_inconsistency(Some(1));
-            return None;
-        }
-    };
+        } else {
+            let address = address.unwrap();
+            let (jd, jd_abortable) =
+                match JobDeclarator::new(address, auth_pub_k.into_bytes(), upstream.clone(), true)
+                    .await
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        error!("Failed to intialize Jd: {e}");
+                        drop(abortable);
+                        return None;
+                    }
+                };
 
-    let (jd, jd_abortable) =
-        match JobDeclarator::new(address, auth_pub_k.into_bytes(), upstream.clone(), true).await {
-            Ok(c) => c,
-            Err(e) => {
-                error!("Failed to intialize Jd: {e}");
+            if TaskManager::add_job_declarator_task(task_manager.clone(), jd_abortable)
+                .await
+                .is_err()
+            {
+                error!(
+                    "Task manager failed while trying to add job declarator task{}",
+                    error::Error::TaskManagerFailed
+                );
                 drop(abortable);
                 return None;
-            }
-        };
+            };
 
-    if TaskManager::add_job_declarator_task(task_manager.clone(), jd_abortable)
-        .await
-        .is_err()
-    {
-        error!(
-            "Task manager failed while trying to add job declarator task{}",
-            error::Error::TaskManagerFailed
-        );
-        drop(abortable);
-        return None;
-    };
-
-    let donwstream = Arc::new(Mutex::new(DownstreamMiningNode::new(
-        sender,
-        Some(upstream.clone()),
-        send_solution,
-        false,
-        vec![],
-        Some(jd.clone()),
-    )));
-    let downstream_abortable = match DownstreamMiningNode::start(donwstream.clone(), receiver).await
-    {
-        Ok(abortable) => abortable,
-        Err(e) => {
-            error!("Can not start downstream mining node: {e}");
-            ProxyState::update_downstream_state(DownstreamType::JdClientMiningDownstream);
-            return None;
-        }
-    };
-    if TaskManager::add_mining_downtream_task(task_manager.clone(), downstream_abortable)
-        .await
-        .is_err()
-    {
-        error!(
-            "Task manager failed while trying to add mining downstream task{}",
-            error::Error::TaskManagerFailed
-        );
-        drop(abortable);
-        return None;
-    };
-    if upstream
-        .safe_lock(|u| u.downstream = Some(donwstream.clone()))
-        .is_err()
-    {
-        error!("Upstream mutex failed");
-        drop(abortable); // drop all tasks initailzed upto this point
-        return None;
-    };
-
-    // Start receiving messages from the SV2 Upstream role
-    let upstream_abortable =
-        match mining_upstream::Upstream::parse_incoming(upstream.clone(), up_receiver).await {
-            Ok(abortable) => abortable,
-            Err(e) => {
-                error!("Failed to get jdc upstream abortable: {e}");
-                drop(abortable); // drop all tasks initailzed upto this point
-                return None;
-            }
-        };
-    if TaskManager::add_mining_upstream_task(task_manager.clone(), upstream_abortable)
-        .await
-        .is_err()
-    {
-        error!(
-            "Task manager failed while trying to add mining upstream task{}",
-            error::Error::TaskManagerFailed
-        );
-        drop(abortable); // drop all tasks initailzed upto this point
-        return None;
-    };
-    let ip = IpAddr::from_str(ip_tp.as_str())
-        .expect("Infallable Operation: Failed tp can always be converted into IpAddr");
-    let tp_abortable = match TemplateRx::connect(
-        SocketAddr::new(ip, port_tp),
-        recv_solution,
-        Some(jd.clone()),
-        donwstream.clone(),
-        vec![],
-        None,
-        test_only_do_not_send_solution_to_tp,
-    )
-    .await
-    {
-        Ok(abortable) => abortable,
-        Err(_) => {
-            info!("Dropping jd abortable");
-            eprintln!("TP is unreachable, the proxy is in not in JD mode");
-            drop(abortable);
-            // Temporaily set TP_ADDRESS to None so that proxy can restart without it.
-            // that means we will start mining without jd
-            if crate::TP_ADDRESS.safe_lock(|tp| *tp = None).is_err() {
-                error!("TP_ADDRESS mutex corrupt");
+            let donwstream = Arc::new(Mutex::new(DownstreamMiningNode::new(
+                sender,
+                Some(upstream.clone()),
+                send_solution,
+                false,
+                vec![],
+                Some(jd.clone()),
+            )));
+            let downstream_abortable =
+                match DownstreamMiningNode::start(donwstream.clone(), receiver).await {
+                    Ok(abortable) => abortable,
+                    Err(e) => {
+                        error!("Can not start downstream mining node: {e}");
+                        ProxyState::update_downstream_state(
+                            DownstreamType::JdClientMiningDownstream,
+                        );
+                        return None;
+                    }
+                };
+            if TaskManager::add_mining_downtream_task(task_manager.clone(), downstream_abortable)
+                .await
+                .is_err()
+            {
+                error!(
+                    "Task manager failed while trying to add mining downstream task{}",
+                    error::Error::TaskManagerFailed
+                );
+                drop(abortable);
                 return None;
             };
-            tokio::spawn(retry_connection(tp_address));
-            return None;
-        }
-    };
+            if upstream
+                .safe_lock(|u| u.downstream = Some(donwstream.clone()))
+                .is_err()
+            {
+                error!("Upstream mutex failed");
+                drop(abortable); // drop all tasks initailzed upto this point
+                return None;
+            };
 
-    if TaskManager::add_template_receiver_task(task_manager, tp_abortable)
-        .await
-        .is_err()
-    {
-        error!(
-            "Task manager failed while trying to add template receiver task{}",
-            error::Error::TaskManagerFailed
-        );
-        drop(abortable);
-        return None;
-    };
-    Some(abortable)
+            // Start receiving messages from the SV2 Upstream role
+            let upstream_abortable = match mining_upstream::Upstream::parse_incoming(
+                upstream.clone(),
+                up_receiver,
+            )
+            .await
+            {
+                Ok(abortable) => abortable,
+                Err(e) => {
+                    error!("Failed to get jdc upstream abortable: {e}");
+                    drop(abortable); // drop all tasks initailzed upto this point
+                    return None;
+                }
+            };
+            if TaskManager::add_mining_upstream_task(task_manager.clone(), upstream_abortable)
+                .await
+                .is_err()
+            {
+                error!(
+                    "Task manager failed while trying to add mining upstream task{}",
+                    error::Error::TaskManagerFailed
+                );
+                drop(abortable); // drop all tasks initailzed upto this point
+                return None;
+            };
+            let ip = IpAddr::from_str(ip_tp.as_str())
+                .expect("Infallable Operation: Failed tp can always be converted into IpAddr");
+            let tp_abortable = match TemplateRx::connect(
+                SocketAddr::new(ip, port_tp),
+                recv_solution,
+                Some(jd.clone()),
+                donwstream.clone(),
+                vec![],
+                None,
+                test_only_do_not_send_solution_to_tp,
+            )
+            .await
+            {
+                Ok(abortable) => abortable,
+                Err(_) => {
+                    info!("Dropping jd abortable");
+                    eprintln!("TP is unreachable, the proxy is in not in JD mode");
+                    drop(abortable);
+                    // Temporaily set TP_ADDRESS to None so that proxy can restart without it.
+                    // that means we will start mining without jd
+                    if crate::TP_ADDRESS.safe_lock(|tp| *tp = None).is_err() {
+                        error!("TP_ADDRESS mutex corrupt");
+                        return None;
+                    };
+                    tokio::spawn(retry_connection(tp_address));
+                    return None;
+                }
+            };
+
+            if TaskManager::add_template_receiver_task(task_manager, tp_abortable)
+                .await
+                .is_err()
+            {
+                error!(
+                    "Task manager failed while trying to add template receiver task{}",
+                    error::Error::TaskManagerFailed
+                );
+                drop(abortable);
+                return None;
+            };
+            Some(abortable)
+        }
+    }
 }
 
 // Used when tp is down or connection was unsuccessful to retry connection.

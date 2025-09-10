@@ -168,14 +168,16 @@ impl Router {
         .await
         {
             Ok((send_to_pool, recv_from_pool, pool_connection_abortable)) => {
-                crate::POOL_ADDRESS
-                    .safe_lock(|pool_address| {
-                        *pool_address = Some(pool);
-                    })
-                    .unwrap_or_else(|_| {
-                        error!("Pool address Mutex corrupt");
-                        crate::proxy_state::ProxyState::update_inconsistency(Some(1));
-                    });
+                let update_pool_address = crate::POOL_ADDRESS.safe_lock(|pool_address| {
+                    *pool_address = Some(pool);
+                });
+                if let Some(restart) = crate::proxy_state::ProxyState::update_inconsistency(
+                    Some(1),
+                    update_pool_address.is_err(),
+                ) {
+                    error!("Pool address Mutex corrupt");
+                    restart();
+                }
                 info!(
                     "Completed Handshake And SetupConnection with Pool at {:?}",
                     pool

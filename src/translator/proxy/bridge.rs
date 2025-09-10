@@ -302,7 +302,15 @@ impl Bridge {
                 );
             }
             Ok(OnNewShare::SendSubmitShareUpstream((s, _))) => {
-                if let Ok(is_rate_limited) = allow_submit_share() {
+                let allow_submit_share = allow_submit_share();
+                if let Some(restart) =
+                    ProxyState::update_inconsistency(Some(1), allow_submit_share.is_err())
+                {
+                    error!("Failed to record share: Bridge mutex poisoned");
+                    restart();
+                    return Err(Error::BridgeMutexPoisoned);
+                } else {
+                    let is_rate_limited = allow_submit_share.unwrap();
                     if !is_rate_limited {
                         warn!("Share will not be sent upstream: Exceeded 70 shares/min limit");
                         return Ok(());
@@ -321,10 +329,6 @@ impl Bridge {
                         // We are in an extended channel shares are extended
                         Share::Standard(_) => unreachable!(),
                     }
-                } else {
-                    error!("Failed to record share: Bridge mutex poisoned");
-                    ProxyState::update_inconsistency(Some(1));
-                    return Err(Error::BridgeMutexPoisoned);
                 }
             }
             // We are in an extended channel this variant is group channle only
