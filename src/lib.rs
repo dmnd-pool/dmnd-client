@@ -1,6 +1,7 @@
 #[cfg(not(target_os = "windows"))]
 use jemallocator::Jemalloc;
 use router::Router;
+use tokio::sync::watch;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 #[cfg(not(target_os = "windows"))]
 #[global_allocator]
@@ -28,6 +29,7 @@ mod proxy_state;
 mod router;
 mod share_accounter;
 mod shared;
+mod shutdown;
 mod translator;
 
 const TRANSLATOR_BUFFER_SIZE: usize = 32;
@@ -158,7 +160,7 @@ pub async fn start() {
     )
     .await;
     info!("exiting");
-    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 }
 
 async fn initialize_proxy(
@@ -167,7 +169,11 @@ async fn initialize_proxy(
     epsilon: Duration,
     signature: String,
 ) {
+    let shutdown_signal = shutdown::handle_shutdown();
     loop {
+        if *shutdown_signal.clone().borrow() {
+            break;
+        }
         let stats_sender = api::stats::StatsSender::new();
         let (send_to_pool, recv_from_pool, pool_connection_abortable) =
             match router.connect_pool(pool_addr).await {
@@ -279,7 +285,7 @@ async fn initialize_proxy(
         }
         let server_handle = tokio::spawn(api::start(router.clone(), stats_sender));
         abort_handles.push((server_handle.into(), "api_server".to_string()));
-        match monitor(router, abort_handles, epsilon).await {
+        match monitor(router, abort_handles, epsilon, shutdown_signal.clone()).await {
             Reconnect::NewUpstream(new_pool_addr) => {
                 ProxyState::update_proxy_state_up();
                 pool_addr = Some(new_pool_addr);
@@ -298,9 +304,15 @@ async fn monitor(
     router: &mut Router,
     abort_handles: Vec<(AbortOnDrop, std::string::String)>,
     epsilon: Duration,
+    shutdown_signal: watch::Receiver<bool>,
 ) -> Reconnect {
     let mut should_check_upstreams_latency = 0;
     loop {
+        if *shutdown_signal.borrow() {
+            info!("Shut down signal received. Dropping all tasks..");
+            drop(abort_handles);
+            return Reconnect::NoUpstream;
+        }
         if Configuration::monitor() {
             // Check if a better upstream exist every 100 seconds
             if should_check_upstreams_latency == 10 * 100 {
