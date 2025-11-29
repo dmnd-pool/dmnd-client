@@ -3,6 +3,8 @@ use serde::Serialize;
 use std::sync::Arc;
 use tracing::error;
 
+use super::server_health_endpoint;
+
 /// A custom tracing Layer that sends error logs to the server.
 ///
 /// This helps centralize error reporting by automatically forwarding error logs
@@ -13,13 +15,34 @@ pub struct SendLogLayer {
 }
 
 impl SendLogLayer {
-    pub fn new() -> Self {
+    pub async fn new() -> Result<Self, ()> {
         let server_url = proxy_log_server_endpoint();
-        let api = Arc::new(MonitorAPI::new(server_url));
-        SendLogLayer {
+        // check /health endpoint to verify server is reachable
+        {
+            let health_endpoint = server_health_endpoint();
+            let response = reqwest::get(&health_endpoint).await;
+            if let Err(e) = response {
+                error!(
+                    "Monitor server health check failed at {}: {:?}",
+                    health_endpoint, e
+                );
+                return Err(());
+            } else if let Ok(resp) = response {
+                if !resp.status().is_success() {
+                    error!(
+                        "Monitor server health check returned non-success status at {}: {}",
+                        health_endpoint,
+                        resp.status()
+                    );
+                    return Err(());
+                }
+            }
+        }
+        let api = Arc::new(MonitorAPI::new(server_url).await.expect("Unreachable because of the health check"));
+        Ok(SendLogLayer {
             api,
             content: String::new(),
-        }
+        })
     }
 }
 

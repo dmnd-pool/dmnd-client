@@ -17,6 +17,16 @@ pub struct MonitorAPI {
     pub client: reqwest::Client,
 }
 
+fn server_health_endpoint() -> String {
+    match Configuration::environment().as_str() {
+        "staging" => format!("{}/health", STAGING_URL),
+        "testnet3" => format!("{}/health", TESTNET3_URL),
+        "local" => format!("{}/health", LOCAL_URL),
+        "production" => format!("{}/health", PRODUCTION_URL),
+        _ => unreachable!(),
+    }
+}
+
 fn proxy_log_server_endpoint() -> String {
     match Configuration::environment().as_str() {
         "staging" => format!("{}/api/proxy/logs", STAGING_URL),
@@ -49,12 +59,32 @@ fn worker_activity_server_endpoint() -> String {
 }
 
 impl MonitorAPI {
-    pub fn new(url: String) -> Self {
+    pub async fn new(url: String) -> Result<Self, ()> {
         let client = reqwest::Client::new();
-        MonitorAPI {
+        {
+            let health_endpoint = server_health_endpoint();
+            let response = reqwest::get(&health_endpoint).await;
+            if let Err(e) = response {
+                error!(
+                    "Monitor server health check failed at {}: {:?}",
+                    health_endpoint, e
+                );
+                return Err(());
+            } else if let Ok(resp) = response {
+                if !resp.status().is_success() {
+                    error!(
+                        "Monitor server health check returned non-success status at {}: {}",
+                        health_endpoint,
+                        resp.status()
+                    );
+                    return Err(());
+                }
+            }
+        }
+        Ok(MonitorAPI {
             url: url.parse().expect("Invalid URL"),
             client,
-        }
+        })
     }
 
     /// Sends a batch of shares to the monitoring server.

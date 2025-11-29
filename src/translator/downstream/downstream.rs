@@ -259,7 +259,7 @@ impl Downstream {
         // Create an abortable task for the shares monitor
         let abortable = tokio::spawn(async move {
             info!("Starting shares monitor for downstream: {}", connection_id);
-            share_monitor.clone().monitor().await;
+            share_monitor.clone().monitor().await
         });
 
         // Register the task with the task manager so it can be aborted when needed
@@ -466,13 +466,23 @@ impl IsServer<'static> for Downstream {
             );
 
             tokio::spawn(async move {
-                if let Err(e) = worker_activity
-                    .monitor_api()
-                    .send_worker_activity(worker_activity)
-                    .await
-                {
-                    error!("Failed to send worker activity: {}", e);
-                }
+                match worker_activity.monitor_api().await {
+                    Ok(api) => {
+                        if let Err(e) = api.send_worker_activity(worker_activity).await {
+                            warn!(
+                                "Failed to send worker activity {:?} to monitor: {:?}",
+                                WorkerActivityType::Connected,
+                                e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to get monitor API for worker activity logging: {:?}",
+                            e
+                        );
+                    }
+                };
             });
 
             true

@@ -84,8 +84,14 @@ impl SharesMonitor {
             });
     }
 
-    pub async fn monitor(&self) {
-        let api = MonitorAPI::new(shares_server_endpoint());
+    pub async fn monitor(&self) -> Result<(), ()> {
+        let api = match MonitorAPI::new(shares_server_endpoint()).await {
+            Ok(api) => api,
+            Err(_) => {
+                error!("Shares monitor server is unreachable");
+                return Err(());
+            }
+        };
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         // First tick completes immediately
         interval.tick().await;

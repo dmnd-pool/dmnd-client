@@ -22,7 +22,7 @@ impl WorkerActivity {
         }
     }
 
-    pub fn monitor_api(&self) -> MonitorAPI {
-        MonitorAPI::new(worker_activity_server_endpoint())
+    pub async fn monitor_api(&self) -> Result<MonitorAPI, ()> {
+        MonitorAPI::new(worker_activity_server_endpoint()).await
     }
 }

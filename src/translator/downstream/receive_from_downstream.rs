@@ -79,14 +79,20 @@ pub async fn start_receive_downstream(
             let worker_activity =
                 WorkerActivity::new(user_agent, worker_name, WorkerActivityType::Disconnected);
 
-            worker_activity
-                .monitor_api()
-                .send_worker_activity(worker_activity)
-                .await
-                .unwrap_or_else(|e| {
-                    error!("Failed to send worker activity: {}", e);
-                });
-
+            match worker_activity.monitor_api().await {
+                Ok(api) => {
+                    if let Err(e) = api.send_worker_activity(worker_activity).await {
+                        warn!(
+                            "Failed to send worker activity {:?} to monitor: {:?}",
+                            WorkerActivityType::Disconnected,
+                            e
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to get monitor API for worker activity logging: {:?}", e);
+                }
+            };
             // Apparently there is no way to make the compiler happy without unwrapping here. But
             // is not an issue since:
             // 1. the mutex should never get poisioned and if it does will be very very rare
