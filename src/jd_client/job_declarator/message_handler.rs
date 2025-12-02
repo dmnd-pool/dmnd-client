@@ -9,7 +9,7 @@ use roles_logic_sv2::{
 };
 pub type SendTo = SendTo_<JobDeclaration<'static>, ()>;
 use roles_logic_sv2::errors::Error;
-use tracing::debug;
+use tracing::{debug, error};
 
 impl ParseServerJobDeclarationMessages for JobDeclarator {
     fn handle_allocate_mining_job_token_success(
@@ -53,10 +53,21 @@ impl ParseServerJobDeclarationMessages for JobDeclarator {
             .into_inner();
 
         let unknown_tx_position_list: Vec<u16> = message.unknown_tx_position_list.into_inner();
-        let missing_transactions: Vec<binary_sv2::B016M> = unknown_tx_position_list
-            .iter()
-            .filter_map(|&pos| tx_list.get(pos as usize).cloned())
-            .collect();
+        let mut missing_transactions: Vec<binary_sv2::B016M> =
+            Vec::with_capacity(unknown_tx_position_list.len());
+
+        for pos in &unknown_tx_position_list {
+            let Some(tx) = tx_list.get(*pos as usize) else {
+                error!(
+                    request_id,
+                    missing_tx_position = *pos,
+                    cached_transactions = tx_list.len(),
+                    "Requested missing transaction outside cached range"
+                );
+                return Err(Error::JDSMissingTransactions);
+            };
+            missing_transactions.push(tx.clone());
+        }
 
         debug!(
             request_id,
