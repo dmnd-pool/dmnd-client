@@ -9,6 +9,7 @@ use roles_logic_sv2::{
 };
 pub type SendTo = SendTo_<JobDeclaration<'static>, ()>;
 use roles_logic_sv2::errors::Error;
+use tracing::debug;
 
 impl ParseServerJobDeclarationMessages for JobDeclarator {
     fn handle_allocate_mining_job_token_success(
@@ -41,10 +42,11 @@ impl ParseServerJobDeclarationMessages for JobDeclarator {
         &mut self,
         message: ProvideMissingTransactions,
     ) -> Result<SendTo, Error> {
+        let request_id = message.request_id;
         let tx_list = self
             .last_declare_mining_jobs_sent
-            .get(&message.request_id)
-            .ok_or(Error::UnknownRequestId(message.request_id))?
+            .get(&request_id)
+            .ok_or(Error::UnknownRequestId(request_id))?
             .clone()
             .ok_or(Error::JDSMissingTransactions)?
             .tx_list
@@ -55,7 +57,13 @@ impl ParseServerJobDeclarationMessages for JobDeclarator {
             .iter()
             .filter_map(|&pos| tx_list.get(pos as usize).cloned())
             .collect();
-        let request_id = message.request_id;
+
+        debug!(
+            request_id,
+            requested_txs = unknown_tx_position_list.len(),
+            "Sending ProvideMissingTransactionsSuccess"
+        );
+
         let transaction_list = binary_sv2::Seq064K::new(missing_transactions)
             .map_err(|_| Error::JDSMissingTransactions)?;
         let message_provide_missing_transactions = ProvideMissingTransactionsSuccess {
