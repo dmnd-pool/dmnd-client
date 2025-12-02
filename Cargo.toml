@@ -45,7 +45,7 @@ reqwest ={ version = "0.12.20"}
 #codec_sv2 = {features = ["noise_sv2","with_buffer_pool"], path = "../stratum/protocols/v2/codec-sv2" }
 #sv1_api = {path = "../stratum/protocols/v1" }
 
-demand-share-accounting-ext = { git = "https://github.com/demand-open-source/share-accounting-ext"}
+demand-share-accounting-ext = { git = "https://github.com/theivess/share-accounting-ext", branch = "verification"}
 demand-sv2-connection = {git = "https://github.com/demand-open-source/demand-sv2-connection"}
 roles_logic_sv2 = { git = "https://github.com/demand-open-source/stratum", subdirectory = "protocols/v2/roles-logic-sv2"}
 framing_sv2 = { git = "https://github.com/demand-open-source/stratum", subdirectory = "protocols/v2/framing_sv2" }

@@ -413,9 +413,9 @@ fn parse_address(addr: String) -> Option<SocketAddr> {
 /// Fetches pool URLs from the server based on the environment.
 async fn fetch_pool_urls() -> Result<Vec<SocketAddr>, Error> {
     if CONFIG.local {
-        info!("Running in local mode, using hardcoded address 127.0.0.1:20000");
+        info!("Running in local mode, using hardcoded address 127.0.0.1:18442");
         return Ok(vec![
-            parse_address("127.0.0.1:20000".to_string()).expect("Invalid local address")
+            parse_address("127.0.0.1:18442".to_string()).expect("Invalid local address")
         ]);
     };
     let url = if CONFIG.staging {

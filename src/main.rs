@@ -1,3 +1,4 @@
+use demand_share_accounting_ext::parser::PoolExtMessages;
 #[cfg(not(target_os = "windows"))]
 use jemallocator::Jemalloc;
 use router::Router;
@@ -79,7 +80,6 @@ async fn main() {
     let log_level = Configuration::loglevel();
     let noise_connection_log_level = Configuration::nc_loglevel();
 
-    let remote_layer = SendLogLayer::new();
     let console_layer =
         tracing_subscriber::fmt::layer().with_filter(tracing_subscriber::EnvFilter::new(format!(
             "{},demand_sv2_connection::noise_connection_tokio={}",
@@ -88,10 +88,7 @@ async fn main() {
     //Disable noise_connection error (for now) because:
     // 1. It produce logs that are not very user friendly and also bloat the logs
     // 2. The errors resulting from noise_connection are handled. E.g if unrecoverable error from noise connection occurs during Pool connection: We either retry connecting immediatley or we update Proxy state to Pool Down
-    tracing_subscriber::registry()
-        .with(console_layer)
-        .with(remote_layer)
-        .init();
+    tracing_subscriber::registry().with(console_layer).init();
 
     Configuration::token().expect("TOKEN is not set");
 
@@ -148,7 +145,7 @@ async fn initialize_proxy(
 ) {
     loop {
         let stats_sender = api::stats::StatsSender::new();
-        let (send_to_pool, recv_from_pool, pool_connection_abortable) =
+        let (send_to_pool, mut recv_from_pool, pool_connection_abortable) =
             match router.connect_pool(pool_addr).await {
                 Ok(connection) => connection,
                 Err(_) => {
@@ -162,6 +159,8 @@ async fn initialize_proxy(
                     continue;
                 }
             };
+
+        info!("Pool connection established, starting extension negotiation...");
 
         let (downs_sv1_tx, downs_sv1_rx) = channel(10);
         let sv1_ingress_abortable = ingress::sv1_ingress::start_listen_for_downstream(downs_sv1_tx);
@@ -202,6 +201,39 @@ async fn initialize_proxy(
             }
         };
 
+        // Create channels for message routing
+        let (sae_sender, sae_receiver) = channel(10);
+        let (mining_sender, _mining_receiver): (
+            tokio::sync::mpsc::Sender<roles_logic_sv2::parsers::Mining<'static>>,
+            tokio::sync::mpsc::Receiver<roles_logic_sv2::parsers::Mining<'static>>,
+        ) = channel(10);
+
+        // Create a message router task that takes ownership of recv_from_pool
+        let _message_router = tokio::spawn({
+            let sae_sender = sae_sender.clone();
+            // Remove the mining_sender clone since we're not using it
+
+            async move {
+                while let Some(msg) = recv_from_pool.recv().await {
+                    match msg {
+                        PoolExtMessages::ShareAccountingMessages(_) => {
+                            if sae_sender.send(msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        PoolExtMessages::Mining(mining_msg) => {
+                            // For now, just log mining messages
+                            info!("Received mining message");
+                            // TODO: Route to translator if needed
+                        }
+                        _ => {
+                            warn!("Received unexpected message type");
+                        }
+                    }
+                }
+            }
+        });
+
         if let Some(_tp_addr) = tp {
             jdc_abortable = jd_client::start(
                 jdc_from_translator_receiver,
@@ -216,7 +248,7 @@ async fn initialize_proxy(
             share_accounter_abortable = match share_accounter::start(
                 from_jdc_to_share_accounter_recv,
                 from_share_accounter_to_jdc_send,
-                recv_from_pool,
+                sae_receiver,
                 send_to_pool,
             )
             .await
@@ -233,7 +265,7 @@ async fn initialize_proxy(
             share_accounter_abortable = match share_accounter::start(
                 jdc_from_translator_receiver,
                 jdc_to_translator_sender,
-                recv_from_pool,
+                sae_receiver,
                 send_to_pool,
             )
             .await
