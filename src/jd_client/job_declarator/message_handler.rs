@@ -1,4 +1,4 @@
-use super::JobDeclarator;
+use super::{ErrorDetails, JobDeclarator};
 use roles_logic_sv2::{
     handlers::{job_declaration::ParseServerJobDeclarationMessages, SendTo_},
     job_declaration_sv2::{
@@ -31,8 +31,16 @@ impl ParseServerJobDeclarationMessages for JobDeclarator {
 
     fn handle_declare_mining_job_error(
         &mut self,
-        _message: DeclareMiningJobError,
+        message: DeclareMiningJobError,
     ) -> Result<SendTo, Error> {
+        let error_code = ErrorDetails::borrowed(message.error_code.inner_as_ref());
+        let error_details = ErrorDetails::borrowed(message.error_details.inner_as_ref());
+        error!(
+            request_id = message.request_id,
+            error_code = %error_code,
+            error_details = %error_details,
+            "DeclareMiningJobError received"
+        );
         // TODO consider using declarative names instead of setting states
         super::super::IS_CUSTOM_JOB_SET.store(true, std::sync::atomic::Ordering::Release);
         Ok(SendTo::None(None))
