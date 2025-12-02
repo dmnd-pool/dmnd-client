@@ -15,7 +15,7 @@ use roles_logic_sv2::{
 use std::{collections::HashMap, convert::TryInto};
 use task_manager::TaskManager;
 use tokio::sync::mpsc::{Receiver as TReceiver, Sender as TSender};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use async_recursion::async_recursion;
 use nohash_hasher::BuildNoHashHasher;
@@ -239,9 +239,11 @@ impl JobDeclarator {
             .safe_lock(|s| (s.req_ids.next(), s.min_extranonce_size, s.sender.clone()))
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
 
-        let mut tx_list: Vec<Transaction> = Vec::new();
-        let mut tx_ids = vec![];
-        for tx in tx_list_.to_vec() {
+        let raw_transactions = tx_list_.to_vec();
+        let tx_count = raw_transactions.len();
+        let mut tx_list: Vec<Transaction> = Vec::with_capacity(tx_count);
+        let mut tx_ids = Vec::with_capacity(tx_count);
+        for tx in raw_transactions {
             let transaction: Result<Transaction, bitcoin::consensus::encode::Error> =
                 bitcoin::consensus::deserialize(&tx);
             match transaction {
@@ -256,6 +258,7 @@ impl JobDeclarator {
                 }
             }
         }
+        debug!(template_id = template.template_id, tx_count, "Received template transaction list");
         let tx_ids: Seq064K<'static, U256> = Seq064K::from(tx_ids);
 
         let coinbase_prefix = self_mutex
