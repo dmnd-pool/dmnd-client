@@ -1,7 +1,7 @@
 pub mod message_handler;
 mod task_manager;
 use binary_sv2::{Seq0255, Seq064K, B016M, B064K, U256};
-use bitcoin::{blockdata::transaction::Transaction, hashes::Hash};
+use bitcoin::{blockdata::transaction::Transaction, hashes::Hash, Txid, Wtxid};
 use codec_sv2::{HandshakeRole, Initiator, StandardEitherFrame, StandardSv2Frame};
 use demand_sv2_connection::noise_connection_tokio::Connection;
 use roles_logic_sv2::{
@@ -49,6 +49,16 @@ pub struct LastDeclareJob {
     tx_list: Seq064K<'static, B016M<'static>>,
 }
 
+/// Describes a transaction the pool asked for via ProvideMissingTransactions so we can
+/// reference it later if the pool rejects the job (DeclareMiningJobError).
+#[derive(Debug, Clone)]
+pub struct RequestedTxInfo {
+    pub template_id: u64,
+    pub position: u16,
+    pub txid: Txid,
+    pub wtxid: Wtxid,
+}
+
 #[derive(Debug)]
 pub struct JobDeclarator {
     sender: TSender<StandardEitherFrame<PoolMessages<'static>>>,
@@ -71,6 +81,7 @@ pub struct JobDeclarator {
         ),
         BuildNoHashHasher<u64>,
     >,
+    pending_missing_tx_logs: HashMap<u32, Vec<RequestedTxInfo>>,
     up: Arc<Mutex<Upstream>>,
     pub coinbase_tx_prefix: B064K<'static>,
     pub coinbase_tx_suffix: B064K<'static>,
@@ -112,6 +123,7 @@ impl JobDeclarator {
             last_declare_mining_jobs_sent: HashMap::with_capacity(2),
             last_set_new_prev_hash: None,
             future_jobs: HashMap::with_hasher(BuildNoHashHasher::default()),
+            pending_missing_tx_logs: HashMap::new(),
             up,
             coinbase_tx_prefix: vec![].try_into().expect("Internal error: this operation can not fail because Vec can always be converted into Inner"),
             coinbase_tx_suffix: vec![].try_into().expect("Internal error: this operation can not fail because Vec can always be converted into Inner"),
