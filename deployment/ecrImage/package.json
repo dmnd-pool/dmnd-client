@@ -1,0 +1,14 @@
+{
+  "name": "dmnd-ecr-image",
+  "description": "Rust HTTP server",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@pulumi/aws": "^6.0.0",
+    "@pulumi/docker": "^4.10.0",
+    "@pulumi/pulumi": "^3.113.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.2"
+  }
+}

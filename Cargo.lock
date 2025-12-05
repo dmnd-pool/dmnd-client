@@ -697,44 +697,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "demand-cli"
-version = "0.2.2"
-dependencies = [
- "async-recursion",
- "axum",
- "binary_sv2",
- "bitcoin",
- "clap",
- "codec_sv2",
- "dashmap",
- "demand-share-accounting-ext",
- "demand-sv2-connection",
- "framing_sv2",
- "futures",
- "jemallocator",
- "key-utils",
- "lazy_static",
- "nohash-hasher",
- "noise_sv2",
- "pid",
- "primitive-types",
- "rand 0.8.5",
- "reqwest",
- "roles_logic_sv2",
- "self_update",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sv1_api",
- "sysinfo",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "demand-share-accounting-ext"
 version = "0.0.13"
 source = "git+https://github.com/demand-open-source/share-accounting-ext#c661e936264cd8cc6b13b51fc06a79e04a6ae76e"
@@ -803,6 +765,44 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "dmnd-client"
+version = "0.2.2"
+dependencies = [
+ "async-recursion",
+ "axum",
+ "binary_sv2",
+ "bitcoin",
+ "clap",
+ "codec_sv2",
+ "dashmap",
+ "demand-share-accounting-ext",
+ "demand-sv2-connection",
+ "framing_sv2",
+ "futures",
+ "jemallocator",
+ "key-utils",
+ "lazy_static",
+ "nohash-hasher",
+ "noise_sv2",
+ "pid",
+ "primitive-types",
+ "rand 0.8.5",
+ "reqwest",
+ "roles_logic_sv2",
+ "self_update",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sv1_api",
+ "sysinfo",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
