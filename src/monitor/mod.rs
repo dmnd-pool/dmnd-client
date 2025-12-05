@@ -48,6 +48,26 @@ fn worker_activity_server_endpoint() -> String {
     }
 }
 
+pub fn node_register_endpoint() -> String {
+    match Configuration::environment().as_str() {
+        "staging" => format!("{}/api/nodes/add", STAGING_URL),
+        "testnet3" => format!("{}/api/nodes/add", TESTNET3_URL),
+        "local" => format!("{}/api/nodes/add", LOCAL_URL),
+        "production" => format!("{}/api/nodes/add", PRODUCTION_URL),
+        _ => unreachable!(),
+    }
+}
+
+pub fn node_unregister_endpoint() -> String {
+    match Configuration::environment().as_str() {
+        "staging" => format!("{}/api/nodes/remove", STAGING_URL),
+        "testnet3" => format!("{}/api/nodes/remove", TESTNET3_URL),
+        "local" => format!("{}/api/nodes/remove", LOCAL_URL),
+        "production" => format!("{}/api/nodes/remove", PRODUCTION_URL),
+        _ => unreachable!(),
+    }
+}
+
 impl MonitorAPI {
     pub fn new(url: String) -> Self {
         let client = reqwest::Client::new();
@@ -114,6 +134,44 @@ impl MonitorAPI {
             Ok(_) => Ok(()),
             Err(err) => {
                 error!("Failed to send worker activity: {}", err);
+                Err(err.into())
+            }
+        }
+    }
+
+    pub async fn register_bitcoin_node(&self) -> Result<(), Error> {
+        let token = crate::config::Configuration::token().expect("Token is not set");
+        debug!("Registering bitcoin node");
+        let response = self
+            .client
+            .post(self.url.clone())
+            .json(&json!({ "token": token }))
+            .send()
+            .await?;
+
+        match response.error_for_status() {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                error!("Failed to register bitcoin node: {}", err);
+                Err(err.into())
+            }
+        }
+    }
+
+    pub async fn unregister_bitcoin_node(&self) -> Result<(), Error> {
+        let token = crate::config::Configuration::token().expect("Token is not set");
+        debug!("Unregistering bitcoin node");
+        let response = self
+            .client
+            .post(self.url.clone())
+            .json(&json!({ "token": token }))
+            .send()
+            .await?;
+
+        match response.error_for_status() {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                error!("Failed to unregister bitcoin node: {}", err);
                 Err(err.into())
             }
         }

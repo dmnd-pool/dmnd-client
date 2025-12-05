@@ -6,16 +6,19 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-use crate::{monitor::logs::SendLogLayer, shared::utils::AbortOnDrop};
+use crate::{
+    monitor::logs::SendLogLayer, shared::utils::AbortOnDrop, shutdown::update_node_status,
+};
 use config::Configuration;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
 use self_update::{backends, cargo_crate_version, update::UpdateStatus, TempDir};
 use std::{net::SocketAddr, time::Duration};
-use tokio::sync::mpsc::channel;
+use tokio::sync::{mpsc::channel, watch};
 use tracing::{debug, error, info, warn};
 mod api;
+mod shutdown;
 
 mod config;
 mod ingress;
@@ -126,18 +129,23 @@ async fn main() {
             _ => unreachable!(),
         });
 
+    let shutdown_signal = shutdown::handle_shutdown();
     let mut router = router::Router::new(pool_addresses, auth_pub_k, None, None);
     let epsilon = Duration::from_millis(30_000);
     let best_upstream = router.select_pool_connect().await;
+    // Register node on startup
+    update_node_status("register").await;
+
     initialize_proxy(
         &mut router,
         best_upstream,
         epsilon,
         Configuration::signature(),
+        shutdown_signal,
     )
     .await;
     info!("exiting");
-    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 }
 
 async fn initialize_proxy(
@@ -145,8 +153,12 @@ async fn initialize_proxy(
     mut pool_addr: Option<std::net::SocketAddr>,
     epsilon: Duration,
     signature: String,
+    shutdown_signal: watch::Receiver<bool>,
 ) {
     loop {
+        if *shutdown_signal.borrow() {
+            break;
+        }
         let stats_sender = api::stats::StatsSender::new();
         let (send_to_pool, recv_from_pool, pool_connection_abortable) =
             match router.connect_pool(pool_addr).await {
@@ -258,7 +270,7 @@ async fn initialize_proxy(
         }
         let server_handle = tokio::spawn(api::start(router.clone(), stats_sender));
         abort_handles.push((server_handle.into(), "api_server".to_string()));
-        match monitor(router, abort_handles, epsilon).await {
+        match monitor(router, abort_handles, epsilon, shutdown_signal.clone()).await {
             Reconnect::NewUpstream(new_pool_addr) => {
                 ProxyState::update_proxy_state_up();
                 pool_addr = Some(new_pool_addr);
@@ -277,9 +289,15 @@ async fn monitor(
     router: &mut Router,
     abort_handles: Vec<(AbortOnDrop, std::string::String)>,
     epsilon: Duration,
+    shutdown_signal: watch::Receiver<bool>,
 ) -> Reconnect {
     let mut should_check_upstreams_latency = 0;
     loop {
+        if *shutdown_signal.borrow() {
+            info!("Dropping all abort handles");
+            drop(abort_handles);
+            return Reconnect::NoUpstream;
+        }
         if Configuration::monitor() {
             // Check if a better upstream exist every 100 seconds
             if should_check_upstreams_latency == 10 * 100 {
