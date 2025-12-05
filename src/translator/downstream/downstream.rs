@@ -503,7 +503,12 @@ impl IsServer<'static> for Downstream {
             let share = ShareInfo::new(
                 request.user_name.clone(),
                 None,
-                job_id_as_number.expect("checked above") as i64,
+                0,
+                // We can use this here beacuse we are inside the error branch
+                //
+                // TODO: Think about a better way to handle job id when it can not be parsed to
+                // number
+                // job_id_as_number.expect("checked above") as i64,
                 Some(RejectionReason::InvalidJobIdFormat),
             );
             self.share_monitor.insert_share(share);
@@ -652,7 +657,7 @@ impl IsServer<'static> for Downstream {
         self.version_rolling_min_bit = mask
     }
 
-    fn notify(&mut self) -> Result<json_rpc::Message, sv1_api::error::Error> {
+    fn notify(&'_ mut self) -> Result<json_rpc::Message, sv1_api::error::Error<'_>> {
         unreachable!()
     }
 }

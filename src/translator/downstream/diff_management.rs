@@ -16,7 +16,7 @@ use tracing::{error, info};
 impl Downstream {
     /// Initializes difficult managment.
     /// Send downstream a first target.
-    pub async fn init_difficulty_management(self_: &Arc<Mutex<Self>>) -> ProxyResult<()> {
+    pub async fn init_difficulty_management(self_: &'_ Arc<Mutex<Self>>) -> ProxyResult<'_, ()> {
         let (diff, stats_sender, connection_id, estimated_hashrate) = self_.safe_lock(|d| {
             (
                 d.difficulty_mgmt
@@ -87,7 +87,7 @@ impl Downstream {
     ) -> ProxyResult<'static, ()> {
         let channel_id = self_
             .clone()
-            .safe_lock(|d| (d.connection_id))
+            .safe_lock(|d| d.connection_id)
             .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)?;
 
         if let Some(new_diff) = Self::update_difficulty_and_hashrate(self_)? {

@@ -32,6 +32,8 @@ struct Args {
     noise_connection_log: Option<String>,
     #[clap(long = "sv1_loglevel")]
     sv1_loglevel: bool,
+    #[clap(long)]
+    file_logging: bool,
     #[clap(long = "delay")]
     delay: Option<u64>,
     #[clap(long = "interval", short = 'i')]
@@ -104,6 +106,7 @@ pub struct Configuration {
     loglevel: String,
     nc_loglevel: String,
     sv1_log: bool,
+    file_logging: bool,
     staging: bool,
     testnet3: bool,
     local: bool,
@@ -176,6 +179,10 @@ impl Configuration {
                 "off"
             }
         }
+    }
+
+    pub fn enable_file_logging() -> bool {
+        CONFIG.file_logging
     }
     pub fn sv1_ingress_log() -> bool {
         CONFIG.sv1_log
@@ -327,6 +334,8 @@ impl Configuration {
             || config.sv1_log.unwrap_or(false)
             || std::env::var("SV1_LOGLEVEL").is_ok();
 
+        let file_logging = args.file_logging || std::env::var("FILE_LOGGING").is_ok();
+
         let staging =
             args.staging || config.staging.unwrap_or(false) || std::env::var("STAGING").is_ok();
         let testnet3 =
@@ -348,6 +357,7 @@ impl Configuration {
             loglevel,
             nc_loglevel,
             sv1_log,
+            file_logging,
             staging,
             testnet3,
             local,

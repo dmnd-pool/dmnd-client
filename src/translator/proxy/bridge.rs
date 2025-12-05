@@ -66,7 +66,7 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub async fn ready(self_: &Arc<Mutex<Self>>) -> Result<(), Error> {
+    pub async fn ready(self_: &'_ Arc<Mutex<Self>>) -> Result<(), Error<'_>> {
         while self_
             .safe_lock(|b| b.last_notify.is_none())
             .map_err(|_| Error::BridgeMutexPoisoned)?

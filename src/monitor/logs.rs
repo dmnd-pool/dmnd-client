@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::monitor::{proxy_log_server_endpoint, MonitorAPI};
 use serde::Serialize;
 use std::sync::Arc;

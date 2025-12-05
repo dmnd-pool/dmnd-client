@@ -53,6 +53,7 @@ binary_sv2 = { git = "https://github.com/demand-open-source/stratum",subdirector
 noise_sv2 = { git = "https://github.com/demand-open-source/stratum",subdirectory = "protocols/v2/noise-sv2"}
 codec_sv2 = { git = "https://github.com/demand-open-source/stratum",subdirectory = "protocols/v2/codec-sv2", features = ["noise_sv2","with_buffer_pool"]}
 sv1_api = { git = "https://github.com/demand-open-source/stratum",subdirectory = "protocols/v1"}
+tracing-appender = "0.2.4"
 
 
 

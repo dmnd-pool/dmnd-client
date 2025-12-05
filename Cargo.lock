@@ -605,6 +605,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-channel"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82b8f8f868b36967f9606790d1903570de9ceaf870a7bf9fbbd3016d636a2cb2"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-deque"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -697,44 +706,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "demand-cli"
-version = "0.2.2"
-dependencies = [
- "async-recursion",
- "axum",
- "binary_sv2",
- "bitcoin",
- "clap",
- "codec_sv2",
- "dashmap",
- "demand-share-accounting-ext",
- "demand-sv2-connection",
- "framing_sv2",
- "futures",
- "jemallocator",
- "key-utils",
- "lazy_static",
- "nohash-hasher",
- "noise_sv2",
- "pid",
- "primitive-types",
- "rand 0.8.5",
- "reqwest",
- "roles_logic_sv2",
- "self_update",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sv1_api",
- "sysinfo",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "demand-share-accounting-ext"
 version = "0.0.13"
 source = "git+https://github.com/demand-open-source/share-accounting-ext#c661e936264cd8cc6b13b51fc06a79e04a6ae76e"
@@ -765,6 +736,15 @@ checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid",
  "zeroize",
+]
+
+[[package]]
+name = "deranged"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ececcb659e7ba858fb4f10388c250a7252eb0a27373f1a72b8748afdd248e587"
+dependencies = [
+ "powerfmt",
 ]
 
 [[package]]
@@ -803,6 +783,45 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "dmnd-client"
+version = "0.2.2"
+dependencies = [
+ "async-recursion",
+ "axum",
+ "binary_sv2",
+ "bitcoin",
+ "clap",
+ "codec_sv2",
+ "dashmap",
+ "demand-share-accounting-ext",
+ "demand-sv2-connection",
+ "framing_sv2",
+ "futures",
+ "jemallocator",
+ "key-utils",
+ "lazy_static",
+ "nohash-hasher",
+ "noise_sv2",
+ "pid",
+ "primitive-types",
+ "rand 0.8.5",
+ "reqwest",
+ "roles_logic_sv2",
+ "self_update",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sv1_api",
+ "sysinfo",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1698,6 +1717,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-conv"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51d515d32fb182ee37cda2ccdcb92950d6a3c2893aa280e540671c2cd0f3b1d9"
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1920,6 +1945,12 @@ checksum = "e5a7c30837279ca13e7c867e9e40053bc68740f988cb07f7ca6df43cc734b585"
 dependencies = [
  "zerovec",
 ]
+
+[[package]]
+name = "powerfmt"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
 name = "ppv-lite86"
@@ -2802,6 +2833,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "time"
+version = "0.3.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e7d9e3bb61134e77bde20dd4825b97c010155709965fedf0f49bb138e52a9d"
+dependencies = [
+ "deranged",
+ "itoa",
+ "num-conv",
+ "powerfmt",
+ "serde",
+ "time-core",
+ "time-macros",
+]
+
+[[package]]
+name = "time-core"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40868e7c1d2f0b8d73e4a8c7f0ff63af4f6d19be117e90bd73eb1d62cf831c6b"
+
+[[package]]
+name = "time-macros"
+version = "0.2.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30cfb0125f12d9c277f35663a0a33f8c30190f4e4574868a330595412d34ebf3"
+dependencies = [
+ "num-conv",
+ "time-core",
+]
+
+[[package]]
 name = "tinystr"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2986,6 +3048,18 @@ dependencies = [
  "pin-project-lite",
  "tracing-attributes",
  "tracing-core",
+]
+
+[[package]]
+name = "tracing-appender"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "786d480bce6247ab75f005b14ae1624ad978d3029d9113f0a22fa1ac773faeaf"
+dependencies = [
+ "crossbeam-channel",
+ "thiserror",
+ "time",
+ "tracing-subscriber",
 ]
 
 [[package]]

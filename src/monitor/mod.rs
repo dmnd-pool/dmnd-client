@@ -17,6 +17,7 @@ pub struct MonitorAPI {
     pub client: reqwest::Client,
 }
 
+#[allow(dead_code)]
 fn proxy_log_server_endpoint() -> String {
     match Configuration::environment().as_str() {
         "staging" => format!("{}/api/proxy/logs", STAGING_URL),

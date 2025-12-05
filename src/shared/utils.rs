@@ -62,8 +62,10 @@ pub fn sv1_rolling(configure: &sv1_api::client_to_server::Configure) -> (HexU32B
     (version_rollin_mask, version_rolling_min_bit)
 }
 
+#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct UserId(pub i64);
+
 impl Display for UserId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
