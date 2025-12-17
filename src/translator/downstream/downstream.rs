@@ -604,6 +604,15 @@ impl IsServer<'static> for Downstream {
         }
     }
 
+    fn handle_suggest_difficulty(&mut self, request: &client_to_server::SuggestDifficulty) {
+        info!(
+            "Received mining.suggest_difficulty: {:?} from downstream {}",
+            &request, self.connection_id
+        );
+        self.difficulty_mgmt.current_difficulties.clear(); // Clear the initial difficulty
+        self.difficulty_mgmt
+            .add_difficulty(request.difficulty as f32);
+    }
     /// Indicates to the server that the client supports the mining.set_extranonce method.
     fn handle_extranonce_subscribe(&self) {}
 
