@@ -6,18 +6,19 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+use crate::auto_update::check_update_proxy;
 use crate::shared::utils::AbortOnDrop;
 use config::Configuration;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
-use self_update::{backends, cargo_crate_version, update::UpdateStatus, TempDir};
 use std::sync::OnceLock;
 use std::{net::SocketAddr, time::Duration};
 use tokio::sync::mpsc::channel;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 mod api;
+mod auto_update;
 mod config;
 mod ingress;
 pub mod jd_client;
@@ -38,24 +39,17 @@ const CHANNEL_DIFF_UPDTATE_INTERVAL: u32 = 10;
 const MAX_LEN_DOWN_MSG: u32 = 10000;
 const MAIN_AUTH_PUB_KEY: &str = "9c44K6QVizyPWb9xfeqhckFRosxWwB3EfytGa4CfTdD526qb2QV";
 const TEST_AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
-const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:32767";
-const REPO_OWNER: &str = "demand-open-source";
-const REPO_NAME: &str = "demand-cli";
-const BIN_NAME: &str = "demand-cli";
+pub const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:32767";
 const STAGING_URL: &str = "https://staging-user-dashboard-server.dmnd.work";
 const LOCAL_URL: &str = "http://localhost:8787";
 const TESTNET3_URL: &str = "https://testnet3-user-dashboard-server.dmnd.work";
 const PRODUCTION_URL: &str = "https://production-user-dashboard-server.dmnd.work";
 
 lazy_static! {
-    static ref SV1_DOWN_LISTEN_ADDR: String =
-        Configuration::downstream_listening_addr().unwrap_or(DEFAULT_LISTEN_ADDRESS.to_string());
     static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<String>> =
         roles_logic_sv2::utils::Mutex::new(Configuration::tp_address());
-    static ref POOL_ADDRESS: roles_logic_sv2::utils::Mutex<Option<SocketAddr>> =
+    static ref ACTIVE_POOL_ADDRESS: roles_logic_sv2::utils::Mutex<Option<SocketAddr>> =
         roles_logic_sv2::utils::Mutex::new(None); // Connected pool address
-    static ref EXPECTED_SV1_HASHPOWER: f32 = Configuration::downstream_hashrate();
-    static ref API_SERVER_PORT: String = Configuration::api_server_port();
 }
 
 lazy_static! {
@@ -362,167 +356,7 @@ async fn monitor(
     }
 }
 
-fn check_update_proxy() {
-    info!("Checking for latest released version...");
-    // Determine the OS and map to the asset name
-    let os = std::env::consts::OS;
-    let target_bin = match os {
-        "linux" => "demand-cli-linux",
-        "macos" => "demand-cli-macos",
-        "windows" => "demand-cli-windows.exe",
-        _ => {
-            error!("Warning: Unsupported OS '{}', skipping update", os);
-            unreachable!()
-        }
-    };
-
-    debug!("OS: {}", target_bin);
-    debug!("DMND-PROXY version: {}", cargo_crate_version!());
-    let original_path = std::env::current_exe().expect("Failed to get current executable path");
-    let tmp_dir = TempDir::new_in(::std::env::current_dir().expect("Failed to get current dir"))
-        .expect("Failed to create tmp dir");
-
-    let updater = match backends::github::Update::configure()
-        .repo_owner(REPO_OWNER)
-        .repo_name(REPO_NAME)
-        .bin_name(BIN_NAME)
-        .current_version(cargo_crate_version!())
-        .target(target_bin)
-        .show_output(false)
-        .no_confirm(true)
-        .bin_install_path(tmp_dir.path())
-        .build()
-    {
-        Ok(updater) => updater,
-        Err(e) => {
-            error!("Failed to configure update: {}", e);
-            return;
-        }
-    };
-
-    match updater.update_extended() {
-        Ok(status) => match status {
-            UpdateStatus::UpToDate => {
-                info!("Package is up to date");
-            }
-            UpdateStatus::Updated(release) => {
-                info!(
-                    "Proxy updated to version {}. Restarting Proxy",
-                    release.version
-                );
-                for asset in release.assets {
-                    if asset.name == target_bin {
-                        let bin_name = std::path::PathBuf::from(target_bin);
-                        let new_exe = tmp_dir.path().join(&bin_name);
-                        let mut file =
-                            std::fs::File::create(&new_exe).expect("Failed to create file");
-                        let mut download = self_update::Download::from_url(&asset.download_url);
-                        download.set_header(
-                            reqwest::header::ACCEPT,
-                            reqwest::header::HeaderValue::from_static("application/octet-stream"), // to triggers a redirect to the actual binary.
-                        );
-                        download
-                            .download_to(&mut file)
-                            .expect("Failed to download file");
-                    }
-                }
-                let bin_name = std::path::PathBuf::from(target_bin);
-                let new_exe = tmp_dir.path().join(&bin_name);
-                if let Err(e) = std::fs::rename(&new_exe, &original_path) {
-                    error!(
-                        "Failed to move new binary to {}: {}",
-                        original_path.display(),
-                        e
-                    );
-                    return;
-                }
-
-                let _ = std::fs::remove_dir_all(tmp_dir); // clean up tmp dir
-                                                          // Get original cli rgs
-                let args = std::env::args().skip(1).collect::<Vec<_>>();
-
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    use std::os::unix::process::CommandExt;
-                    // On Unix-like systems, replace the current process with the new binary
-                    if let Err(e) = std::fs::set_permissions(
-                        &original_path,
-                        std::fs::Permissions::from_mode(0o755),
-                    ) {
-                        error!(
-                            "Failed to set executable permissions on {}: {}",
-                            original_path.display(),
-                            e
-                        );
-                        return;
-                    }
-
-                    let err = std::process::Command::new(&original_path)
-                        .args(&args)
-                        .exec();
-                    // If exec fails, log the error and exit
-                    error!("Failed to exec new binary: {:?}", err);
-                    std::process::exit(1);
-                }
-                #[cfg(not(unix))]
-                {
-                    // On Windows, spawn the new process and exit the current one
-                    std::process::Command::new(&original_path)
-                        .args(&args)
-                        .spawn()
-                        .expect("Failed to start proxy");
-                    std::process::exit(0);
-                }
-            }
-        },
-        Err(e) => {
-            error!("Failed to update proxy: {}", e);
-        }
-    }
-}
-
 pub enum Reconnect {
     NewUpstream(std::net::SocketAddr), // Reconnecting with a new upstream
     NoUpstream,                        // Reconnecting without upstream
-}
-
-enum HashUnit {
-    Tera,
-    Peta,
-    Exa,
-}
-
-impl HashUnit {
-    /// Returns the multiplier for each unit in h/s
-    fn multiplier(&self) -> f32 {
-        match self {
-            HashUnit::Tera => 1e12,
-            HashUnit::Peta => 1e15,
-            HashUnit::Exa => 1e18,
-        }
-    }
-
-    // Converts a unit string (e.g., "T") to a HashUnit variant
-    fn from_str(s: &str) -> Option<Self> {
-        match s.to_uppercase().as_str() {
-            "T" => Some(HashUnit::Tera),
-            "P" => Some(HashUnit::Peta),
-            "E" => Some(HashUnit::Exa),
-            _ => None,
-        }
-    }
-
-    /// Formats a hashrate value (f32) into a string with the appropriate unit
-    fn format_value(hashrate: f32) -> String {
-        if hashrate >= 1e18 {
-            format!("{:.2}E", hashrate / 1e18)
-        } else if hashrate >= 1e15 {
-            format!("{:.2}P", hashrate / 1e15)
-        } else if hashrate >= 1e12 {
-            format!("{:.2}T", hashrate / 1e12)
-        } else {
-            format!("{:.2}", hashrate)
-        }
-    }
 }

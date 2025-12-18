@@ -4,11 +4,11 @@ version = "0.2.2"
 edition = "2021"
 
 [lib]
-name = "demand_cli"
+name = "dmnd_client"
 path = "src/lib.rs"
 
 [[bin]]
-name = "demand-cli"
+name = "dmnd-client"
 path = "src/main.rs"
 
 [dependencies]

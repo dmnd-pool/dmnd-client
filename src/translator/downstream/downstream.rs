@@ -1,5 +1,6 @@
 use crate::{
     api::stats::StatsSender,
+    config::Configuration,
     monitor::{
         shares::{RejectionReason, ShareInfo, SharesMonitor},
         worker_activity::{WorkerActivity, WorkerActivityType},
@@ -173,7 +174,7 @@ impl Downstream {
         //let pd = initial_difficulty * 0.01;
         pid.p(pk, f32::MAX).i(0.0, f32::MAX).d(0.0, f32::MAX);
 
-        let estimated_downstream_hash_rate = *crate::EXPECTED_SV1_HASHPOWER;
+        let estimated_downstream_hash_rate = Configuration::downstream_hashrate();
         let mut current_difficulties = VecDeque::with_capacity(3);
         current_difficulties.push_back(initial_difficulty);
 

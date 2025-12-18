@@ -32,6 +32,6 @@ jobs:
       - name: Run cargo test
         run: cargo test --all-features
         env:
-          TOKEN: ${{ secrets.TOKEN }}
+          TOKEN: ${{ vars.TOKEN }} # Secrets don't work for PRs from a fork
           STAGING: ${{ vars.STAGING }}
           AUTO_UPDATE: ${{ vars.AUTO_UPDATE }}

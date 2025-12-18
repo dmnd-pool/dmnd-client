@@ -1,4 +1,5 @@
 use crate::{
+    config::Configuration,
     proxy_state::{DownstreamType, ProxyState},
     translator::{
         error::Error, proxy::Bridge, upstream::diff_management::UpstreamDifficultyConfig,
@@ -34,7 +35,7 @@ pub async fn start_accept_connection(
             while let Some((send, recv, addr)) = downstreams.recv().await {
                 info!("Translator opening connection for ip {}", addr);
                 // The initial difficulty is derived from the formula: difficulty = hash_rate / (shares_per_second * 2^32)
-                let initial_hash_rate = *crate::EXPECTED_SV1_HASHPOWER;
+                let initial_hash_rate = Configuration::downstream_hashrate();
                 info!(
                     "Translator initial hash rate for ip {} is {} H/s",
                     addr, initial_hash_rate
