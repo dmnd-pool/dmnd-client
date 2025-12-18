@@ -23,7 +23,8 @@ pub fn start_listen_for_downstream(
     downstreams: Sender<(Sender<String>, Receiver<String>, IpAddr)>,
 ) -> AbortOnDrop {
     tokio::task::spawn(async move {
-        let down_addr: String = crate::SV1_DOWN_LISTEN_ADDR.to_string();
+        let down_addr: String = Configuration::downstream_listening_addr()
+            .unwrap_or(crate::DEFAULT_LISTEN_ADDRESS.to_string());
         let downstream_addr: SocketAddr = down_addr.parse().expect("Invalid listen address");
         info!(
             "Trying to bind to address {} for downstream(miner) connections",

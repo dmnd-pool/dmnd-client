@@ -111,7 +111,7 @@ async fn initialize_jd(
     let port_tp = parts.next().expect("The passed value for TP address is not valid. Terminating.... TP_ADDRESS should be in this format `127.0.0.1:8442`").parse::<u16>().expect("This operation should not fail because a valid port_tp should always be converted to U16");
 
     let auth_pub_k: Secp256k1PublicKey = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
-    let address = match crate::POOL_ADDRESS.safe_lock(|address| *address) {
+    let address = match crate::ACTIVE_POOL_ADDRESS.safe_lock(|address| *address) {
         Ok(Some(address)) => address,
         Ok(None) => {
             error!("Pool address is missing");

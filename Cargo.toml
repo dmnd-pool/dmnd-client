@@ -3,6 +3,14 @@ name = "dmnd-client"
 version = "0.2.2"
 edition = "2021"
 
+[lib]
+name = "dmnd_client"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dmnd-client"
+path = "src/main.rs"
+
 [dependencies]
 dashmap = {version = "6.1.0", features = ["inline"]}
 bitcoin = {version = "0.32.5", features = ["serde","rand"]}

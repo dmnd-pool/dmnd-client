@@ -1,3 +1,4 @@
+use crate::config::Configuration;
 use crate::proxy_state::{DownstreamType, ProxyState};
 use crate::translator::downstream::SUBSCRIBE_TIMEOUT_SECS;
 use crate::translator::error::Error;
@@ -28,9 +29,8 @@ pub async fn start_notify(
                     d.difficulty_mgmt.current_difficulties.back().copied(),
                 )
             })?;
-        upstream_difficulty_config.safe_lock(|c| {
-            c.channel_nominal_hashrate += *crate::EXPECTED_SV1_HASHPOWER;
-        })?;
+        upstream_difficulty_config
+            .safe_lock(|c| c.channel_nominal_hashrate += Configuration::downstream_hashrate())?;
         stats_sender.setup_stats(connection_id);
         task::spawn(async move {
             let timeout_timer = std::time::Instant::now();

@@ -168,7 +168,7 @@ impl Router {
         .await
         {
             Ok((send_to_pool, recv_from_pool, pool_connection_abortable)) => {
-                crate::POOL_ADDRESS
+                crate::ACTIVE_POOL_ADDRESS
                     .safe_lock(|pool_address| {
                         *pool_address = Some(pool);
                     })
@@ -378,10 +378,7 @@ impl PoolLatency {
 
         match tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(address)).await {
             Ok(Ok(stream)) => {
-                let tp = crate::TP_ADDRESS
-                    .safe_lock(|tp| tp.clone())
-                    .map_err(|_| error!(" TP_ADDRESS Mutex Corrupted"))?;
-                if let Some(_tp_addr) = tp {
+                if let Some(_tp_addr) = crate::config::Configuration::tp_address() {
                     let initiator = Initiator::from_raw_k(authority_public_key.into_bytes())
                         // Safe expect Key is a constant and must be right
                         .expect("Unable to create initialtor");

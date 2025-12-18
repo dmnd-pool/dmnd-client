@@ -10,8 +10,7 @@ use std::{
 use tracing::{debug, error, info};
 
 use crate::{
-    shared::error::Error, HashUnit, DEFAULT_SV1_HASHPOWER, PRODUCTION_URL, STAGING_URL,
-    TESTNET3_URL,
+    shared::error::Error, DEFAULT_SV1_HASHPOWER, PRODUCTION_URL, STAGING_URL, TESTNET3_URL,
 };
 lazy_static! {
     pub static ref CONFIG: Configuration = Configuration::load_config();
@@ -487,4 +486,44 @@ async fn fetch_pool_urls() -> Result<Vec<SocketAddr>, Error> {
 struct PoolAddress {
     host: String,
     port: u16,
+}
+
+enum HashUnit {
+    Tera,
+    Peta,
+    Exa,
+}
+
+impl HashUnit {
+    /// Returns the multiplier for each unit in h/s
+    fn multiplier(&self) -> f32 {
+        match self {
+            HashUnit::Tera => 1e12,
+            HashUnit::Peta => 1e15,
+            HashUnit::Exa => 1e18,
+        }
+    }
+
+    // Converts a unit string (e.g., "T") to a HashUnit variant
+    fn from_str(s: &str) -> Option<Self> {
+        match s.to_uppercase().as_str() {
+            "T" => Some(HashUnit::Tera),
+            "P" => Some(HashUnit::Peta),
+            "E" => Some(HashUnit::Exa),
+            _ => None,
+        }
+    }
+
+    /// Formats a hashrate value (f32) into a string with the appropriate unit
+    fn format_value(hashrate: f32) -> String {
+        if hashrate >= 1e18 {
+            format!("{:.2}E", hashrate / 1e18)
+        } else if hashrate >= 1e15 {
+            format!("{:.2}P", hashrate / 1e15)
+        } else if hashrate >= 1e12 {
+            format!("{:.2}T", hashrate / 1e12)
+        } else {
+            format!("{:.2}", hashrate)
+        }
+    }
 }

@@ -1,7 +1,7 @@
 mod routes;
 pub mod stats;
 mod utils;
-use crate::{router::Router, API_SERVER_PORT};
+use crate::router::Router;
 use axum::{routing::get, Router as AxumRouter};
 use routes::Api;
 use stats::StatsSender;
@@ -26,10 +26,11 @@ pub(crate) async fn start(router: Router, stats_sender: StatsSender) {
         .route("/api/stats/system", get(Api::system_stats))
         .with_state(state);
 
-    let api_server_addr = format!("0.0.0.0:{}", *API_SERVER_PORT);
+    let api_server_port = crate::config::Configuration::api_server_port();
+    let api_server_addr = format!("0.0.0.0:{}", api_server_port);
     let listener = tokio::net::TcpListener::bind(api_server_addr)
         .await
         .expect("Invalid server address");
-    println!("API Server listening on port {}", *API_SERVER_PORT);
+    println!("API Server listening on port {}", api_server_port);
     axum::serve(listener, app).await.unwrap();
 }
