@@ -6,9 +6,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-use crate::{
-    monitor::logs::SendLogLayer, shared::utils::AbortOnDrop, shutdown::update_node_status,
-};
+use crate::{monitor::logs::SendLogLayer, shared::utils::AbortOnDrop};
 use config::Configuration;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
@@ -133,8 +131,6 @@ async fn main() {
     let mut router = router::Router::new(pool_addresses, auth_pub_k, None, None);
     let epsilon = Duration::from_millis(30_000);
     let best_upstream = router.select_pool_connect().await;
-    // Register node on startup
-    update_node_status("register").await;
 
     initialize_proxy(
         &mut router,
