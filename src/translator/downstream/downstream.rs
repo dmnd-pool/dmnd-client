@@ -579,11 +579,10 @@ impl IsServer<'static> for Downstream {
                         request.job_id, met_difficulty
                     );
                     true
-                }
-                else {
-                error!("met_difficulty is not latest difficulty");
-                self.stats_sender.update_rejected_shares(self.connection_id);
-                false
+                } else {
+                    error!("met_difficulty is not latest difficulty");
+                    self.stats_sender.update_rejected_shares(self.connection_id);
+                    false
                 }
             } else {
                 let share = ShareInfo::new(
