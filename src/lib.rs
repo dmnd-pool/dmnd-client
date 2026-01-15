@@ -64,7 +64,7 @@ lazy_static! {
 }
 lazy_static! {
     static ref SHARE_PER_MIN: f32 = std::env::var("SHARE_PER_MIN")
-        .unwrap_or("6.0".to_string())
+        .unwrap_or("10.0".to_string())
         .parse::<f32>()
         .expect("SHARE_PER_MIN is not a valid number");
 }
