@@ -264,7 +264,7 @@ impl Downstream {
         });
 
         // Register the task with the task manager so it can be aborted when needed
-        TaskManager::add_shares_monitor(task_manager, abortable.into())
+        TaskManager::add_shares_monitor(connection_id, task_manager, abortable.into())
             .await
             .map_err(|_| Error::TranslatorTaskManagerFailed)
     }
