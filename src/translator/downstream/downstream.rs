@@ -453,10 +453,7 @@ impl IsServer<'static> for Downstream {
             "mining.set_difficulty".to_string(),
             super::new_subscription_id(),
         );
-        let notify_sub = (
-            "mining.notify".to_string(),
-            "ae6812eb4cd7735a302a8a9dd95cf71f".to_string(),
-        );
+        let notify_sub = ("mining.notify".to_string(), super::new_subscription_id());
         self.user_agent.replace(request.agent_signature.clone());
         vec![set_difficulty_sub, notify_sub]
     }
@@ -804,18 +801,29 @@ impl<T, const N: usize> CircularBuffer<T, N> {
     }
 }
 
-//#[cfg(test)]
-//mod tests {
-//    use super::*;
-//
-//    #[test]
-//    fn gets_difficulty_from_target() {
-//        let target = vec![
-//            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 255, 127,
-//            0, 0, 0, 0, 0,
-//        ];
-//        let actual = Downstream::difficulty_from_target(target).unwrap();
-//        let expect = 512.0;
-//        assert_eq!(actual, expect);
-//    }
-//}
+#[cfg(test)]
+mod tests {
+    //    use super::*;
+    //
+    //    #[test]
+    //    fn gets_difficulty_from_target() {
+    //        let target = vec![
+    //            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 255, 127,
+    //            0, 0, 0, 0, 0,
+    //        ];
+    //        let actual = Downstream::difficulty_from_target(target).unwrap();
+    //        let expect = 512.0;
+    //        assert_eq!(actual, expect);
+    //    }
+
+    use crate::translator::downstream::new_subscription_id;
+    #[test]
+    fn id_is_32_hex_chars_and_unique() {
+        let a = new_subscription_id();
+        let b = new_subscription_id();
+        assert_eq!(a.len(), 32);
+        assert_eq!(b.len(), 32);
+        assert_ne!(a, b);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+}
