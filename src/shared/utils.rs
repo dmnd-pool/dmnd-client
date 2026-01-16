@@ -46,20 +46,17 @@ impl<T: Send + 'static> From<JoinHandle<T>> for AbortOnDrop {
 /// Select a version rolling mask and min bit count based on the request from the miner.
 /// It copy the behavior from SRI translator
 pub fn sv1_rolling(configure: &sv1_api::client_to_server::Configure) -> (HexU32Be, HexU32Be) {
-    // TODO 0x1FFFE000 should be configured
-    // = 11111111111111110000000000000
-    // this is a reasonable default as it allows all 16 version bits to be used
-    // If the tproxy/pool needs to use some version bits this needs to be configurable
-    // so upstreams can negotiate with downstreams. When that happens this should consider
-    // the min_bit_count in the mining.configure message
-    let version_rollin_mask = configure
+    let pool_mask = std::env::var("POOL_MASK")
+        .map(|val| u32::from_str_radix(&val, 16).unwrap_or(0x1FFFE000))
+        .unwrap_or(0x1FFFE000);
+    let miner_mask = configure
         .version_rolling_mask()
-        .map(|mask| HexU32Be(mask & 0x1FFFE000))
-        .unwrap_or(HexU32Be(0));
-    let version_rolling_min_bit = configure
+        .unwrap_or(HexU32Be(0xFFFFFFFF));
+    let negotiated_mask = HexU32Be(miner_mask.0 & pool_mask);
+    let min_bit_count = configure
         .version_rolling_min_bit_count()
         .unwrap_or(HexU32Be(0));
-    (version_rollin_mask, version_rolling_min_bit)
+    (negotiated_mask, min_bit_count)
 }
 
 #[allow(dead_code)]
