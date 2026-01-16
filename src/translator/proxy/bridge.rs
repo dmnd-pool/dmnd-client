@@ -123,7 +123,8 @@ impl Bridge {
                 if let Some(Mining::OpenExtendedMiningChannelSuccess(success)) = message.next() {
                     info!("New extended channel opened with id {}", success.channel_id);
                     let extranonce = success.extranonce_prefix.to_vec();
-                    let extranonce2_len = success.extranonce_size;
+                    let extranonce2_len =
+                        success.extranonce_size - success.extranonce_prefix.len() as u16;
                     self.target
                         .safe_lock(|t| *t = success.target.to_vec())
                         .map_err(|e| {

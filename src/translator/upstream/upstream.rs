@@ -283,9 +283,8 @@ impl Upstream {
                                         miner_extranonce2_size,
                                     );
                                     let range_0 = 0..prefix_len; // upstream extranonce1
-                                    let range_1 = prefix_len..prefix_len + tproxy_e1_len; // downstream extranonce1
-                                    let range_2 = prefix_len + tproxy_e1_len
-                                        ..prefix_len + m.extranonce_size as usize; // extranonce2
+                                    let range_1 = prefix_len..tproxy_e1_len; // downstream extranonce1
+                                    let range_2 = tproxy_e1_len..m.extranonce_size as usize; // extranonce2
                                     let extended = match ExtendedExtranonce::from_upstream_extranonce(
                                         extranonce_prefix.clone(), range_0.clone(), range_1.clone(), range_2.clone(),
                                     ).ok_or( Error::InvalidExtranonce(format!("Impossible to create a valid extended extranonce from {:?} {:?} {:?} {:?}",
