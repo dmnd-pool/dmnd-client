@@ -25,7 +25,7 @@ jobs:
         uses: pulumi/actions@v6
         with:
           command: up
-          stack-name: dmnd-tech-org/dmnd-client-image/dmnd-client-image
+          stack-name: dmnd-tech-org/image/client
           work-dir: deployment/ecrImage/
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
