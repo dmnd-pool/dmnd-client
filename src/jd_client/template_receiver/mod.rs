@@ -213,6 +213,8 @@ impl TemplateRx {
             //? check
             tokio::task::spawn(async move {
                 // Send CoinbaseOutputDataSize size to TP
+                let mut pending_new_template: Option<NewTemplate<'static>> = None;
+                let mut pending_tx_data_template_id: Option<u64> = None;
                 loop {
                     if last_token.is_none() {
                         let jd = match self_mutex.safe_lock(|s| s.jd.clone()) {
@@ -241,344 +243,361 @@ impl TemplateRx {
                         .await;
                     }
 
-                    match receiver.recv().await {
-                        Some(received) => {
-                            let frame: Result<StdFrame, _> = received.try_into();
-                            if let Ok(mut frame) = frame {
-                                let message_type = match frame.get_header() {
-                                    Some(header) => header.msg_type(),
-                                    None => {
-                                        error!("Msg header not found");
-                                        // Update global tp state to down
-                                        ProxyState::update_tp_state(TpState::Down);
-                                        break;
-                                    }
-                                };
-                                let payload = frame.payload();
+                    let ready_for_new_template = super::IS_NEW_TEMPLATE_HANDLED
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        && pending_tx_data_template_id.is_none();
+                    let use_pending_template =
+                        ready_for_new_template && pending_new_template.is_some();
+                    let (next_message_to_send, frame_for_log) = if use_pending_template {
+                        let pending = pending_new_template
+                            .take()
+                            .expect("pending template missing");
+                        (
+                            Ok(SendTo::None(Some(TemplateDistribution::NewTemplate(
+                                pending,
+                            )))),
+                            None,
+                        )
+                    } else {
+                        let received = match receiver.recv().await {
+                            Some(received) => received,
+                            None => {
+                                error!("Failed to receive msg");
+                                ProxyState::update_tp_state(TpState::Down);
+                                break;
+                            }
+                        };
+                        let frame: Result<StdFrame, _> = received.try_into();
+                        let mut frame = match frame {
+                            Ok(frame) => frame,
+                            Err(_) => {
+                                error!("Failed to covert TP message to StdFrame");
+                                // Update global tp state to down
+                                ProxyState::update_tp_state(TpState::Down);
+                                continue;
+                            }
+                        };
+                        let message_type = match frame.get_header() {
+                            Some(header) => header.msg_type(),
+                            None => {
+                                error!("Msg header not found");
+                                // Update global tp state to down
+                                ProxyState::update_tp_state(TpState::Down);
+                                break;
+                            }
+                        };
+                        let payload = frame.payload();
 
-                                let next_message_to_send =
+                        let next_message_to_send =
                             ParseServerTemplateDistributionMessages::handle_message_template_distribution(
                                 self_mutex.clone(),
                                 message_type,
                                 payload,
                             );
-                                match next_message_to_send {
-                                    Ok(SendTo::None(m)) => {
-                                        match m {
-                                            // Send the new template along with the token to the JD so that JD can
-                                            // declare the mining job
-                                            Some(TemplateDistribution::NewTemplate(m)) => {
-                                                let new_phash = super::IS_NEW_PHASH_ARRIVED
-                                                    .load(std::sync::atomic::Ordering::Acquire);
-                                                let last_is_future = match self_mutex
-                                                    .safe_lock(|t| t.new_template_message.clone())
-                                                {
-                                                    Ok(Some(new_template_message)) => {
-                                                        new_template_message.future_template
-                                                    }
-                                                    Ok(None) => false,
-                                                    Err(e) => {
-                                                        // Update global tp state to down
-                                                        error!("TemplateRx mutex poisoned: {e}");
-                                                        ProxyState::update_tp_state(TpState::Down);
-                                                        break;
-                                                    }
-                                                };
-                                                // THIS CODE ASSUME THAT TP SEND FUTURE ONLY BEFORE
-                                                // SNPH
-                                                // last_is_future	this_future	new_phash wait  next   discard
-                                                // true	            true	    true	  true	false
-                                                // true	            true	    false	  true	false
-                                                // true	            false	    true	  true	true
-                                                // true	            false	    false	  true	false
-                                                // false	        true	    true	  false	false  true
-                                                // false	        true	    false	  true	false
-                                                // false	        false	    true	  false	true
-                                                // false	        false	    false	  true	false
-                                                //
+                        (next_message_to_send, Some(frame))
+                    };
 
-                                                #[allow(clippy::nonminimal_bool)]
-                                                let wait_for_last_template_to_be_completed =
-                                                    last_is_future && new_phash || !new_phash;
-                                                let go_to_next_template =
-                                                    !m.future_template && new_phash;
-
-                                                let discard_last_and_use_this = !last_is_future
-                                                    && !wait_for_last_template_to_be_completed;
-
-                                                if wait_for_last_template_to_be_completed {
-                                                    println!(
-                                                        "wait_for_last_template_to_be_completed"
-                                                    );
-                                                    if new_phash {
-                                                        super::IS_NEW_PHASH_ARRIVED.store(
-                                                            false,
-                                                            std::sync::atomic::Ordering::Release,
-                                                        );
-                                                    }
-                                                    // See coment on the definition of the global for memory
-                                                    // ordering
-                                                    super::IS_NEW_TEMPLATE_HANDLED.store(
-                                                        false,
-                                                        std::sync::atomic::Ordering::Release,
-                                                    );
-                                                    Self::send_tx_data_request(
-                                                        &self_mutex,
-                                                        m.clone(),
-                                                    )
-                                                    .await;
-                                                    if self_mutex
-                                                        .safe_lock(|t| {
-                                                            t.new_template_message = Some(m.clone())
-                                                        })
-                                                        .is_err()
-                                                    {
-                                                        error!("TemplateRx Mutex is corrupt");
-                                                        // Update global tp state to down
-                                                        ProxyState::update_tp_state(TpState::Down);
-                                                        break;
-                                                    };
-
-                                                    let token = match last_token.clone() {
-                                                        Some(Some(token)) => token,
-                                                        Some(None) => break,
-                                                        None => break,
-                                                    };
-                                                    let pool_output =
-                                                        token.coinbase_output.to_vec();
-                                                    if let Err(e) = Downstream::on_new_template(
-                                                        &down,
-                                                        m.clone(),
-                                                        &pool_output[..],
-                                                    )
-                                                    .await
-                                                    {
-                                                        error!("{e:?}");
-                                                        // Update global downstream state to down
-                                                        ProxyState::update_downstream_state(
-                                                            DownstreamType::JdClientMiningDownstream,
-                                                        );
-                                                    };
-                                                } else if go_to_next_template {
-                                                    // last_is_future	this_future	new_phash wait  next   discard
-                                                    // 1)true           false	    true	  true	true
-                                                    // 2)false	        false	    true	  false	true
-                                                    // D)false	        true	    true	  false	false  true
-                                                    //
-                                                    // 1 ->  not possible cause we chak wait before
-                                                    //   so ok
-                                                    // 2 ->  we have to wait fot the next one that
-                                                    //   will be discard we don't need to change
-                                                    //   any global
-                                                    continue;
-                                                } else if discard_last_and_use_this {
-                                                    if new_phash {
-                                                        super::IS_NEW_PHASH_ARRIVED.store(
-                                                            false,
-                                                            std::sync::atomic::Ordering::Release,
-                                                        );
-                                                    }
-                                                    // Here we mark the IS_CUSTOM_JOB_SET as true since the last declared job
-                                                    // received is invalid if we are still in the process of declaring it we
-                                                    // want to free it since we are never going to do SetCustomJob for that
-                                                    // declared job. If we are not doing a declare + set job is already true so
-                                                    // nothing change.
-                                                    super::IS_CUSTOM_JOB_SET.store(
-                                                        true,
-                                                        std::sync::atomic::Ordering::Release,
-                                                    );
-                                                    // See coment on the definition of the global for memory
-                                                    // ordering
-                                                    super::IS_NEW_TEMPLATE_HANDLED.store(
-                                                        false,
-                                                        std::sync::atomic::Ordering::Release,
-                                                    );
-                                                    Self::send_tx_data_request(
-                                                        &self_mutex,
-                                                        m.clone(),
-                                                    )
-                                                    .await;
-                                                    if self_mutex
-                                                        .safe_lock(|t| {
-                                                            t.new_template_message = Some(m.clone())
-                                                        })
-                                                        .is_err()
-                                                    {
-                                                        error!("TemplateRx Mutex is corrupt");
-                                                        // Update global tp state to down
-                                                        ProxyState::update_tp_state(TpState::Down);
-                                                        break;
-                                                    };
-
-                                                    let token = match last_token.clone() {
-                                                        Some(Some(token)) => token,
-                                                        Some(None) => break,
-                                                        None => break,
-                                                    };
-                                                    let pool_output =
-                                                        token.coinbase_output.to_vec();
-                                                    if let Err(e) = Downstream::on_new_template(
-                                                        &down,
-                                                        m.clone(),
-                                                        &pool_output[..],
-                                                    )
-                                                    .await
-                                                    {
-                                                        error!("{e:?}");
-                                                        // Update global downstream state to down
-                                                        ProxyState::update_downstream_state(
-                                                            DownstreamType::JdClientMiningDownstream,
-                                                        );
-                                                    };
-                                                } else {
-                                                    unreachable!();
-                                                }
-                                            }
-                                            Some(TemplateDistribution::SetNewPrevHash(m)) => {
-                                                super::IS_NEW_PHASH_ARRIVED.store(
-                                                    true,
-                                                    std::sync::atomic::Ordering::Release,
-                                                );
-                                                info!("Received SetNewPrevHash, waiting for IS_NEW_TEMPLATE_HANDLED");
-                                                // See coment on the definition of the global for memory
-                                                // ordering
-                                                //
-                                                // This add ~2millis of latency, for now I leave it
-                                                // here since it means 8*e^-7 % bigger rej rate it
-                                                // looks like something acceptable
-                                                //
-                                                // 8*e^-7 is based on an old formula that model
-                                                // rej rate could be a little higher but still
-                                                // negligible
-                                                while !super::IS_NEW_TEMPLATE_HANDLED
-                                                    .load(std::sync::atomic::Ordering::Acquire)
-                                                {
-                                                    tokio::task::yield_now().await;
-                                                }
-                                                info!("IS_NEW_TEMPLATE_HANDLED ok");
-                                                if let Some(jd) = jd.as_ref() {
-                                                    if let Err(e) = super::job_declarator::JobDeclarator::on_set_new_prev_hash(
-                                                jd.clone(),
-                                                m.clone(),
-                                            ).await {
-                                                error!("{e:?}");
-                                                ProxyState::update_jd_state(JdState::Down); break;
-                                            };
-                                                }
-                                                if let Err(e) =
-                                                    Downstream::on_set_new_prev_hash(&down, m).await
-                                                {
-                                                    error!("SetNewPrevHash Error: {e:?}");
-                                                    // Update global tp state to down
-                                                    ProxyState::update_tp_state(TpState::Down);
-                                                    break;
-                                                };
-                                            }
-
-                                            Some(
-                                                TemplateDistribution::RequestTransactionDataSuccess(
-                                                    m,
-                                                ),
-                                            ) => {
-                                                let (erase_last_token_tx, erase_last_token_rx) =
-                                                    tokio::sync::oneshot::channel();
-                                                let self_mutex = self_mutex.clone();
-                                                let token = last_token.clone().unwrap().unwrap();
-                                                let jd = jd.clone();
-                                                tokio::task::spawn(async move {
-                                                    // safe to unwrap because this message is received after the new
-                                                    // template message
-                                                    let transactions_data = m.transaction_list;
-                                                    let excess_data = m.excess_data;
-                                                    let expected_template_id = m.template_id;
-                                                    if let Some(new_template_message) = self_mutex
-                                                        .safe_lock(|t| {
-                                                            t.new_template_message.clone()
-                                                        })
-                                                        .unwrap()
-                                                    {
-                                                        if new_template_message.template_id
-                                                            != expected_template_id
-                                                        {
-                                                            return;
-                                                        };
-                                                        erase_last_token_tx.send(()).unwrap();
-                                                        let mining_token =
-                                                            token.mining_job_token.to_vec();
-                                                        let pool_coinbase_out =
-                                                            token.coinbase_output.to_vec();
-                                                        if let Some(jd) = jd.as_ref() {
-                                                            if let Err(e) = super::job_declarator::JobDeclarator::on_new_template(
-                                                                jd,
-                                                                new_template_message.clone(),
-                                                                mining_token,
-                                                                transactions_data,
-                                                                excess_data,
-                                                                pool_coinbase_out,
-                                                            )
-                                                            .await {
-                                                                error!("{e:?}");
-                                                                ProxyState::update_downstream_state(DownstreamType::JdClientMiningDownstream);
-                                                            };
-                                                        }
-                                                    } else {
-                                                        ProxyState::update_tp_state(TpState::Down)
-                                                    };
-                                                });
-                                                erase_last_token_rx.await.unwrap();
-                                                last_token = None;
-                                            }
-                                            Some(
-                                                TemplateDistribution::RequestTransactionDataError(
-                                                    _,
-                                                ),
-                                            ) => {
-                                                warn!("The prev_hash of the template requested to Template Provider no longer points to the latest tip. Continuing work on the updated template.")
-                                            }
-                                            _ => {
-                                                error!("{:?}", frame);
-                                                error!("{:?}", frame.payload());
-                                                error!("{:?}", frame.get_header());
-                                                std::process::exit(1);
-                                            }
+                    let mut frame_for_log = frame_for_log;
+                    match next_message_to_send {
+                        Ok(SendTo::None(m)) => {
+                            match m {
+                                // Send the new template along with the token to the JD so that JD can
+                                // declare the mining job
+                                Some(TemplateDistribution::NewTemplate(m)) => {
+                                    let can_process_template = super::IS_NEW_TEMPLATE_HANDLED
+                                        .load(std::sync::atomic::Ordering::Acquire)
+                                        && pending_tx_data_template_id.is_none();
+                                    if !can_process_template {
+                                        pending_new_template = Some(m);
+                                        continue;
+                                    }
+                                    let new_phash = super::IS_NEW_PHASH_ARRIVED
+                                        .load(std::sync::atomic::Ordering::Acquire);
+                                    let last_is_future = match self_mutex
+                                        .safe_lock(|t| t.new_template_message.clone())
+                                    {
+                                        Ok(Some(new_template_message)) => {
+                                            new_template_message.future_template
                                         }
-                                    }
-                                    Ok(m) => {
-                                        error!("Unexpected next message {:?}", m);
-                                        error!("{:?}", frame);
-                                        error!("{:?}", frame.payload());
-                                        error!("{:?}", frame.get_header());
-                                        std::process::exit(1);
-                                    }
-                                    Err(roles_logic_sv2::Error::NoValidTemplate(_)) => {
-                                        // This can happen when we require data for a template, the TP
-                                        // already sent a new set prev hash, but the client did not saw it
-                                        // yet
-                                        error!(
-                                            "Required txs for a non valid template id, ignoring it"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        error!("Impossible to get next message {:?}", e);
-                                        error!("{:?}", frame);
-                                        error!("{:?}", frame.payload());
-                                        error!("{:?}", frame.get_header());
-                                        std::process::exit(1);
+                                        Ok(None) => false,
+                                        Err(e) => {
+                                            // Update global tp state to down
+                                            error!("TemplateRx mutex poisoned: {e}");
+                                            ProxyState::update_tp_state(TpState::Down);
+                                            break;
+                                        }
+                                    };
+                                    // THIS CODE ASSUME THAT TP SEND FUTURE ONLY BEFORE
+                                    // SNPH
+                                    // last_is_future	this_future	new_phash wait  next   discard
+                                    // true	            true	    true	  true	false
+                                    // true	            true	    false	  true	false
+                                    // true	            false	    true	  true	true
+                                    // true	            false	    false	  true	false
+                                    // false	        true	    true	  false	false  true
+                                    // false	        true	    false	  true	false
+                                    // false	        false	    true	  false	true
+                                    // false	        false	    false	  true	false
+                                    //
+
+                                    #[allow(clippy::nonminimal_bool)]
+                                    let wait_for_last_template_to_be_completed =
+                                        last_is_future && new_phash || !new_phash;
+                                    let go_to_next_template = !m.future_template && new_phash;
+
+                                    let discard_last_and_use_this =
+                                        !last_is_future && !wait_for_last_template_to_be_completed;
+
+                                    if wait_for_last_template_to_be_completed {
+                                        println!("wait_for_last_template_to_be_completed");
+                                        if new_phash {
+                                            super::IS_NEW_PHASH_ARRIVED
+                                                .store(false, std::sync::atomic::Ordering::Release);
+                                        }
+                                        // See coment on the definition of the global for memory
+                                        // ordering
+                                        super::IS_NEW_TEMPLATE_HANDLED
+                                            .store(false, std::sync::atomic::Ordering::Release);
+                                        pending_tx_data_template_id = Some(m.template_id);
+                                        Self::send_tx_data_request(&self_mutex, m.clone()).await;
+                                        if self_mutex
+                                            .safe_lock(|t| t.new_template_message = Some(m.clone()))
+                                            .is_err()
+                                        {
+                                            error!("TemplateRx Mutex is corrupt");
+                                            // Update global tp state to down
+                                            ProxyState::update_tp_state(TpState::Down);
+                                            break;
+                                        };
+
+                                        let token = match last_token.clone() {
+                                            Some(Some(token)) => token,
+                                            Some(None) => break,
+                                            None => break,
+                                        };
+                                        let pool_output = token.coinbase_output.to_vec();
+                                        if let Err(e) = Downstream::on_new_template(
+                                            &down,
+                                            m.clone(),
+                                            &pool_output[..],
+                                        )
+                                        .await
+                                        {
+                                            error!("{e:?}");
+                                            // Update global downstream state to down
+                                            ProxyState::update_downstream_state(
+                                                DownstreamType::JdClientMiningDownstream,
+                                            );
+                                        };
+                                    } else if go_to_next_template {
+                                        // last_is_future	this_future	new_phash wait  next   discard
+                                        // 1)true           false	    true	  true	true
+                                        // 2)false	        false	    true	  false	true
+                                        // D)false	        true	    true	  false	false  true
+                                        //
+                                        // 1 ->  not possible cause we chak wait before
+                                        //   so ok
+                                        // 2 ->  we have to wait fot the next one that
+                                        //   will be discard we don't need to change
+                                        //   any global
+                                        continue;
+                                    } else if discard_last_and_use_this {
+                                        if new_phash {
+                                            super::IS_NEW_PHASH_ARRIVED
+                                                .store(false, std::sync::atomic::Ordering::Release);
+                                        }
+                                        // Here we mark the IS_CUSTOM_JOB_SET as true since the last declared job
+                                        // received is invalid if we are still in the process of declaring it we
+                                        // want to free it since we are never going to do SetCustomJob for that
+                                        // declared job. If we are not doing a declare + set job is already true so
+                                        // nothing change.
+                                        super::IS_CUSTOM_JOB_SET
+                                            .store(true, std::sync::atomic::Ordering::Release);
+                                        // See coment on the definition of the global for memory
+                                        // ordering
+                                        super::IS_NEW_TEMPLATE_HANDLED
+                                            .store(false, std::sync::atomic::Ordering::Release);
+                                        pending_tx_data_template_id = Some(m.template_id);
+                                        Self::send_tx_data_request(&self_mutex, m.clone()).await;
+                                        if self_mutex
+                                            .safe_lock(|t| t.new_template_message = Some(m.clone()))
+                                            .is_err()
+                                        {
+                                            error!("TemplateRx Mutex is corrupt");
+                                            // Update global tp state to down
+                                            ProxyState::update_tp_state(TpState::Down);
+                                            break;
+                                        };
+
+                                        let token = match last_token.clone() {
+                                            Some(Some(token)) => token,
+                                            Some(None) => break,
+                                            None => break,
+                                        };
+                                        let pool_output = token.coinbase_output.to_vec();
+                                        if let Err(e) = Downstream::on_new_template(
+                                            &down,
+                                            m.clone(),
+                                            &pool_output[..],
+                                        )
+                                        .await
+                                        {
+                                            error!("{e:?}");
+                                            // Update global downstream state to down
+                                            ProxyState::update_downstream_state(
+                                                DownstreamType::JdClientMiningDownstream,
+                                            );
+                                        };
+                                    } else {
+                                        unreachable!();
                                     }
                                 }
-                            } else {
-                                error!("Failed to covert TP message to StdFrame");
-                                // Update global tp state to down
-                                ProxyState::update_tp_state(TpState::Down);
+                                Some(TemplateDistribution::SetNewPrevHash(m)) => {
+                                    super::IS_NEW_PHASH_ARRIVED
+                                        .store(true, std::sync::atomic::Ordering::Release);
+                                    info!("Received SetNewPrevHash, waiting for IS_NEW_TEMPLATE_HANDLED");
+                                    // See coment on the definition of the global for memory
+                                    // ordering
+                                    //
+                                    // This add ~2millis of latency, for now I leave it
+                                    // here since it means 8*e^-7 % bigger rej rate it
+                                    // looks like something acceptable
+                                    //
+                                    // 8*e^-7 is based on an old formula that model
+                                    // rej rate could be a little higher but still
+                                    // negligible
+                                    while !super::IS_NEW_TEMPLATE_HANDLED
+                                        .load(std::sync::atomic::Ordering::Acquire)
+                                    {
+                                        tokio::task::yield_now().await;
+                                    }
+                                    info!("IS_NEW_TEMPLATE_HANDLED ok");
+                                    if let Some(jd) = jd.as_ref() {
+                                        if let Err(e) = super::job_declarator::JobDeclarator::on_set_new_prev_hash(
+                                    jd.clone(),
+                                    m.clone(),
+                                ).await {
+                                    error!("{e:?}");
+                                    ProxyState::update_jd_state(JdState::Down); break;
+                                };
+                                    }
+                                    if let Err(e) = Downstream::on_set_new_prev_hash(&down, m).await
+                                    {
+                                        error!("SetNewPrevHash Error: {e:?}");
+                                        // Update global tp state to down
+                                        ProxyState::update_tp_state(TpState::Down);
+                                        break;
+                                    };
+                                }
+
+                                Some(TemplateDistribution::RequestTransactionDataSuccess(m)) => {
+                                    if pending_tx_data_template_id != Some(m.template_id) {
+                                        warn!(
+                                            "Ignoring RequestTransactionDataSuccess for stale template id {}",
+                                            m.template_id
+                                        );
+                                        continue;
+                                    }
+                                    let new_template_message = match self_mutex
+                                        .safe_lock(|t| t.new_template_message.clone())
+                                    {
+                                        Ok(new_template_message) => new_template_message,
+                                        Err(e) => {
+                                            error!("TemplateRx mutex poisoned: {e}");
+                                            ProxyState::update_tp_state(TpState::Down);
+                                            pending_tx_data_template_id = None;
+                                            last_token = None;
+                                            continue;
+                                        }
+                                    };
+                                    let new_template_message = match new_template_message {
+                                        Some(new_template_message) => new_template_message,
+                                        None => {
+                                            ProxyState::update_tp_state(TpState::Down);
+                                            pending_tx_data_template_id = None;
+                                            last_token = None;
+                                            continue;
+                                        }
+                                    };
+                                    if new_template_message.template_id != m.template_id {
+                                        warn!(
+                                            "Ignoring RequestTransactionDataSuccess for template id {} with mismatched active template",
+                                            m.template_id
+                                        );
+                                        pending_tx_data_template_id = None;
+                                        last_token = None;
+                                        continue;
+                                    }
+                                    let token = match last_token.take() {
+                                        Some(Some(token)) => token,
+                                        Some(None) => break,
+                                        None => break,
+                                    };
+                                    pending_tx_data_template_id = None;
+                                    let jd = jd.clone();
+                                    tokio::task::spawn(async move {
+                                        let transactions_data = m.transaction_list;
+                                        let excess_data = m.excess_data;
+                                        let mining_token = token.mining_job_token.to_vec();
+                                        let pool_coinbase_out = token.coinbase_output.to_vec();
+                                        if let Some(jd) = jd.as_ref() {
+                                            if let Err(e) = super::job_declarator::JobDeclarator::on_new_template(
+                                                jd,
+                                                new_template_message,
+                                                mining_token,
+                                                transactions_data,
+                                                excess_data,
+                                                pool_coinbase_out,
+                                            )
+                                            .await {
+                                                error!("{e:?}");
+                                                ProxyState::update_downstream_state(DownstreamType::JdClientMiningDownstream);
+                                            };
+                                        }
+                                    });
+                                }
+                                Some(TemplateDistribution::RequestTransactionDataError(m)) => {
+                                    if pending_tx_data_template_id == Some(m.template_id) {
+                                        pending_tx_data_template_id = None;
+                                        last_token = None;
+                                    }
+                                    warn!("The prev_hash of the template requested to Template Provider no longer points to the latest tip. Continuing work on the updated template.")
+                                }
+                                _ => {
+                                    if let Some(mut frame) = frame_for_log.take() {
+                                        error!("{:?}", frame);
+                                        error!("{:?}", frame.payload());
+                                        error!("{:?}", frame.get_header());
+                                    }
+                                    std::process::exit(1);
+                                }
                             }
                         }
-
-                        None => {
-                            error!("Failed to receive msg");
-                            ProxyState::update_tp_state(TpState::Down);
-                            break;
+                        Ok(m) => {
+                            error!("Unexpected next message {:?}", m);
+                            if let Some(mut frame) = frame_for_log.take() {
+                                error!("{:?}", frame);
+                                error!("{:?}", frame.payload());
+                                error!("{:?}", frame.get_header());
+                            }
+                            std::process::exit(1);
                         }
-                    };
+                        Err(roles_logic_sv2::Error::NoValidTemplate(_)) => {
+                            // This can happen when we require data for a template, the TP
+                            // already sent a new set prev hash, but the client did not saw it
+                            // yet
+                            error!("Required txs for a non valid template id, ignoring it");
+                        }
+                        Err(e) => {
+                            error!("Impossible to get next message {:?}", e);
+                            if let Some(mut frame) = frame_for_log.take() {
+                                error!("{:?}", frame);
+                                error!("{:?}", frame.payload());
+                                error!("{:?}", frame.get_header());
+                            }
+                            std::process::exit(1);
+                        }
+                    }
                 }
             })
         };
@@ -607,5 +626,242 @@ impl TemplateRx {
                 Self::send(&self_, sv2_frame).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jd_client::{IS_CUSTOM_JOB_SET, IS_NEW_PHASH_ARRIVED, IS_NEW_TEMPLATE_HANDLED};
+    use binary_sv2::{Seq0255, Seq064K, B016M, B0255, B064K, U256};
+    use bitcoin::consensus::Encodable;
+    use roles_logic_sv2::template_distribution_sv2::RequestTransactionDataSuccess;
+    use std::convert::TryInto;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::{mpsc, oneshot};
+
+    fn make_new_template(template_id: u64, future_template: bool) -> NewTemplate<'static> {
+        let coinbase_prefix: B0255<'static> = Vec::new()
+            .try_into()
+            .expect("coinbase prefix should fit in B0255");
+        let coinbase_tx_outputs: B064K<'static> = Vec::new()
+            .try_into()
+            .expect("coinbase outputs should fit in B064K");
+        let merkle_path: Seq0255<'static, U256<'static>> = Vec::new().into();
+        NewTemplate {
+            template_id,
+            future_template,
+            version: 0,
+            coinbase_tx_version: 1,
+            coinbase_prefix,
+            coinbase_tx_input_sequence: 0,
+            coinbase_tx_value_remaining: 0,
+            coinbase_tx_outputs_count: 0,
+            coinbase_tx_outputs,
+            coinbase_tx_locktime: 0,
+            merkle_path,
+        }
+    }
+
+    fn make_tx_data_success(template_id: u64) -> RequestTransactionDataSuccess<'static> {
+        let excess_data: B064K<'static> = Vec::new()
+            .try_into()
+            .expect("excess data should fit in B064K");
+        let transaction_list: Seq064K<'static, B016M<'static>> =
+            Seq064K::new(Vec::new()).expect("transaction list should be empty");
+        RequestTransactionDataSuccess {
+            template_id,
+            excess_data,
+            transaction_list,
+        }
+    }
+
+    async fn recv_std_frame(receiver: &mut mpsc::Receiver<EitherFrame>) -> StdFrame {
+        let received = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("timed out waiting for frame")
+            .expect("channel closed while waiting for frame");
+        received.try_into().expect("failed to decode sv2 frame")
+    }
+
+    fn with_decoded_message<R>(
+        frame: StdFrame,
+        f: impl for<'a> FnOnce(PoolMessages<'a>) -> R,
+    ) -> R {
+        let message_type = frame
+            .get_header()
+            .expect("sv2 frame missing header")
+            .msg_type();
+        let mut buf = vec![0_u8; frame.encoded_length()];
+        frame
+            .serialize(&mut buf)
+            .expect("failed to serialize sv2 frame");
+        let payload = &mut buf[framing_sv2::header::Header::SIZE..];
+        let message =
+            PoolMessages::try_from((message_type, payload)).expect("failed to parse sv2 payload");
+        f(message)
+    }
+
+    async fn send_message(sender: &mpsc::Sender<EitherFrame>, message: PoolMessages<'static>) {
+        let frame: StdFrame = message.try_into().expect("failed to encode sv2 frame");
+        let len = frame.encoded_length();
+        let mut buf = vec![0_u8; len];
+        frame
+            .serialize(&mut buf)
+            .expect("failed to serialize sv2 frame");
+        let frame = StdFrame::from_bytes(buf.into()).expect("failed to build serialized frame");
+        sender
+            .send(frame.into())
+            .await
+            .expect("failed to send frame");
+    }
+
+    async fn expect_tx_data_request(
+        receiver: &mut mpsc::Receiver<EitherFrame>,
+        expected_template_id: u64,
+    ) {
+        let frame = recv_std_frame(receiver).await;
+        with_decoded_message(frame, |message| match message {
+            PoolMessages::TemplateDistribution(TemplateDistribution::RequestTransactionData(m)) => {
+                assert_eq!(m.template_id, expected_template_id);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        });
+    }
+
+    async fn run_fake_tp(
+        to_client: mpsc::Sender<EitherFrame>,
+        mut from_client: mpsc::Receiver<EitherFrame>,
+        progress_tx: oneshot::Sender<()>,
+    ) {
+        let frame = recv_std_frame(&mut from_client).await;
+        with_decoded_message(frame, |message| match message {
+            PoolMessages::TemplateDistribution(TemplateDistribution::CoinbaseOutputDataSize(_)) => {
+            }
+            other => panic!("unexpected coinbase size message: {other:?}"),
+        });
+
+        send_message(
+            &to_client,
+            PoolMessages::TemplateDistribution(TemplateDistribution::NewTemplate(
+                make_new_template(1, true),
+            )),
+        )
+        .await;
+        expect_tx_data_request(&mut from_client, 1).await;
+
+        send_message(
+            &to_client,
+            PoolMessages::TemplateDistribution(TemplateDistribution::NewTemplate(
+                make_new_template(2, true),
+            )),
+        )
+        .await;
+
+        send_message(
+            &to_client,
+            PoolMessages::TemplateDistribution(TemplateDistribution::NewTemplate(
+                make_new_template(3, true),
+            )),
+        )
+        .await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        send_message(
+            &to_client,
+            PoolMessages::TemplateDistribution(
+                TemplateDistribution::RequestTransactionDataSuccess(make_tx_data_success(1)),
+            ),
+        )
+        .await;
+        expect_tx_data_request(&mut from_client, 3).await;
+
+        send_message(
+            &to_client,
+            PoolMessages::TemplateDistribution(
+                TemplateDistribution::RequestTransactionDataSuccess(make_tx_data_success(2)),
+            ),
+        )
+        .await;
+
+        send_message(
+            &to_client,
+            PoolMessages::TemplateDistribution(
+                TemplateDistribution::RequestTransactionDataSuccess(make_tx_data_success(3)),
+            ),
+        )
+        .await;
+
+        let _ = progress_tx.send(());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
+    async fn panics_on_stale_tx_data_success_after_new_template() {
+        IS_NEW_TEMPLATE_HANDLED.store(true, Ordering::Release);
+        IS_CUSTOM_JOB_SET.store(true, Ordering::Release);
+        IS_NEW_PHASH_ARRIVED.store(false, Ordering::Release);
+
+        let prev_hook = std::panic::take_hook();
+        let panic_seen = Arc::new(AtomicBool::new(false));
+        let panic_seen_hook = panic_seen.clone();
+        // Capture panics from background tasks.
+        std::panic::set_hook(Box::new(move |info| {
+            panic_seen_hook.store(true, Ordering::SeqCst);
+            eprintln!("{info}");
+        }));
+
+        let (tp_to_client_tx, tp_to_client_rx) = mpsc::channel(10);
+        let (client_to_tp_tx, client_to_tp_rx) = mpsc::channel(10);
+        let (progress_tx, progress_rx) = oneshot::channel();
+        let tp_task = tokio::spawn(run_fake_tp(tp_to_client_tx, client_to_tp_rx, progress_tx));
+
+        let (solution_tx, _solution_rx) = mpsc::channel(1);
+        let (down_tx, _down_rx) = mpsc::channel(1);
+        let down = Arc::new(Mutex::new(Downstream::new(
+            down_tx,
+            None,
+            solution_tx,
+            false,
+            Vec::new(),
+            None,
+        )));
+
+        let mut encoded_outputs = vec![];
+        Vec::<TxOut>::new()
+            .consensus_encode(&mut encoded_outputs)
+            .expect("encode coinbase outputs");
+        let self_mutex = Arc::new(Mutex::new(TemplateRx {
+            sender: client_to_tp_tx,
+            jd: None,
+            down,
+            new_template_message: None,
+            miner_coinbase_output: encoded_outputs,
+            test_only_do_not_send_solution_to_tp: true,
+        }));
+        let _abortable = TemplateRx::start_templates(self_mutex, tp_to_client_rx)
+            .await
+            .expect("template receiver start");
+
+        tokio::time::timeout(Duration::from_secs(2), progress_rx)
+            .await
+            .expect("fake tp did not reach stale tx data send")
+            .expect("fake tp progress channel closed");
+
+        let wait_for_panic = async {
+            while !panic_seen.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(2), wait_for_panic).await;
+        std::panic::set_hook(prev_hook);
+        tp_task.abort();
+        assert!(
+            !panic_seen.load(Ordering::SeqCst),
+            "stale RequestTransactionDataSuccess triggers panic"
+        );
     }
 }
