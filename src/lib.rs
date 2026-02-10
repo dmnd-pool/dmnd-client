@@ -77,8 +77,6 @@ pub async fn start() {
 
     let enable_file_logging = Configuration::enable_file_logging();
 
-    // let remote_layer = SendLogLayer::new();
-
     //Disable noise_connection error (for now) because:
     // 1. It produce logs that are not very user friendly and also bloat the logs
     // 2. The errors resulting from noise_connection are handled. E.g if unrecoverable error from

@@ -4,12 +4,11 @@ use tracing::{debug, error};
 
 use crate::{
     config::Configuration,
-    monitor::{logs::ProxyLog, shares::ShareInfo, worker_activity::WorkerActivity},
+    monitor::{shares::ShareInfo, worker_activity::WorkerActivity},
     shared::error::Error,
     LOCAL_URL, PRODUCTION_URL, STAGING_URL, TESTNET3_URL,
 };
 
-pub mod logs;
 pub mod shares;
 pub mod worker_activity;
 pub struct MonitorAPI {
@@ -17,16 +16,6 @@ pub struct MonitorAPI {
     pub client: reqwest::Client,
 }
 
-#[allow(dead_code)]
-fn proxy_log_server_endpoint() -> String {
-    match Configuration::environment().as_str() {
-        "staging" => format!("{}/api/proxy/logs", STAGING_URL),
-        "testnet3" => format!("{}/api/proxy/logs", TESTNET3_URL),
-        "local" => format!("{}/api/proxy/logs", LOCAL_URL),
-        "production" => format!("{}/api/proxy/logs", PRODUCTION_URL),
-        _ => unreachable!(),
-    }
-}
 fn shares_server_endpoint() -> String {
     // Determine the monitoring server URL based on the environment
     match Configuration::environment().as_str() {
@@ -74,27 +63,6 @@ impl MonitorAPI {
             Ok(_) => Ok(()),
             Err(err) => {
                 error!("Failed to send shares: {}", err);
-                Err(err.into())
-            }
-        }
-    }
-
-    /// Sends a log to the monitoring server.
-    pub async fn send_log(&self, log: ProxyLog) -> Result<(), Error> {
-        let token = crate::config::Configuration::token().expect("Token is not set");
-
-        debug!("Sending log to API: {:?}", log);
-        let response = self
-            .client
-            .post(self.url.clone())
-            .json(&json!({ "log": log, "token": token }))
-            .send()
-            .await?;
-
-        match response.error_for_status() {
-            Ok(_) => Ok(()),
-            Err(err) => {
-                error!("Failed to send log: {}", err);
                 Err(err.into())
             }
         }
