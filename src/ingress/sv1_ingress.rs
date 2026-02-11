@@ -13,6 +13,7 @@ use futures::{
 };
 use roles_logic_sv2::utils::Mutex;
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
     sync::mpsc::{channel, Receiver, Sender},
 };
@@ -71,11 +72,13 @@ impl Downstream {
             Self::start(framed, recv_from_upstream, send_to_upstream).await
         });
     }
-    async fn start(
-        framed: Framed<TcpStream, LinesCodec>,
+    async fn start<S>(
+        framed: Framed<S, LinesCodec>,
         receiver: Receiver<String>,
         sender: Sender<String>,
-    ) {
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
         let (writer, reader) = framed.split();
         let firmware = Arc::new(Mutex::new(Firmware::Uninitialized));
         let result = tokio::select! {
@@ -88,11 +91,14 @@ impl Downstream {
             Sv1IngressError::TranslatorDropped => (),
         }
     }
-    async fn receive_from_downstream_and_relay_up(
-        mut recv: SplitStream<Framed<TcpStream, LinesCodec>>,
+    async fn receive_from_downstream_and_relay_up<S>(
+        mut recv: SplitStream<Framed<S, LinesCodec>>,
         send: Sender<String>,
         firmware: Arc<Mutex<Firmware>>,
-    ) -> Sv1IngressError {
+    ) -> Sv1IngressError
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
         let mut is_subscribed = false;
         while let Some(Ok(message)) = recv.next().await {
             if Configuration::sv1_ingress_log() {
@@ -114,11 +120,14 @@ impl Downstream {
         warn!("Downstream dropped while trying to send message up");
         Sv1IngressError::DownstreamDropped
     }
-    async fn receive_from_upstream_and_relay_down(
-        mut send: SplitSink<Framed<TcpStream, LinesCodec>, String>,
+    async fn receive_from_upstream_and_relay_down<S>(
+        mut send: SplitSink<Framed<S, LinesCodec>, String>,
         mut recv: Receiver<String>,
         firmware_: Arc<Mutex<Firmware>>,
-    ) -> Sv1IngressError {
+    ) -> Sv1IngressError
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
         let mut firmware = Firmware::Uninitialized;
         while let Some(message) = recv.recv().await {
             let mut message = message.replace(['\n', '\r'], "");
@@ -168,21 +177,11 @@ mod tests {
 
     #[tokio::test]
     async fn closes_upstream_channel_when_translator_drops() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("listener local addr");
-
-        // Keep the client stream open so the downstream reader task stays pending.
-        let client_stream = tokio::net::TcpStream::connect(addr)
-            .await
-            .expect("connect to listener");
-        let (server_stream, _) = listener.accept().await.expect("accept connection");
-
-        let framed = tokio_util::codec::Framed::new(
-            server_stream,
-            tokio_util::codec::LinesCodec::new_with_max_length(1024),
-        );
+        // Use an in-memory stream so this test doesn't depend on OS networking.
+        // Keep the client side open so the downstream reader task stays pending.
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let framed =
+            tokio_util::codec::Framed::new(server_stream, LinesCodec::new_with_max_length(1024));
 
         let (tx_to_translator, mut rx_from_downstream) = tokio::sync::mpsc::channel(10);
         let (tx_to_downstream, rx_from_translator) = tokio::sync::mpsc::channel(10);
@@ -209,5 +208,45 @@ mod tests {
         );
 
         drop(client_stream);
+    }
+
+    #[tokio::test]
+    async fn closes_upstream_channel_when_downstream_drops() {
+        // Use an in-memory stream so this test doesn't depend on OS networking.
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let framed =
+            tokio_util::codec::Framed::new(server_stream, LinesCodec::new_with_max_length(1024));
+
+        let (tx_to_translator, mut rx_from_downstream) = tokio::sync::mpsc::channel(10);
+        let (tx_to_downstream, rx_from_translator) = tokio::sync::mpsc::channel(10);
+
+        let handle = tokio::spawn(async move {
+            Downstream::start(framed, rx_from_translator, tx_to_translator).await;
+        });
+
+        // Simulate the miner disconnecting.
+        drop(client_stream);
+
+        timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("ingress task should exit")
+            .expect("ingress task should not panic");
+
+        let recv_res = timeout(Duration::from_secs(1), rx_from_downstream.recv())
+            .await
+            .expect("upstream channel should close quickly");
+        assert!(
+            recv_res.is_none(),
+            "upstream channel should be closed when downstream drops"
+        );
+
+        // Ensure the downstream channel is also closed.
+        assert!(
+            tx_to_downstream
+                .send("{\"id\":1}".to_string())
+                .await
+                .is_err(),
+            "downstream channel should be closed when downstream drops"
+        );
     }
 }
