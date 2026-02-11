@@ -49,6 +49,10 @@ pub async fn connect_pool(
                 break socket;
             }
             Err(e) => {
+                // In local mode, fail fast so we can fallback to dummy connection
+                if crate::config::Configuration::local() {
+                    return Err(Error::Io(e));
+                }
                 error!(
                     "Failed to connect to Upstream role at {}, retrying in 5s: {}",
                     address, e
