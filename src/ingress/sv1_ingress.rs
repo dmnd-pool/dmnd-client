@@ -86,7 +86,6 @@ impl Downstream {
         match result {
             Sv1IngressError::DownstreamDropped => (),
             Sv1IngressError::TranslatorDropped => (),
-            Sv1IngressError::TaskFailed => (),
         }
     }
     async fn receive_from_downstream_and_relay_up(
@@ -95,32 +94,25 @@ impl Downstream {
         firmware: Arc<Mutex<Firmware>>,
     ) -> Sv1IngressError {
         let mut is_subscribed = false;
-        let task = tokio::spawn(async move {
-            while let Some(Ok(message)) = recv.next().await {
-                if Configuration::sv1_ingress_log() {
-                    info!("Sending msg to upstream: {}", message);
-                }
-                if !is_subscribed && message.contains("mining.subscribe") {
-                    is_subscribed = true;
-                    if message.contains("LUXminer") {
-                        firmware.safe_lock(|f| *f = Firmware::Luxor).unwrap();
-                    } else {
-                        firmware.safe_lock(|f| *f = Firmware::Other).unwrap();
-                    }
-                }
-                if send.send(message).await.is_err() {
-                    error!("Upstream dropped trying to send");
-                    return Sv1IngressError::TranslatorDropped;
+        while let Some(Ok(message)) = recv.next().await {
+            if Configuration::sv1_ingress_log() {
+                info!("Sending msg to upstream: {}", message);
+            }
+            if !is_subscribed && message.contains("mining.subscribe") {
+                is_subscribed = true;
+                if message.contains("LUXminer") {
+                    firmware.safe_lock(|f| *f = Firmware::Luxor).unwrap();
+                } else {
+                    firmware.safe_lock(|f| *f = Firmware::Other).unwrap();
                 }
             }
-            warn!("Downstream dropped while trying to send message up");
-            Sv1IngressError::DownstreamDropped
-        })
-        .await;
-        match task {
-            Ok(err) => err,
-            Err(_) => Sv1IngressError::TaskFailed,
+            if send.send(message).await.is_err() {
+                error!("Upstream dropped trying to send");
+                return Sv1IngressError::TranslatorDropped;
+            }
         }
+        warn!("Downstream dropped while trying to send message up");
+        Sv1IngressError::DownstreamDropped
     }
     async fn receive_from_upstream_and_relay_down(
         mut send: SplitSink<Framed<TcpStream, LinesCodec>, String>,
@@ -128,35 +120,28 @@ impl Downstream {
         firmware_: Arc<Mutex<Firmware>>,
     ) -> Sv1IngressError {
         let mut firmware = Firmware::Uninitialized;
-        let task = tokio::spawn(async move {
-            while let Some(message) = recv.recv().await {
-                let mut message = message.replace(['\n', '\r'], "");
-                if !firmware.is_initialized() {
-                    firmware = firmware_.safe_lock(|f| *f).unwrap();
-                } else if firmware.is_luxor() && !message.contains("\"id\"") {
-                    if let Some(pos) = message.find('{') {
-                        message.insert_str(pos + 1, r#""id":null,"#);
-                    }
+        while let Some(message) = recv.recv().await {
+            let mut message = message.replace(['\n', '\r'], "");
+            if !firmware.is_initialized() {
+                firmware = firmware_.safe_lock(|f| *f).unwrap();
+            } else if firmware.is_luxor() && !message.contains("\"id\"") {
+                if let Some(pos) = message.find('{') {
+                    message.insert_str(pos + 1, r#""id":null,"#);
                 }
-                if Configuration::sv1_ingress_log() {
-                    info!("Sending msg to downstream_: {}", message);
-                }
-                if send.send(message).await.is_err() {
-                    warn!("Downstream dropped while trying to send message down");
-                    return Sv1IngressError::DownstreamDropped;
-                };
             }
-            if send.close().await.is_err() {
-                error!("Failed to close connection");
+            if Configuration::sv1_ingress_log() {
+                info!("Sending msg to downstream_: {}", message);
+            }
+            if send.send(message).await.is_err() {
+                warn!("Downstream dropped while trying to send message down");
+                return Sv1IngressError::DownstreamDropped;
             };
-            error!("Upstream dropped trying to receive");
-            Sv1IngressError::TranslatorDropped
-        })
-        .await;
-        match task {
-            Ok(err) => err,
-            Err(_) => Sv1IngressError::TaskFailed,
         }
+        if send.close().await.is_err() {
+            error!("Failed to close connection");
+        };
+        error!("Upstream dropped trying to receive");
+        Sv1IngressError::TranslatorDropped
     }
 }
 
@@ -173,5 +158,56 @@ impl Firmware {
     }
     fn is_luxor(&self) -> bool {
         matches!(self, Firmware::Luxor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{timeout, Duration};
+
+    #[tokio::test]
+    async fn closes_upstream_channel_when_translator_drops() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener local addr");
+
+        // Keep the client stream open so the downstream reader task stays pending.
+        let client_stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to listener");
+        let (server_stream, _) = listener.accept().await.expect("accept connection");
+
+        let framed = tokio_util::codec::Framed::new(
+            server_stream,
+            tokio_util::codec::LinesCodec::new_with_max_length(1024),
+        );
+
+        let (tx_to_translator, mut rx_from_downstream) = tokio::sync::mpsc::channel(10);
+        let (tx_to_downstream, rx_from_translator) = tokio::sync::mpsc::channel(10);
+
+        let handle = tokio::spawn(async move {
+            Downstream::start(framed, rx_from_translator, tx_to_translator).await;
+        });
+
+        // Drop the upstream sender so `receive_from_upstream_and_relay_down` completes and the
+        // downstream reader task must be cancelled (and drop its sender) too.
+        drop(tx_to_downstream);
+
+        timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("ingress task should exit")
+            .expect("ingress task should not panic");
+
+        let recv_res = timeout(Duration::from_secs(1), rx_from_downstream.recv())
+            .await
+            .expect("upstream channel should close quickly");
+        assert!(
+            recv_res.is_none(),
+            "upstream channel should be closed when translator drops"
+        );
+
+        drop(client_stream);
     }
 }

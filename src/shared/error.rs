@@ -3,7 +3,6 @@ use std::fmt;
 pub enum Sv1IngressError {
     TranslatorDropped,
     DownstreamDropped,
-    TaskFailed,
 }
 
 #[derive(Debug)]
