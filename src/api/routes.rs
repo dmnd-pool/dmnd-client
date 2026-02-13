@@ -67,20 +67,22 @@ impl Api {
     // Retrieves the current pool information
     pub async fn get_pool_info(State(state): State<AppState>) -> impl IntoResponse {
         let current_pool_address = state.router.current_pool;
-        let latency = *state.router.latency_rx.borrow();
-
-        match (current_pool_address, latency) {
-            (Some(address), Some(latency)) => {
+        match current_pool_address {
+            Some(address) => {
+                let latency = match state.router.get_latency(address).await {
+                    Ok(latency) => Some(latency),
+                    Err(_) => None,
+                };
                 let response_data = serde_json::json!({
                     "address": address.to_string(),
-                    "latency": latency.as_millis().to_string()
+                    "latency": latency.map(|d| d.as_millis().to_string()).unwrap_or_else(|| "N/A".to_string())
                 });
                 (
                     StatusCode::OK,
                     Json(APIResponse::success(Some(response_data))),
                 )
             }
-            (_, _) => (
+            None => (
                 StatusCode::NOT_FOUND,
                 Json(APIResponse::error(Some(
                     "Pool information unavailable".to_string(),
