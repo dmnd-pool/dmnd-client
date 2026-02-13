@@ -1,6 +1,6 @@
 [package]
 name = "dmnd-client"
-version = "0.2.4"
+version = "0.2.7"
 edition = "2021"
 
 [lib]

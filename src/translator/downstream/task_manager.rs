@@ -146,12 +146,13 @@ impl TaskManager {
     }
 
     pub async fn add_shares_monitor(
+        connection_id: u32,
         self_: Arc<Mutex<Self>>,
         abortable: AbortOnDrop,
     ) -> Result<(), ()> {
         let send_task = self_.safe_lock(|s| s.send_task.clone()).unwrap();
         send_task
-            .send((None, Task::SharesMonitor(abortable)))
+            .send((Some(connection_id), Task::SharesMonitor(abortable)))
             .await
             .map_err(|_| ())
     }

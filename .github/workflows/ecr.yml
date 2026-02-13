@@ -37,7 +37,7 @@ jobs:
         uses: pulumi/actions@v6
         with:
           command: up
-          stack-name: dmnd-tech-org/dmnd-client-image/dmnd-client-image
+          stack-name: dmnd-tech-org/image/client
           work-dir: deployment/ecrImage/
           config: version=${{ steps.get_version.outputs.VERSION }}
         env:

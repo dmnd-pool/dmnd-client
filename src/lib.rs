@@ -64,7 +64,7 @@ lazy_static! {
 }
 lazy_static! {
     static ref SHARE_PER_MIN: f32 = std::env::var("SHARE_PER_MIN")
-        .unwrap_or("6.0".to_string())
+        .unwrap_or("10.0".to_string())
         .parse::<f32>()
         .expect("SHARE_PER_MIN is not a valid number");
 }
@@ -76,8 +76,6 @@ pub async fn start() {
     let noise_connection_log_level = Configuration::nc_loglevel();
 
     let enable_file_logging = Configuration::enable_file_logging();
-
-    // let remote_layer = SendLogLayer::new();
 
     //Disable noise_connection error (for now) because:
     // 1. It produce logs that are not very user friendly and also bloat the logs

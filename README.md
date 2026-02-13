@@ -58,7 +58,7 @@ The default Template Provider port is **8336**.
 
 #### 4.1 Download DMND Stratum V2 Client
 You can download the latest release of DMND Stratum V2 Client from:
-https://github.com/dmnd-pool/dmnd-client/releases/tag/v0.2.4
+https://github.com/dmnd-pool/dmnd-client/releases/tag/v0.2.7
 
 
 Assuming that `dmnd-client-linux` is the executable you are using, run:
