@@ -8,7 +8,7 @@ const image = new ImageManagement('dmnd-client-image', {
   appName: 'client',
   dockerContext: '../../',
   dockerfile: '../../Dockerfile',
-  imageTag: config.require('version'),
+  imageTag: process.env.IMAGE_VERSION,
 });
 
 export { image };

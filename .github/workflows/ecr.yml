@@ -39,6 +39,6 @@ jobs:
           command: up
           stack-name: dmnd-tech-org/image/client
           work-dir: deployment/ecrImage/
-          config: version=${{ steps.get_version.outputs.VERSION }}
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          IMAGE_VERSION: ${{ steps.get_version.outputs.VERSION }}
