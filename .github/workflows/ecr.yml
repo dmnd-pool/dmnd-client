@@ -1,5 +1,8 @@
 name: Upload to ECR
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
