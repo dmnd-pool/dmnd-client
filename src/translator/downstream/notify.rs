@@ -142,6 +142,10 @@ async fn start_update(
     let handle = task::spawn(async move {
         // Prevent difficulty adjustments until after delay elapses
         tokio::time::sleep(std::time::Duration::from_secs(crate::Configuration::delay())).await;
+        if let Err(e) = Downstream::try_update_difficulty_settings(&downstream).await {
+            error!("{e}");
+            return;
+        };
         loop {
             let share_count = crate::translator::utils::get_share_count(connection_id);
             let sleep_duration = if share_count >= *crate::SHARE_PER_MIN * 3.0
