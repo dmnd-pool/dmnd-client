@@ -142,6 +142,7 @@ async fn start_update(
     let handle = task::spawn(async move {
         // Prevent difficulty adjustments until after delay elapses
         tokio::time::sleep(std::time::Duration::from_secs(crate::Configuration::delay())).await;
+        // Run the first difficulty update right after delay, then continue on interval cadence.
         if let Err(e) = Downstream::try_update_difficulty_settings(&downstream).await {
             error!("{e}");
             return;
