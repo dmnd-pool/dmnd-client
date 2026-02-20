@@ -228,7 +228,32 @@ impl Configuration {
 
     // Loads config from CLI, file, or env vars with precedence: CLI > file > env.
     fn load_config() -> Self {
-        let args = Args::parse();
+        // Filter out test runner arguments to avoid conflicts with clap
+        // When running tests, cargo passes arguments like test names that clap doesn't recognize
+        let all_args: Vec<String> = std::env::args().collect();
+        eprintln!("DEBUG: All args: {:?}", all_args);
+        
+        let filtered_args: Vec<String> = all_args
+            .into_iter()
+            .enumerate()
+            .filter(|(i, arg)| {
+                // Keep the program name (index 0)
+                if *i == 0 {
+                    return true;
+                }
+                // Filter out test-specific arguments
+                // cargo test passes arguments like --test-threads, --nocapture, etc.
+                // We only want to keep arguments that start with - or -- AND are not test-specific
+                if arg.starts_with("--test-") || arg.starts_with("-test-") || arg == "--nocapture" || arg == "--test" || arg == "--bench" {
+                    return false;
+                }
+                arg.starts_with("--") || arg.starts_with('-')
+            })
+            .map(|(_, arg)| arg)
+            .collect();
+        
+        eprintln!("DEBUG: Filtered args: {:?}", filtered_args);
+        let args = Args::parse_from(&filtered_args);
         let config_path: PathBuf = args.config_file.unwrap_or("config.toml".into());
         let config: ConfigFile = std::fs::read_to_string(&config_path)
             .ok()
@@ -339,13 +364,21 @@ impl Configuration {
             args.staging || config.staging.unwrap_or(false) || std::env::var("STAGING").is_ok();
         let testnet3 =
             args.testnet3 || config.testnet3.unwrap_or(false) || std::env::var("TESTNET3").is_ok();
-        let local = args.local || config.local.unwrap_or(false) || std::env::var("LOCAL").is_ok();
+        let local = args.local || config.local.unwrap_or(false) || std::env::var("LOCAL").is_ok() || std::env::var("local").is_ok() || std::env::var("Local").is_ok();
         let monitor =
             args.monitor || config.monitor.unwrap_or(false) || std::env::var("MONITOR").is_ok();
 
-        let auto_update = args.auto_update
-            || config.auto_update.unwrap_or(true)
-            || std::env::var("AUTO_UPDATE").is_ok();
+
+
+        let env_auto_update = std::env::var("AUTO_UPDATE")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok());
+
+        let auto_update = if let Some(val) = env_auto_update {
+            val
+        } else {
+            args.auto_update || config.auto_update.unwrap_or(true)
+        };
 
         Configuration {
             token,
@@ -437,7 +470,7 @@ async fn fetch_pool_urls() -> Result<Vec<SocketAddr>, Error> {
     let endpoint = format!("{}/api/pool/urls", url);
     info!("Fetching pool URLs from: {}", endpoint);
     let token = Configuration::token().expect("TOKEN is not set");
-    let mut retries = 8;
+    let mut retries = if CONFIG.local || CONFIG.staging { 1 } else { 8 };
     let client = reqwest::Client::new();
 
     let response = loop {
