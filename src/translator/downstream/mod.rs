@@ -47,5 +47,5 @@ pub struct SetDownstreamTarget {
 }
 
 pub fn new_subscription_id() -> String {
-    "ae6812eb4cd7735a302a8a9dd95cf71f".into()
+    uuid::Uuid::new_v4().simple().to_string()
 }
