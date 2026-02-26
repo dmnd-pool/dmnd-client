@@ -13,7 +13,7 @@ use roles_logic_sv2::{
     },
     mining_sv2::{
         ExtendedExtranonce, Extranonce, NewExtendedMiningJob, OpenExtendedMiningChannel,
-        SetNewPrevHash, SubmitSharesExtended,
+        SetCustomMiningJob, SetNewPrevHash, SubmitSharesExtended,
     },
     parsers::Mining,
     routing_logic::{MiningRoutingLogic, NoRouting},
@@ -139,6 +139,7 @@ impl Upstream {
         self_: Arc<Mutex<Self>>,
         incoming_receiver: TReceiver<Mining<'static>>,
         rx_sv2_submit_shares_ext: TReceiver<SubmitSharesExtended<'static>>,
+        rx_update_token: TReceiver<String>,
     ) -> Result<AbortOnDrop, Error<'static>> {
         let task_manager = TaskManager::initialize();
         let abortable = task_manager
@@ -152,6 +153,8 @@ impl Upstream {
             Self::parse_incoming(self_.clone(), incoming_receiver)?;
 
         let handle_submit_abortable = Self::handle_submit(self_.clone(), rx_sv2_submit_shares_ext)?;
+        let handle_token_update_abortable =
+            Self::handle_token_updates(self_.clone(), rx_update_token)?;
 
         TaskManager::add_diff_managment(task_manager.clone(), diff_manager_abortable)
             .await
@@ -160,6 +163,9 @@ impl Upstream {
             .await
             .map_err(|_| Error::TranslatorTaskManagerFailed)?;
         TaskManager::add_handle_submit(task_manager.clone(), handle_submit_abortable)
+            .await
+            .map_err(|_| Error::TranslatorTaskManagerFailed)?;
+        TaskManager::add_handle_token_update(task_manager.clone(), handle_token_update_abortable)
             .await
             .map_err(|_| Error::TranslatorTaskManagerFailed)?;
 
@@ -194,6 +200,70 @@ impl Upstream {
             return Err(Error::AsyncChannelError);
         };
         Ok(())
+    }
+
+    fn handle_token_updates(
+        self_: Arc<Mutex<Self>>,
+        mut rx_update_token: TReceiver<String>,
+    ) -> ProxyResult<'static, AbortOnDrop> {
+        let handle = tokio::task::spawn(async move {
+            while let Some(new_token) = rx_update_token.recv().await {
+                let sender = match self_.safe_lock(|s| s.sender.clone()) {
+                    Ok(sender) => sender,
+                    Err(e) => {
+                        error!("Failed to lock upstream sender: {e}");
+                        ProxyState::update_upstream_state(UpstreamType::TranslatorUpstream);
+                        break;
+                    }
+                };
+
+                let channel_id = match self_.safe_lock(|s| s.channel_id.unwrap_or(0)) {
+                    Ok(channel_id) => channel_id,
+                    Err(e) => {
+                        error!("Failed to lock upstream channel id: {e}");
+                        ProxyState::update_upstream_state(UpstreamType::TranslatorUpstream);
+                        break;
+                    }
+                };
+
+                const UPDATE_USER_CODE: &[u8] = "UPDATE_USER_CODE_REPLACE_USER_ID".as_bytes();
+                let special_message = Mining::SetCustomMiningJob(SetCustomMiningJob {
+                    channel_id,
+                    request_id: 0,
+                    token: UPDATE_USER_CODE.to_vec().try_into().expect(
+                        "Internal error: this operation can not fail because the string UPDATE_USER_CODE_REPLACE_USER_ID can always be converted into Inner",
+                    ),
+                    version: 0,
+                    prev_hash: [0; 32].to_vec().try_into().expect(
+                        "Internal error: this operation can not fail because the array [0; 32] can always be converted into Inner",
+                    ),
+                    min_ntime: 0,
+                    nbits: 0,
+                    coinbase_tx_version: 0,
+                    coinbase_prefix: new_token.as_bytes().to_vec().try_into().expect(
+                        "Internal error: this operation can not fail because the token can always be converted into Inner",
+                    ),
+                    coinbase_tx_input_n_sequence: 0,
+                    coinbase_tx_value_remaining: 0,
+                    coinbase_tx_outputs: [].to_vec().try_into().expect(
+                        "Internal error: this operation can not fail because the array [] can always be converted into Inner",
+                    ),
+                    coinbase_tx_locktime: 0,
+                    merkle_path: [].to_vec().into(),
+                    extranonce_size: 0,
+                });
+
+                if sender.send(special_message).await.is_err() {
+                    error!("Failed to update user");
+                    ProxyState::update_upstream_state(UpstreamType::TranslatorUpstream);
+                    break;
+                } else {
+                    info!("User updated successfully");
+                }
+            }
+        });
+
+        Ok(handle.into())
     }
 
     /// Parses the incoming SV2 message from the Upstream role and routes the message to the

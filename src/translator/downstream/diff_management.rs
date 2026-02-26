@@ -444,6 +444,7 @@ mod test {
         };
         let (tx_sv1_submit, _rx_sv1_submit) = tokio::sync::mpsc::channel(10);
         let (tx_outgoing, _rx_outgoing) = channel(10);
+        let (tx_update_token, _rx_update_token) = channel(10);
         let random_str = rand::thread_rng().gen::<[u8; 32]>().to_vec();
         let first_job = Notify {
             job_id: "ciao".to_string(),
@@ -469,6 +470,7 @@ mod test {
             Arc::new(Mutex::new(upstream_config)),
             crate::api::stats::StatsSender::new(),
             first_job,
+            tx_update_token,
         );
         downstream.difficulty_mgmt.estimated_downstream_hash_rate = start_hashrate as f32;
 

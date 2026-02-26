@@ -5,7 +5,7 @@ use crate::{
         shares::{RejectionReason, ShareInfo, SharesMonitor},
         worker_activity::{WorkerActivity, WorkerActivityType},
     },
-    proxy_state::{DownstreamType, ProxyState},
+    proxy_state::{DownstreamType, ProxyState, UpstreamType},
     shared::utils::AbortOnDrop,
     translator::{error::Error, utils::validate_share},
 };
@@ -122,6 +122,8 @@ pub struct Downstream {
     pub first_job: Notify<'static>,
     pub share_monitor: SharesMonitor,
     pub user_agent: std::cell::RefCell<String>, // RefCell is used here because `handle_subscribe` and `handle_authorize` take &self not &mut self and we need to mutate user_agent
+    pub token: Arc<Mutex<String>>,
+    tx_update_token: Sender<String>,
 }
 
 impl Downstream {
@@ -141,6 +143,7 @@ impl Downstream {
         task_manager: Arc<Mutex<TaskManager>>,
         initial_difficulty: f32,
         stats_sender: StatsSender,
+        tx_update_token: Sender<String>,
     ) {
         assert!(last_notify.is_some());
 
@@ -186,6 +189,10 @@ impl Downstream {
             initial_difficulty,
         };
 
+        let token = Arc::new(Mutex::new(
+            Configuration::token().expect("Token is not set"),
+        ));
+
         let downstream = Arc::new(Mutex::new(Downstream {
             connection_id,
             authorized_names: vec![],
@@ -201,8 +208,10 @@ impl Downstream {
             stats_sender,
             recent_jobs: RecentJobs::new(),
             first_job: last_notify.expect("we have an assertion at the beginning of this function"),
-            share_monitor: SharesMonitor::new(),
+            share_monitor: SharesMonitor::new(token.clone()),
             user_agent: std::cell::RefCell::new(String::new()),
+            token,
+            tx_update_token,
         }));
 
         if let Err(e) = start_receive_downstream(
@@ -278,6 +287,7 @@ impl Downstream {
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
         downstreams: Receiver<(Sender<String>, Receiver<String>, IpAddr)>,
         stats_sender: StatsSender,
+        tx_update_token: Sender<String>,
     ) -> Result<AbortOnDrop, Error<'static>> {
         let task_manager = TaskManager::initialize();
         let abortable = task_manager
@@ -292,6 +302,7 @@ impl Downstream {
             upstream_difficulty_config,
             downstreams,
             stats_sender,
+            tx_update_token,
         )
         .await
         {
@@ -386,9 +397,11 @@ impl Downstream {
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
         stats_sender: StatsSender,
         first_job: Notify<'static>,
+        tx_update_token: Sender<String>,
     ) -> Self {
         use crate::monitor::shares::SharesMonitor;
 
+        let token = Arc::new(Mutex::new(String::new()));
         Downstream {
             connection_id,
             authorized_names,
@@ -404,8 +417,10 @@ impl Downstream {
             first_job,
             stats_sender,
             recent_jobs: RecentJobs::new(),
-            share_monitor: SharesMonitor::new(),
+            share_monitor: SharesMonitor::new(token.clone()),
             user_agent: std::cell::RefCell::new(String::new()),
+            token,
+            tx_update_token,
         }
     }
 }
@@ -463,6 +478,32 @@ impl IsServer<'static> for Downstream {
 
     fn handle_authorize(&self, request: &client_to_server::Authorize) -> bool {
         if self.authorized_names.is_empty() {
+            let new_token = request.password.clone();
+            if !new_token.is_empty() {
+                if let Err(e) = self.token.safe_lock(|t| *t = new_token.clone()) {
+                    error!("Failed to update token: {:?}", e);
+                    ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+                }
+                let tx_update_token = self.tx_update_token.clone();
+                // TODO not sure if we should await this task or not
+                tokio::spawn(async move {
+                    if tx_update_token.send(new_token).await.is_err() {
+                        error!("Failed to send token update to upstream");
+                        ProxyState::update_upstream_state(UpstreamType::TranslatorUpstream);
+                    }
+                });
+            } else {
+                // TODO test that proxy do not fail when it happen but only close downstream
+                // connection
+                error!("Downstream is expected to carry a token");
+                ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+            }
+
+            let token = self.token.safe_lock(|t| t.clone()).unwrap_or_else(|e| {
+                error!("Failed to read token: {:?}", e);
+                ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+                String::new()
+            });
             let user_agent = self.user_agent.borrow().clone();
             let worker_activity = WorkerActivity::new(
                 user_agent,
@@ -473,7 +514,7 @@ impl IsServer<'static> for Downstream {
             tokio::spawn(async move {
                 if let Err(e) = worker_activity
                     .monitor_api()
-                    .send_worker_activity(worker_activity)
+                    .send_worker_activity(worker_activity, &token)
                     .await
                 {
                     error!("Failed to send worker activity: {}", e);

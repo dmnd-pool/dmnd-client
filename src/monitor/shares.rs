@@ -40,12 +40,14 @@ impl ShareInfo {
 #[derive(Debug, Clone)]
 pub struct SharesMonitor {
     shares: Arc<Mutex<Vec<ShareInfo>>>,
+    token: Arc<Mutex<String>>,
 }
 
 impl SharesMonitor {
-    pub fn new() -> Self {
+    pub fn new(token: Arc<Mutex<String>>) -> Self {
         SharesMonitor {
             shares: Arc::new(Mutex::new(Vec::new())),
+            token,
         }
     }
 
@@ -93,7 +95,8 @@ impl SharesMonitor {
             interval.tick().await;
             let shares_to_send = self.get_next_shares();
             if !shares_to_send.is_empty() {
-                match api.send_shares(shares_to_send.clone()).await {
+                let token = self.token.safe_lock(|t| t.clone()).unwrap();
+                match api.send_shares(shares_to_send.clone(), &token).await {
                     Ok(_) => {
                         info!(
                             "Saved {} shares to the monitoring server",
