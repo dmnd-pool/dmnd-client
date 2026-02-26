@@ -78,6 +78,7 @@ pub async fn start(
     // passed to the `Downstream` upon a Downstream role connection
     // (Sender<ExtendedExtranonce>, Receiver<ExtendedExtranonce>)
     let (tx_sv2_extranonce, mut rx_sv2_extranonce) = channel(crate::TRANSLATOR_BUFFER_SIZE);
+    let (tx_update_token, rx_update_token) = channel(5);
     let target = Arc::new(Mutex::new(vec![0; 32]));
 
     // Sender/Receiver to send SV1 `mining.notify` message from the `Bridge` to the `Downstream`
@@ -107,8 +108,13 @@ pub async fn start(
     )
     .await?;
 
-    let upstream_abortable =
-        upstream::Upstream::start(upstream, recv_from_up, rx_sv2_submit_shares_ext).await?;
+    let upstream_abortable = upstream::Upstream::start(
+        upstream,
+        recv_from_up,
+        rx_sv2_submit_shares_ext,
+        rx_update_token,
+    )
+    .await?;
     TaskManager::add_upstream(task_manager.clone(), upstream_abortable)
         .await
         .map_err(|_| Error::TranslatorTaskManagerFailed)?;
@@ -178,6 +184,7 @@ pub async fn start(
                 diff_config,
                 downstreams,
                 stats_sender,
+                tx_update_token,
             )
             .await
             {

@@ -17,6 +17,7 @@ use tokio::sync::{
 use tokio::task;
 use tracing::{debug, error, info};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_accept_connection(
     task_manager: Arc<Mutex<TaskManager>>,
     tx_sv1_submit: Sender<DownstreamMessages>,
@@ -25,6 +26,7 @@ pub async fn start_accept_connection(
     upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
     mut downstreams: Receiver<(Sender<String>, Receiver<String>, IpAddr)>,
     stats_sender: crate::api::stats::StatsSender,
+    tx_update_token: Sender<String>,
 ) -> Result<(), Error<'static>> {
     let handle = {
         let task_manager = task_manager.clone();
@@ -100,6 +102,7 @@ pub async fn start_accept_connection(
                             task_manager.clone(),
                             initial_difficulty,
                             stats_sender.clone(),
+                            tx_update_token.clone(),
                         )
                         .await
                     }

@@ -11,6 +11,7 @@ enum Task {
     DiffManagment(AbortOnDrop),
     MainLoop(AbortOnDrop),
     HandleSubmit(AbortOnDrop),
+    HandleTokenUpdate(AbortOnDrop),
 }
 
 pub struct TaskManager {
@@ -64,6 +65,17 @@ impl TaskManager {
         let send_task = self_.safe_lock(|s| s.send_task.clone()).unwrap();
         send_task
             .send(Task::HandleSubmit(abortable))
+            .await
+            .map_err(|_| ())
+    }
+
+    pub async fn add_handle_token_update(
+        self_: Arc<Mutex<Self>>,
+        abortable: AbortOnDrop,
+    ) -> Result<(), ()> {
+        let send_task = self_.safe_lock(|s| s.send_task.clone()).unwrap();
+        send_task
+            .send(Task::HandleTokenUpdate(abortable))
             .await
             .map_err(|_| ())
     }

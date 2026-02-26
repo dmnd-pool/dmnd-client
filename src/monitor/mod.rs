@@ -48,9 +48,7 @@ impl MonitorAPI {
     }
 
     /// Sends a batch of shares to the monitoring server.
-    async fn send_shares(&self, shares: Vec<ShareInfo>) -> Result<(), Error> {
-        let token = crate::config::Configuration::token().expect("Token is not set");
-
+    async fn send_shares(&self, shares: Vec<ShareInfo>, token: &str) -> Result<(), Error> {
         debug!("Sending batch of {} shares to API", shares.len());
         let response = self
             .client
@@ -69,8 +67,11 @@ impl MonitorAPI {
     }
 
     /// Sends a worker activity log to the monitoring server.
-    pub async fn send_worker_activity(&self, activity: WorkerActivity) -> Result<(), Error> {
-        let token = crate::config::Configuration::token().expect("Token is not set");
+    pub async fn send_worker_activity(
+        &self,
+        activity: WorkerActivity,
+        token: &str,
+    ) -> Result<(), Error> {
         debug!("Sending worker activity to API: {:?}", activity);
         let response = self
             .client
