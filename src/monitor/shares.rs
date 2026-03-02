@@ -86,7 +86,8 @@ impl SharesMonitor {
 
     pub async fn monitor(&self) {
         let api = MonitorAPI::new(shares_server_endpoint());
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // 5 minutes
+
         // First tick completes immediately
         interval.tick().await;
         loop {
