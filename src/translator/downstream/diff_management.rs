@@ -470,6 +470,8 @@ mod test {
             Arc::new(Mutex::new(upstream_config)),
             crate::api::stats::StatsSender::new(),
             first_job,
+            String::new(),
+            1,
             tx_update_token,
         );
         downstream.difficulty_mgmt.estimated_downstream_hash_rate = start_hashrate as f32;
