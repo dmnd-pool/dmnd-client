@@ -28,6 +28,7 @@ pub enum Error<'a> {
     ImpossibleToOpenChannnel,
     #[allow(clippy::enum_variant_names)]
     AsyncChannelError,
+    DisconnectDownstream,
 }
 
 impl From<Infallible> for Error<'_> {
@@ -47,6 +48,7 @@ impl fmt::Display for Error<'_> {
             Error::Infallible(e) => write!(f, "Infallible {}", e),
             Error::ImpossibleToOpenChannnel => write!(f, "ImpossibleToOpenChannnel"),
             Error::AsyncChannelError => write!(f, "AsyncChannelError"),
+            Error::DisconnectDownstream => write!(f, "DisconnectDownstream"),
             Error::TranslatorUpstreamMutexPoisoned => write!(f, "TranslatorUpstreamMutexPoisoned"),
             Error::TranslatorDiffConfigMutexPoisoned => {
                 write!(f, "TranslatorDiffConfigMutexPoisoned")
