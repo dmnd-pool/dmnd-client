@@ -26,6 +26,7 @@ pub async fn start_accept_connection(
     upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
     mut downstreams: Receiver<(Sender<String>, Receiver<String>, IpAddr)>,
     stats_sender: crate::api::stats::StatsSender,
+    shared_token_state: Arc<Mutex<super::downstream::TokenChangeTracker>>,
     tx_update_token: Sender<String>,
 ) -> Result<(), Error<'static>> {
     let handle = {
@@ -102,6 +103,7 @@ pub async fn start_accept_connection(
                             task_manager.clone(),
                             initial_difficulty,
                             stats_sender.clone(),
+                            shared_token_state.clone(),
                             tx_update_token.clone(),
                         )
                         .await

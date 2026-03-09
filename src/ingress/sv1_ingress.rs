@@ -26,11 +26,7 @@ pub fn start_listen_for_downstream(
         let down_addr: String = Configuration::downstream_listening_addr()
             .unwrap_or(crate::DEFAULT_LISTEN_ADDRESS.to_string());
         let downstream_addr: SocketAddr = down_addr.parse().expect("Invalid listen address");
-        info!(
-            "Trying to bind to address {} for downstream(miner) connections",
-            downstream_addr
-        );
-        let downstream_listener = TcpListener::bind(downstream_addr)
+        let downstream_listener = bind_downstream_listener(downstream_addr)
             .await
             .expect("impossible to bind downstream");
         info!(
@@ -49,6 +45,15 @@ pub fn start_listen_for_downstream(
     })
     .into()
 }
+
+pub async fn bind_downstream_listener(downstream_addr: SocketAddr) -> std::io::Result<TcpListener> {
+    info!(
+        "Trying to bind to address {} for downstream(miner) connections",
+        downstream_addr
+    );
+    TcpListener::bind(downstream_addr).await
+}
+
 struct Downstream {}
 
 impl Downstream {
