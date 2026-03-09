@@ -33,6 +33,7 @@ use roles_logic_sv2::{
 use rand::Rng;
 use server_to_client::Notify;
 use std::{
+    cell::Cell,
     collections::{hash_map::Entry, HashMap, VecDeque},
     net::IpAddr,
     sync::Arc,
@@ -124,12 +125,28 @@ pub struct Downstream {
     pub user_agent: std::cell::RefCell<String>, // RefCell is used here because `handle_subscribe` and `handle_authorize` take &self not &mut self and we need to mutate user_agent
     pub token: Arc<Mutex<String>>,
     tx_update_token: Sender<String>,
+    disconnect_requested: Cell<bool>,
+    shared_token_state: Arc<Mutex<TokenChangeTracker>>,
+}
+
+#[derive(Debug)]
+pub(super) struct TokenChangeTracker {
+    current_token: String,
+    change_count: u32,
+    max_token_changes_per_connection: u32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AuthorizeTokenAction {
+    KeepCurrent(String),
+    Update(String),
+    Disconnect,
 }
 
 impl Downstream {
     /// Instantiate a new `Downstream`.
     #[allow(clippy::too_many_arguments)]
-    pub async fn new_downstream(
+    pub(super) async fn new_downstream(
         connection_id: u32,
         tx_sv1_bridge: Sender<DownstreamMessages>,
         rx_sv1_notify: broadcast::Receiver<server_to_client::Notify<'static>>,
@@ -143,6 +160,7 @@ impl Downstream {
         task_manager: Arc<Mutex<TaskManager>>,
         initial_difficulty: f32,
         stats_sender: StatsSender,
+        shared_token_state: Arc<Mutex<TokenChangeTracker>>,
         tx_update_token: Sender<String>,
     ) {
         assert!(last_notify.is_some());
@@ -190,7 +208,9 @@ impl Downstream {
         };
 
         let token = Arc::new(Mutex::new(
-            Configuration::token().expect("Token is not set"),
+            shared_token_state
+                .safe_lock(|state| state.current_token.clone())
+                .unwrap_or_else(|_| Configuration::token().expect("Token is not set")),
         ));
 
         let downstream = Arc::new(Mutex::new(Downstream {
@@ -212,6 +232,8 @@ impl Downstream {
             user_agent: std::cell::RefCell::new(String::new()),
             token,
             tx_update_token,
+            disconnect_requested: Cell::new(false),
+            shared_token_state,
         }));
 
         if let Err(e) = start_receive_downstream(
@@ -289,6 +311,10 @@ impl Downstream {
         stats_sender: StatsSender,
         tx_update_token: Sender<String>,
     ) -> Result<AbortOnDrop, Error<'static>> {
+        let shared_token_state = Arc::new(Mutex::new(TokenChangeTracker::new(
+            Configuration::token().expect("Token is not set"),
+            Configuration::max_token_changes_per_connection(),
+        )));
         let task_manager = TaskManager::initialize();
         let abortable = task_manager
             .safe_lock(|t| t.get_aborter())
@@ -302,6 +328,7 @@ impl Downstream {
             upstream_difficulty_config,
             downstreams,
             stats_sender,
+            shared_token_state,
             tx_update_token,
         )
         .await
@@ -323,7 +350,14 @@ impl Downstream {
         // `handle_message` in `IsServer` trait + calls `handle_request`
         // TODO: Map err from V1Error to Error::V1Error
 
-        let response = self_.safe_lock(|s| s.handle_message(message_sv1.clone()))?;
+        let (response, disconnect_requested) = self_.safe_lock(|s| {
+            let response = s.handle_message(message_sv1.clone());
+            let disconnect_requested = s.take_disconnect_request();
+            (response, disconnect_requested)
+        })?;
+        if disconnect_requested {
+            return Err(Error::DisconnectDownstream);
+        }
         match response {
             Ok(res) => {
                 if let Some(r) = res {
@@ -382,6 +416,27 @@ impl Downstream {
             ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
         }
     }
+
+    fn handle_authorize_token(&self, new_token: &str) -> AuthorizeTokenAction {
+        let action = self
+            .shared_token_state
+            .safe_lock(|state| state.handle_authorize_token(new_token))
+            // Here we can not update the token so downstream risk to mine for someone else, we
+            // could do unwrap_or_else and return Discconnect that will discconnect the downstream
+            // but if the mutex is poisoned this will keep happening for all the new downstream do
+            // we are keeping up a non fully functional proxy. Better to fail.
+            .unwrap();
+        if let AuthorizeTokenAction::Update(_) = action {
+            self.token
+                .safe_lock(|token| *token = new_token.to_string())
+                .unwrap();
+        }
+        action
+    }
+
+    fn take_disconnect_request(&self) -> bool {
+        self.disconnect_requested.replace(false)
+    }
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -397,11 +452,55 @@ impl Downstream {
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
         stats_sender: StatsSender,
         first_job: Notify<'static>,
+        initial_token: String,
+        max_token_changes_per_connection: u32,
+        tx_update_token: Sender<String>,
+    ) -> Self {
+        let shared_token_state = Arc::new(Mutex::new(TokenChangeTracker::new(
+            initial_token.clone(),
+            max_token_changes_per_connection,
+        )));
+        let token = Arc::new(Mutex::new(initial_token));
+        Self::new_with_shared_token_state(
+            connection_id,
+            authorized_names,
+            extranonce1,
+            version_rolling_mask,
+            version_rolling_min_bit,
+            tx_sv1_bridge,
+            tx_outgoing,
+            extranonce2_len,
+            difficulty_mgmt,
+            upstream_difficulty_config,
+            stats_sender,
+            first_job,
+            token,
+            shared_token_state,
+            tx_update_token,
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_shared_token_state(
+        connection_id: u32,
+        authorized_names: Vec<String>,
+        extranonce1: Vec<u8>,
+        version_rolling_mask: Option<HexU32Be>,
+        version_rolling_min_bit: Option<HexU32Be>,
+        tx_sv1_bridge: Sender<DownstreamMessages>,
+        tx_outgoing: Sender<json_rpc::Message>,
+        extranonce2_len: usize,
+        difficulty_mgmt: DownstreamDifficultyConfig,
+        upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
+        stats_sender: StatsSender,
+        first_job: Notify<'static>,
+        token: Arc<Mutex<String>>,
+        shared_token_state: Arc<Mutex<TokenChangeTracker>>,
         tx_update_token: Sender<String>,
     ) -> Self {
         use crate::monitor::shares::SharesMonitor;
 
-        let token = Arc::new(Mutex::new(String::new()));
         Downstream {
             connection_id,
             authorized_names,
@@ -421,7 +520,36 @@ impl Downstream {
             user_agent: std::cell::RefCell::new(String::new()),
             token,
             tx_update_token,
+            disconnect_requested: Cell::new(false),
+            shared_token_state,
         }
+    }
+}
+
+impl TokenChangeTracker {
+    fn new(current_token: String, max_token_changes_per_connection: u32) -> Self {
+        Self {
+            current_token,
+            change_count: 0,
+            max_token_changes_per_connection,
+        }
+    }
+
+    fn handle_authorize_token(&mut self, new_token: &str) -> AuthorizeTokenAction {
+        if self.max_token_changes_per_connection == 0 {
+            return AuthorizeTokenAction::KeepCurrent(self.current_token.clone());
+        }
+        if new_token == self.current_token {
+            return AuthorizeTokenAction::KeepCurrent(self.current_token.clone());
+        }
+
+        self.change_count = self.change_count.saturating_add(1);
+        if self.change_count > self.max_token_changes_per_connection || new_token.is_empty() {
+            return AuthorizeTokenAction::Disconnect;
+        }
+
+        self.current_token = new_token.to_string();
+        AuthorizeTokenAction::Update(self.current_token.clone())
     }
 }
 
@@ -480,7 +608,25 @@ impl IsServer<'static> for Downstream {
         if self.authorized_names.is_empty() {
             let new_token = request.password.clone();
             if !new_token.is_empty() {
-                if let Err(e) = self.token.safe_lock(|t| *t = new_token.clone()) {
+                let token = match self.handle_authorize_token(&request.password) {
+                    AuthorizeTokenAction::KeepCurrent(token) => token,
+                    AuthorizeTokenAction::Update(token) => {
+                        let tx_update_token = self.tx_update_token.clone();
+                        let token_to_send = token.clone();
+                        tokio::spawn(async move {
+                            if tx_update_token.send(token_to_send).await.is_err() {
+                                error!("Failed to send token update to upstream");
+                                ProxyState::update_upstream_state(UpstreamType::TranslatorUpstream);
+                            }
+                        });
+                        token
+                    }
+                    AuthorizeTokenAction::Disconnect => {
+                        self.disconnect_requested.set(true);
+                        return false;
+                    }
+                };
+                if let Err(e) = self.token.safe_lock(|t| *t = token.clone()) {
                     error!("Failed to update token: {:?}", e);
                     ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
                 }
@@ -492,6 +638,12 @@ impl IsServer<'static> for Downstream {
                         ProxyState::update_upstream_state(UpstreamType::TranslatorUpstream);
                     }
                 });
+            } else if self
+                .shared_token_state
+                .safe_lock(|s| s.max_token_changes_per_connection == 0)
+                .unwrap()
+            {
+                info!("Skip token check, max_token_changes_per_connection set to 0");
             } else {
                 error!("Downstream is expected to carry a token");
                 return false;
@@ -849,18 +1001,261 @@ impl<T, const N: usize> CircularBuffer<T, N> {
     }
 }
 
-//#[cfg(test)]
-//mod tests {
-//    use super::*;
-//
-//    #[test]
-//    fn gets_difficulty_from_target() {
-//        let target = vec![
-//            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 255, 127,
-//            0, 0, 0, 0, 0,
-//        ];
-//        let actual = Downstream::difficulty_from_target(target).unwrap();
-//        let expect = 512.0;
-//        assert_eq!(actual, expect);
-//    }
-//}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::translator::upstream::diff_management::UpstreamDifficultyConfig;
+    use rand::Rng;
+    use sv1_api::utils::{MerkleNode, PrevHash};
+    use tokio::sync::mpsc::{channel, Receiver};
+
+    fn test_first_job() -> Notify<'static> {
+        let random_str = rand::thread_rng().gen::<[u8; 32]>().to_vec();
+        Notify {
+            job_id: "1".to_string(),
+            prev_hash: PrevHash::try_from("0".repeat(64).as_str()).unwrap(),
+            coin_base1: "ffff".try_into().unwrap(),
+            coin_base2: "ffff".try_into().unwrap(),
+            merkle_branch: vec![MerkleNode::try_from(random_str).unwrap()],
+            version: HexU32Be(1),
+            bits: HexU32Be(1),
+            time: HexU32Be(1),
+            clean_jobs: true,
+        }
+    }
+
+    fn build_test_downstream_with_shared_state(
+        connection_id: u32,
+        shared_token_state: Arc<Mutex<TokenChangeTracker>>,
+        tx_update_token: Sender<String>,
+    ) -> (Arc<Mutex<Downstream>>, Receiver<json_rpc::Message>) {
+        let mut current_difficulties = VecDeque::new();
+        current_difficulties.push_back(1.0);
+
+        let downstream_conf = DownstreamDifficultyConfig {
+            estimated_downstream_hash_rate: 0.0,
+            submits: VecDeque::new(),
+            pid_controller: Pid::new(10.0, 1.0),
+            current_difficulties,
+            initial_difficulty: 1.0,
+        };
+        let upstream_config = UpstreamDifficultyConfig {
+            channel_diff_update_interval: 60,
+            channel_nominal_hashrate: 0.0,
+        };
+        let (tx_sv1_submit, _rx_sv1_submit) = channel(10);
+        let (tx_outgoing, rx_outgoing) = channel(10);
+        let token = Arc::new(Mutex::new(
+            shared_token_state
+                .safe_lock(|state| state.current_token.clone())
+                .unwrap(),
+        ));
+
+        let downstream = Downstream::new_with_shared_token_state(
+            connection_id,
+            vec![],
+            vec![],
+            None,
+            None,
+            tx_sv1_submit,
+            tx_outgoing,
+            0,
+            downstream_conf,
+            Arc::new(Mutex::new(upstream_config)),
+            crate::api::stats::StatsSender::new(),
+            test_first_job(),
+            token,
+            shared_token_state,
+            tx_update_token,
+        );
+
+        (Arc::new(Mutex::new(downstream)), rx_outgoing)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn build_test_downstream(
+        initial_token: &str,
+        max_token_changes_per_connection: u32,
+    ) -> (
+        Arc<Mutex<Downstream>>,
+        Receiver<json_rpc::Message>,
+        Receiver<String>,
+        Arc<Mutex<TokenChangeTracker>>,
+    ) {
+        let shared_token_state = Arc::new(Mutex::new(TokenChangeTracker::new(
+            initial_token.to_string(),
+            max_token_changes_per_connection,
+        )));
+        let (tx_update_token, rx_update_token) = channel(10);
+        let (downstream, rx_outgoing) =
+            build_test_downstream_with_shared_state(1, shared_token_state.clone(), tx_update_token);
+
+        (downstream, rx_outgoing, rx_update_token, shared_token_state)
+    }
+
+    fn authorize_request(id: u64, name: &str, password: &str) -> json_rpc::Message {
+        client_to_server::Authorize {
+            id,
+            name: name.to_string(),
+            password: password.to_string(),
+        }
+        .into()
+    }
+
+    #[tokio::test]
+    async fn changed_token_updates_shared_state_until_limit() {
+        let (downstream, _rx_outgoing, _rx_update_token, shared_token_state) =
+            build_test_downstream("token-a", 1);
+
+        let action = downstream
+            .safe_lock(|d| d.handle_authorize_token("token-b"))
+            .unwrap();
+        let (token, disconnect_requested) = downstream
+            .safe_lock(|d| {
+                (
+                    d.token.safe_lock(|t| t.clone()).unwrap(),
+                    d.disconnect_requested.get(),
+                )
+            })
+            .unwrap();
+        let (current_token, change_count) = shared_token_state
+            .safe_lock(|state| (state.current_token.clone(), state.change_count))
+            .unwrap();
+
+        assert_eq!(action, AuthorizeTokenAction::Update("token-b".to_string()));
+        assert_eq!(token, "token-b");
+        assert_eq!(current_token, "token-b");
+        assert_eq!(change_count, 1);
+        assert!(!disconnect_requested);
+    }
+
+    #[tokio::test]
+    async fn zero_token_change_limit_ignores_requested_token_changes() {
+        let (downstream, _rx_outgoing, _rx_update_token, shared_token_state) =
+            build_test_downstream("token-a", 0);
+        let auth_m = client_to_server::Authorize {
+            id: 1,
+            name: "name".to_string(),
+            password: "token-b".to_string(),
+        };
+
+        downstream
+            .safe_lock(|d| d.handle_authorize(&auth_m))
+            .unwrap();
+        let (token, disconnect_requested) = downstream
+            .safe_lock(|d| {
+                (
+                    d.token.safe_lock(|t| t.clone()).unwrap(),
+                    d.disconnect_requested.get(),
+                )
+            })
+            .unwrap();
+        let (current_token, change_count) = shared_token_state
+            .safe_lock(|state| (state.current_token.clone(), state.change_count))
+            .unwrap();
+
+        assert_eq!(token, "token-a");
+        assert_eq!(current_token, "token-a");
+        assert_eq!(change_count, 0);
+        assert!(!disconnect_requested);
+    }
+
+    #[tokio::test]
+    async fn unchanged_token_does_not_increment_shared_counter_and_authorize_is_deduplicated() {
+        let (downstream, _rx_outgoing, _rx_update_token, shared_token_state) =
+            build_test_downstream("token-a", 1);
+
+        let first = downstream
+            .safe_lock(|d| {
+                let action = d.handle_authorize_token("token-a");
+                action
+            })
+            .unwrap();
+        let second = downstream
+            .safe_lock(|d| {
+                let action = d.handle_authorize_token("token-a");
+                d.authorize("worker-b");
+                action
+            })
+            .unwrap();
+        let (_, token) = downstream
+            .safe_lock(|d| {
+                (
+                    d.authorized_names.clone(),
+                    d.token.safe_lock(|t| t.clone()).unwrap(),
+                )
+            })
+            .unwrap();
+        let (current_token, change_count) = shared_token_state
+            .safe_lock(|state| (state.current_token.clone(), state.change_count))
+            .unwrap();
+
+        assert_eq!(
+            first,
+            AuthorizeTokenAction::KeepCurrent("token-a".to_string())
+        );
+        assert_eq!(
+            second,
+            AuthorizeTokenAction::KeepCurrent("token-a".to_string())
+        );
+        assert_eq!(change_count, 0);
+        assert_eq!(current_token, "token-a");
+        assert_eq!(token, "token-a");
+    }
+
+    #[tokio::test]
+    async fn exceeding_token_change_limit_disconnects_across_downstreams_without_response_or_upstream_update(
+    ) {
+        let shared_token_state = Arc::new(Mutex::new(TokenChangeTracker::new(
+            "token-a".to_string(),
+            1,
+        )));
+        let (tx_update_token, mut rx_update_token) = channel(10);
+        let (first_downstream, _first_rx_outgoing) = build_test_downstream_with_shared_state(
+            1,
+            shared_token_state.clone(),
+            tx_update_token.clone(),
+        );
+
+        let first_action = first_downstream
+            .safe_lock(|d| {
+                let action = d.handle_authorize_token("token-b");
+                d.authorize("worker-a");
+                action
+            })
+            .unwrap();
+        assert_eq!(
+            first_action,
+            AuthorizeTokenAction::Update("token-b".to_string())
+        );
+
+        let (second_downstream, mut second_rx_outgoing) =
+            build_test_downstream_with_shared_state(2, shared_token_state.clone(), tx_update_token);
+        let result = Downstream::handle_incoming_sv1(
+            second_downstream.clone(),
+            authorize_request(7, "worker-b", "token-c"),
+        )
+        .await;
+
+        let (token, disconnect_requested) = second_downstream
+            .safe_lock(|d| {
+                (
+                    d.token.safe_lock(|t| t.clone()).unwrap(),
+                    d.disconnect_requested.get(),
+                )
+            })
+            .unwrap();
+        let (current_token, change_count) = shared_token_state
+            .safe_lock(|state| (state.current_token.clone(), state.change_count))
+            .unwrap();
+
+        dbg!(shared_token_state);
+        assert!(matches!(result, Err(Error::DisconnectDownstream)));
+        assert_eq!(token, "token-b");
+        assert_eq!(current_token, "token-b");
+        assert_eq!(change_count, 2);
+        assert!(!disconnect_requested);
+        assert!(second_rx_outgoing.try_recv().is_err());
+        assert!(rx_update_token.try_recv().is_err());
+    }
+}

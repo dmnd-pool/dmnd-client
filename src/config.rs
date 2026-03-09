@@ -43,6 +43,8 @@ struct Args {
     adjustment_interval: Option<u64>,
     #[clap(long)]
     token: Option<String>,
+    #[clap(long = "max-token-changes-per-connection")]
+    max_token_changes_per_connection: Option<u32>,
     #[clap(long)]
     tp_address: Option<String>,
     #[clap(long)]
@@ -64,6 +66,7 @@ struct Args {
 #[derive(Serialize, Deserialize)]
 struct ConfigFile {
     token: Option<String>,
+    max_token_changes_per_connection: Option<u32>,
     tp_address: Option<String>,
     interval: Option<u64>,
     delay: Option<u64>,
@@ -85,6 +88,7 @@ impl ConfigFile {
     pub fn default() -> Self {
         ConfigFile {
             token: None,
+            max_token_changes_per_connection: None,
             tp_address: None,
             interval: None,
             delay: None,
@@ -106,6 +110,7 @@ impl ConfigFile {
 
 pub struct Configuration {
     token: Option<String>,
+    max_token_changes_per_connection: u32,
     tp_address: Option<String>,
     interval: u64,
     delay: u64,
@@ -127,6 +132,10 @@ pub struct Configuration {
 impl Configuration {
     pub fn token() -> Option<String> {
         CONFIG.token.clone()
+    }
+
+    pub fn max_token_changes_per_connection() -> u32 {
+        CONFIG.max_token_changes_per_connection
     }
 
     pub fn tp_address() -> Option<String> {
@@ -254,6 +263,16 @@ impl Configuration {
             .or_else(|| std::env::var("TOKEN").ok());
         println!("User Token: {token:?}");
 
+        let max_token_changes_per_connection = args
+            .max_token_changes_per_connection
+            .or(config.max_token_changes_per_connection)
+            .or_else(|| {
+                std::env::var("MAX_TOKEN_CHANGES_PER_CONNECTION")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+            })
+            .unwrap_or(1);
+
         let signature = match args.signature {
             Some(s) => {
                 if s.len() == 2 {
@@ -374,6 +393,7 @@ impl Configuration {
 
         Configuration {
             token,
+            max_token_changes_per_connection,
             tp_address,
             interval,
             delay,
