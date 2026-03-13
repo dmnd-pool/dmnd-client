@@ -540,6 +540,7 @@ impl IsServer<'static> for Downstream {
 
         let mut request = request.clone();
         let job_id_as_number = request.job_id.parse::<u32>();
+        let nonce = request.nonce.0 as i64;
         if job_id_as_number.is_err() {
             error!(
                 "Share rejected: can not convert v1 job id to number. v1 id: {}",
@@ -550,6 +551,7 @@ impl IsServer<'static> for Downstream {
                 request.user_name.clone(),
                 None,
                 0,
+                nonce,
                 // We can use this here beacuse we are inside the error branch
                 //
                 // TODO: Think about a better way to handle job id when it can not be parsed to
@@ -601,6 +603,7 @@ impl IsServer<'static> for Downstream {
                             request.user_name.clone(),
                             Some(met_difficulty),
                             job_id,
+                            nonce,
                             None,
                         );
                         self.share_monitor.insert_share(share);
@@ -610,6 +613,7 @@ impl IsServer<'static> for Downstream {
                             request.user_name.clone(),
                             None,
                             job_id, // rejected because it was not sent upstream
+                            nonce,
                             Some(RejectionReason::DifficultyMismatch),
                         );
                         self.share_monitor.insert_share(share);
@@ -626,6 +630,7 @@ impl IsServer<'static> for Downstream {
                     request.user_name.clone(),
                     None,
                     job_id,
+                    nonce,
                     Some(RejectionReason::InvalidShare),
                 );
                 self.share_monitor.insert_share(share);
@@ -638,6 +643,7 @@ impl IsServer<'static> for Downstream {
                 request.user_name.clone(),
                 None,
                 job_id,
+                nonce,
                 Some(RejectionReason::JobIdNotFound),
             );
             self.share_monitor.insert_share(event);

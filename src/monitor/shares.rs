@@ -12,6 +12,7 @@ pub struct ShareInfo {
     worker_name: String,
     difficulty: Option<f32>,
     job_id: i64,
+    nonce: i64,
     // if None, the share was accepted
     rejection_reason: Option<RejectionReason>,
     timestamp: u64,
@@ -22,12 +23,14 @@ impl ShareInfo {
         worker_name: String,
         difficulty: Option<f32>,
         job_id: i64,
+        nonce: i64,
         rejection_reason: Option<RejectionReason>,
     ) -> Self {
         ShareInfo {
             worker_name,
             difficulty,
             job_id,
+            nonce,
             rejection_reason,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
