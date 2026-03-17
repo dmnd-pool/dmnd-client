@@ -75,6 +75,7 @@ pub struct JobDeclarator {
     pub coinbase_tx_prefix: B064K<'static>,
     pub coinbase_tx_suffix: B064K<'static>,
     pub task_manager: Arc<Mutex<TaskManager>>,
+    token_updated: bool,
 }
 
 impl JobDeclarator {
@@ -117,6 +118,7 @@ impl JobDeclarator {
             coinbase_tx_suffix: vec![].try_into().expect("Internal error: this operation can not fail because Vec can always be converted into Inner"),
             set_new_prev_hash_counter: 0,
             task_manager,
+            token_updated: false,
         }));
 
         Self::allocate_tokens(&self_, 2).await;
@@ -349,10 +351,7 @@ impl JobDeclarator {
                         let id = last_declare.template.template_id;
                         let merkle_path = last_declare.template.merkle_path.clone();
                         let template = last_declare.template;
-
-                        // TODO where we should have a sort of signaling that is green after
-                        // that the token has been updated so that on_set_new_prev_hash know it
-                        // and can decide if send the set_custom_job or not
+                        // Added signaling for token update
                         if is_future {
                             last_declare_mining_job_sent.mining_job_token = new_token;
                             if let Err(e) = self_mutex.safe_lock(|s| {
@@ -365,6 +364,7 @@ impl JobDeclarator {
                                         last_declare.coinbase_pool_output,
                                     ),
                                 );
+                                s.token_updated = true;
                             }) {
                                 error!("{e}");
                                 ProxyState::update_jd_state(JdState::Down);
@@ -446,6 +446,16 @@ impl JobDeclarator {
             .safe_lock(|s| s.task_manager.clone())
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
         let task = tokio::task::spawn(async move {
+            // Check if token has been updated; if not, skip sending set_custom_job
+            let token_updated = self_mutex.safe_lock(|s| s.token_updated).unwrap_or(false);
+            if !token_updated {
+                return;
+            }
+            // Reset the signaling flag after consuming it
+            if let Err(e) = self_mutex.safe_lock(|s| s.token_updated = false) {
+                error!("{e}");
+                return;
+            }
             let id = set_new_prev_hash.template_id;
             if self_mutex
                 .safe_lock(|s| {
