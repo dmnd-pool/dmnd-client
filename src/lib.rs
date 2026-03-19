@@ -173,20 +173,25 @@ async fn initialize_proxy(
             break;
         }
         let stats_sender = api::stats::StatsSender::new();
-        let (send_to_pool, recv_from_pool, pool_connection_abortable) =
-            match router.connect_pool(pool_addr).await {
-                Ok(connection) => connection,
-                Err(_) => {
-                    error!("No upstream available. Retrying in 5 seconds...");
-                    warn!(
-                        "Please make sure the your token {} is correct",
-                        Configuration::token().expect("Token is not set")
-                    );
-                    let secs = 5;
-                    tokio::time::sleep(Duration::from_secs(secs)).await;
-                    continue;
-                }
-            };
+        let (send_to_pool, recv_from_pool, pool_connection_abortable) = match router
+            .connect_pool(pool_addr, shutdown_signal.clone())
+            .await
+        {
+            Ok(connection) => connection,
+            Err(minin_pool_connection::errors::Error::Shutdown) => {
+                break;
+            }
+            Err(_) => {
+                error!("No upstream available. Retrying in 5 seconds...");
+                warn!(
+                    "Please make sure the your token {} is correct",
+                    Configuration::token().expect("Token is not set")
+                );
+                let secs = 5;
+                tokio::time::sleep(Duration::from_secs(secs)).await;
+                continue;
+            }
+        };
 
         let (downs_sv1_tx, downs_sv1_rx) = channel(10);
         let sv1_ingress_abortable = ingress::sv1_ingress::start_listen_for_downstream(downs_sv1_tx);

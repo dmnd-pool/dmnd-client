@@ -136,6 +136,7 @@ impl Router {
     pub async fn connect_pool(
         &mut self,
         pool_addr: Option<SocketAddr>,
+        shutdown_signal: watch::Receiver<bool>,
     ) -> Result<
         (
             tokio::sync::mpsc::Sender<PoolExtMessages<'static>>,
@@ -164,6 +165,7 @@ impl Router {
             self.auth_pub_k,
             self.setup_connection_msg.clone(),
             self.timer,
+            shutdown_signal,
         )
         .await
         {
