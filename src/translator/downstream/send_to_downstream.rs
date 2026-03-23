@@ -17,7 +17,7 @@ pub async fn start_send_to_downstream(
     let handle = task::spawn(async move {
         while let Some(res) = receiver_outgoing.recv().await {
             let to_send = match serde_json::to_string(&res) {
-                Ok(string) => format!("{}\n", string),
+                Ok(string) => format!("{string}\n"),
                 Err(e) => {
                     error!("Failed to serialize msg {e:?}");
                     break;

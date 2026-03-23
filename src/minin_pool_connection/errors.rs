@@ -13,6 +13,7 @@ pub enum Error {
     RolesSv2Logic(roles_logic_sv2::errors::Error),
     UpstreamIncoming(roles_logic_sv2::errors::Error),
     Timeout,
+    Shutdown,
     Unrecoverable,
     UnexpectedMessage,
     MiningPoolMutexCorrupted,
@@ -23,13 +24,14 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Error::*;
         match self {
-            BinarySv2(ref e) => write!(f, "Binary SV2 error: `{:?}`", e),
-            SV2Connection(ref e) => write!(f, "Demand SV2 connectiom  error: `{:?}", e),
-            FramingSv2(ref e) => write!(f, "Framing SV2 error: `{:?}`", e),
-            Io(ref e) => write!(f, "I/O error: `{:?}", e),
-            RolesSv2Logic(ref e) => write!(f, "Roles SV2 Logic Error: `{:?}`", e),
-            UpstreamIncoming(ref e) => write!(f, "Upstream parse incoming error: `{:?}`", e),
+            BinarySv2(ref e) => write!(f, "Binary SV2 error: `{e:?}`"),
+            SV2Connection(ref e) => write!(f, "Demand SV2 connectiom  error: `{e:?}"),
+            FramingSv2(ref e) => write!(f, "Framing SV2 error: `{e:?}`"),
+            Io(ref e) => write!(f, "I/O error: `{e:?}"),
+            RolesSv2Logic(ref e) => write!(f, "Roles SV2 Logic Error: `{e:?}`"),
+            UpstreamIncoming(ref e) => write!(f, "Upstream parse incoming error: `{e:?}`"),
             Unrecoverable => write!(f, "Unrecoverable error"),
+            Shutdown => write!(f, "Shutdown requested"),
             UnexpectedMessage => write!(f, "Unexpected Message Type"),
             Timeout => write!(f, "Timeout Elapsed"),
             MiningPoolMutexCorrupted => write!(f, "Mining Pool Mutex Corrupted"),

@@ -10,7 +10,11 @@ use std::{
 use tracing::{debug, error, info};
 
 use crate::{
-    shared::error::Error, DEFAULT_SV1_HASHPOWER, PRODUCTION_URL, STAGING_URL, TESTNET3_URL,
+    shared::{
+        error::Error,
+        miner_tag::{format_miner_tag, validate_miner_name},
+    },
+    DEFAULT_SV1_HASHPOWER, PRODUCTION_URL, STAGING_URL, TESTNET3_URL,
 };
 lazy_static! {
     pub static ref CONFIG: Configuration = Configuration::load_config();
@@ -53,6 +57,8 @@ struct Args {
     auto_update: bool,
     #[clap(long)]
     signature: Option<String>,
+    #[clap(long)]
+    miner_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -72,6 +78,7 @@ struct ConfigFile {
     api_server_port: Option<String>,
     monitor: Option<bool>,
     auto_update: Option<bool>,
+    miner_name: Option<String>,
 }
 
 impl ConfigFile {
@@ -92,6 +99,7 @@ impl ConfigFile {
             api_server_port: None,
             monitor: None,
             auto_update: None,
+            miner_name: None,
         }
     }
 }
@@ -114,6 +122,7 @@ pub struct Configuration {
     monitor: bool,
     auto_update: bool,
     signature: String,
+    miner_name: Option<String>,
 }
 impl Configuration {
     pub fn token() -> Option<String> {
@@ -226,6 +235,10 @@ impl Configuration {
         CONFIG.signature.clone()
     }
 
+    pub fn miner_name() -> Option<String> {
+        CONFIG.miner_name.clone()
+    }
+
     // Loads config from CLI, file, or env vars with precedence: CLI > file > env.
     fn load_config() -> Self {
         let args = Args::parse();
@@ -239,13 +252,13 @@ impl Configuration {
             .token
             .or(config.token)
             .or_else(|| std::env::var("TOKEN").ok());
-        println!("User Token: {:?}", token);
+        println!("User Token: {token:?}");
 
         let signature = match args.signature {
             Some(s) => {
                 if s.len() == 2 {
-                    println!("Signature provided: DDx{}", s);
-                    format!("DDx{}", s)
+                    println!("Signature provided: DDx{s}");
+                    format!("DDx{s}")
                 } else {
                     println!("Invalid signature provided, using DDxDD");
                     "DDxDD".to_string()
@@ -261,6 +274,18 @@ impl Configuration {
             .tp_address
             .or(config.tp_address)
             .or_else(|| std::env::var("TP_ADDRESS").ok());
+
+        let miner_name = args
+            .miner_name
+            .or(config.miner_name)
+            .or_else(|| std::env::var("MINER_NAME").ok());
+        if let Some(ref miner_name) = miner_name {
+            validate_miner_name(miner_name).unwrap_or_else(|e| panic!("{e}"));
+        }
+        println!(
+            "Using miner tag: {}",
+            format_miner_tag(miner_name.as_deref())
+        );
 
         let interval = args
             .adjustment_interval
@@ -365,6 +390,7 @@ impl Configuration {
             monitor,
             auto_update,
             signature,
+            miner_name,
         }
     }
 }
@@ -382,16 +408,14 @@ fn parse_hashrate(hashrate_str: &str) -> Result<f32, String> {
 
     let num: f32 = num.parse().map_err(|_| {
         format!(
-            "Invalid number '{}'. Expected format: '<number><unit>' (e.g., '10T', '2.5P', '5E')",
-            num
+            "Invalid number '{num}'. Expected format: '<number><unit>' (e.g., '10T', '2.5P', '5E')"
         )
     })?;
 
     let multiplier = HashUnit::from_str(&unit)
         .map(|unit| unit.multiplier())
         .ok_or_else(|| format!(
-            "Invalid unit '{}'. Expected 'T' (Terahash), 'P' (Petahash), or 'E' (Exahash). Example: '10T', '2.5P', '5E'",
-            unit
+            "Invalid unit '{unit}'. Expected 'T' (Terahash), 'P' (Petahash), or 'E' (Exahash). Example: '10T', '2.5P', '5E'"
         ))?;
 
     let hashrate = num * multiplier;
@@ -434,7 +458,7 @@ async fn fetch_pool_urls() -> Result<Vec<SocketAddr>, Error> {
     } else {
         PRODUCTION_URL
     };
-    let endpoint = format!("{}/api/pool/urls", url);
+    let endpoint = format!("{url}/api/pool/urls");
     info!("Fetching pool URLs from: {}", endpoint);
     let token = Configuration::token().expect("TOKEN is not set");
     let mut retries = 8;
@@ -523,7 +547,7 @@ impl HashUnit {
         } else if hashrate >= 1e12 {
             format!("{:.2}T", hashrate / 1e12)
         } else {
-            format!("{:.2}", hashrate)
+            format!("{hashrate:.2}")
         }
     }
 }

@@ -27,10 +27,10 @@ pub(crate) async fn start(router: Router, stats_sender: StatsSender) {
         .with_state(state);
 
     let api_server_port = crate::config::Configuration::api_server_port();
-    let api_server_addr = format!("0.0.0.0:{}", api_server_port);
+    let api_server_addr = format!("0.0.0.0:{api_server_port}");
     let listener = tokio::net::TcpListener::bind(api_server_addr)
         .await
         .expect("Invalid server address");
-    println!("API Server listening on port {}", api_server_port);
+    println!("API Server listening on port {api_server_port}");
     axum::serve(listener, app).await.unwrap();
 }

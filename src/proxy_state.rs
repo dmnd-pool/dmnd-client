@@ -244,8 +244,7 @@ impl ProxyState {
         if errors.is_ok() && errors.as_ref().unwrap().is_empty() {
             (false, None)
         } else {
-            let error_descriptions: Vec<String> =
-                errors.iter().map(|e| format!("{:?}", e)).collect();
+            let error_descriptions: Vec<String> = errors.iter().map(|e| format!("{e:?}")).collect();
             (true, Some(error_descriptions.join(", ")))
         }
     }

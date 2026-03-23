@@ -15,7 +15,10 @@ use roles_logic_sv2::{
     parsers::CommonMessages,
 };
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{
+    mpsc::{Receiver, Sender},
+    watch,
+};
 use tracing::{error, info};
 
 use crate::{
@@ -34,6 +37,7 @@ pub async fn connect_pool(
     authority_public_key: Secp256k1PublicKey,
     setup_connection_msg: Option<SetupConnection<'static>>,
     timer: Option<std::time::Duration>,
+    mut shutdown_signal: watch::Receiver<bool>,
 ) -> Result<
     (
         Sender<PoolExtMessages<'static>>,
@@ -43,17 +47,33 @@ pub async fn connect_pool(
     Error,
 > {
     let socket = loop {
-        match TcpStream::connect(address).await {
-            Ok(socket) => {
-                info!("Socket initialized with Pool at {}", address);
-                break socket;
+        tokio::select! {
+            res = shutdown_signal.changed() => {
+                if res.is_ok() && *shutdown_signal.borrow() {
+                    info!("Shutdown received while connecting to Pool {}", address);
+                    return Err(Error::Shutdown);
+                }
             }
-            Err(e) => {
-                error!(
-                    "Failed to connect to Upstream role at {}, retrying in 5s: {}",
-                    address, e
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await
+            res = TcpStream::connect(address) => match res {
+                Ok(socket) => {
+                    info!("Socket initialized with Pool at {}", address);
+                    break socket;
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to connect to Upstream role at {}, retrying in 5s: {}",
+                        address, e
+                    );
+                    tokio::select! {
+                        res = shutdown_signal.changed() => {
+                            if res.is_ok() && *shutdown_signal.borrow() {
+                                info!("Shutdown received while waiting to reconnect to Pool {}", address);
+                                return Err(Error::Shutdown);
+                            }
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                    }
+                }
             }
         }
     };
@@ -62,25 +82,40 @@ pub async fn connect_pool(
     let initiator =
         Initiator::from_raw_k(authority_public_key.into_bytes()).expect("Invalid authority key");
     // Channel to send and receive messages to the SV2 Upstream role
-    let (mut receiver, mut sender, _, _) =
-        Connection::new(socket, HandshakeRole::Initiator(initiator))
-            .await
-            .map_err(|e| {
+    let (mut receiver, mut sender, _, _) = tokio::select! {
+        res = shutdown_signal.changed() => {
+            if res.is_ok() && *shutdown_signal.borrow() {
+                info!("Shutdown received during Pool handshake");
+                return Err(Error::Shutdown);
+            }
+            return Err(Error::Unrecoverable);
+        }
+        res = Connection::new(socket, HandshakeRole::Initiator(initiator)) => {
+            res.map_err(|e| {
                 error!("Failed to create connection");
                 Error::SV2Connection(e)
-            })?;
+            })?
+        }
+    };
     info!("SV2 Handshake with Pool at {} completed", address);
     info!("Sending SetupConnection message to Pool at {}", address);
     let setup_connection_msg =
         setup_connection_msg.unwrap_or(get_mining_setup_connection_msg(true));
-    match mining_setup_connection(
-        &mut receiver,
-        &mut sender,
-        setup_connection_msg,
-        timer.unwrap_or(DEFAULT_TIMER),
-    )
-    .await
-    {
+    match tokio::select! {
+        res = shutdown_signal.changed() => {
+            if res.is_ok() && *shutdown_signal.borrow() {
+                info!("Shutdown received while setting up Pool connection");
+                return Err(Error::Shutdown);
+            }
+            return Err(Error::Unrecoverable);
+        }
+        res = mining_setup_connection(
+            &mut receiver,
+            &mut sender,
+            setup_connection_msg,
+            timer.unwrap_or(DEFAULT_TIMER),
+        ) => res
+    } {
         Ok(_) => {
             let task_manager = TaskManager::initialize();
             let abortable = task_manager
@@ -223,7 +258,7 @@ pub fn get_mining_setup_connection_msg(work_selection: bool) -> SetupConnection<
     };
     let token = Configuration::token().expect("Checked at initialization");
     let device_id = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
-    let device_id = format!("{}::POOLED::{}", device_id, token)
+    let device_id = format!("{device_id}::POOLED::{token}")
         .to_string()
         .try_into()
         .expect("Internal error: this operation can not fail because an device_id can always be converted into Inner");

@@ -39,12 +39,12 @@ impl From<Infallible> for Error<'_> {
 impl fmt::Display for Error<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Error::InvalidExtranonce(e) => write!(f, "InvalidExtranonce {}", e),
-            Error::RolesSv2Logic(e) => write!(f, "RolesSv2Logic {}", e),
-            Error::V1Protocol(e) => write!(f, "V1Protocol {}", e),
+            Error::InvalidExtranonce(e) => write!(f, "InvalidExtranonce {e}"),
+            Error::RolesSv2Logic(e) => write!(f, "RolesSv2Logic {e}"),
+            Error::V1Protocol(e) => write!(f, "V1Protocol {e}"),
             Error::PoisonLock => write!(f, "PoisonLock"),
-            Error::TargetError(e) => write!(f, "TargetError {}", e),
-            Error::Infallible(e) => write!(f, "Infallible {}", e),
+            Error::TargetError(e) => write!(f, "TargetError {e}"),
+            Error::Infallible(e) => write!(f, "Infallible {e}"),
             Error::ImpossibleToOpenChannnel => write!(f, "ImpossibleToOpenChannnel"),
             Error::AsyncChannelError => write!(f, "AsyncChannelError"),
             Error::TranslatorUpstreamMutexPoisoned => write!(f, "TranslatorUpstreamMutexPoisoned"),

@@ -360,7 +360,7 @@ mod test {
             (dbg!(calculated_share_per_min) - dbg!(expected_shares_per_minute as f32)).abs();
         assert!(
             dbg!(error) <= error_margin as f32,
-            "Calculated shares per minute are outside the 99% confidence interval. Error: {:?}, Error margin: {:?}, {:?}", error, error_margin,calculated_share_per_min
+            "Calculated shares per minute are outside the 99% confidence interval. Error: {error:?}, Error margin: {error_margin:?}, {calculated_share_per_min:?}"
         );
     }
 

@@ -14,7 +14,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Error::ReqwestError(e) => write!(f, "ReqwestError: {}", e),
+            Error::ReqwestError(e) => write!(f, "ReqwestError: {e}"),
         }
     }
 }

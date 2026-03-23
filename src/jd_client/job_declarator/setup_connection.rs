@@ -30,7 +30,7 @@ impl SetupConnectionHandler {
         let firmware = String::new().try_into().expect("Internal error: this operation can not fail because empty string can always be converted into Inner");
         let token = Configuration::token().expect("Checked at initialization");
         let device_id = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
-        let device_id = format!("{}::POOLED::{}", device_id, token)
+        let device_id = format!("{device_id}::POOLED::{token}")
             .to_string()
             .try_into()
             .expect("Internal error: this operation can not fail because device_id string can always be converted into Inner");

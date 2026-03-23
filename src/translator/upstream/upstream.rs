@@ -358,8 +358,7 @@ impl Upstream {
                                         ..prefix_len + m.extranonce_size as usize; // extranonce2
                                     let extended = match ExtendedExtranonce::from_upstream_extranonce(
                                         extranonce_prefix.clone(), range_0.clone(), range_1.clone(), range_2.clone(),
-                                    ).ok_or( Error::InvalidExtranonce(format!("Impossible to create a valid extended extranonce from {:?} {:?} {:?} {:?}",
-                                        extranonce_prefix,range_0,range_1,range_2))) {
+                                    ).ok_or( Error::InvalidExtranonce(format!("Impossible to create a valid extended extranonce from {extranonce_prefix:?} {range_0:?} {range_1:?} {range_2:?}"))) {
                                             Ok(extended_extranounce) => extended_extranounce,
                                             Err(e) => {
                                                 error!(

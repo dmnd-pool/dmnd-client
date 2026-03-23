@@ -19,10 +19,10 @@ pub struct MonitorAPI {
 fn shares_server_endpoint() -> String {
     // Determine the monitoring server URL based on the environment
     match Configuration::environment().as_str() {
-        "staging" => format!("{}/api/share/save", STAGING_URL),
-        "testnet3" => format!("{}/api/share/save", TESTNET3_URL),
-        "local" => format!("{}/api/share/save", LOCAL_URL),
-        "production" => format!("{}/api/share/save", PRODUCTION_URL),
+        "staging" => format!("{STAGING_URL}/api/share/save"),
+        "testnet3" => format!("{TESTNET3_URL}/api/share/save"),
+        "local" => format!("{LOCAL_URL}/api/share/save"),
+        "production" => format!("{PRODUCTION_URL}/api/share/save"),
         _ => unreachable!(),
     }
 }
@@ -30,10 +30,10 @@ fn shares_server_endpoint() -> String {
 fn worker_activity_server_endpoint() -> String {
     // Determine the monitoring server URL based on the environment
     match Configuration::environment().as_str() {
-        "staging" => format!("{}/api/worker/activity", STAGING_URL),
-        "testnet3" => format!("{}/api/worker/activity", TESTNET3_URL),
-        "local" => format!("{}/api/worker/activity", LOCAL_URL),
-        "production" => format!("{}/api/worker/activity", PRODUCTION_URL),
+        "staging" => format!("{STAGING_URL}/api/worker/activity"),
+        "testnet3" => format!("{TESTNET3_URL}/api/worker/activity"),
+        "local" => format!("{LOCAL_URL}/api/worker/activity"),
+        "production" => format!("{PRODUCTION_URL}/api/worker/activity"),
         _ => unreachable!(),
     }
 }

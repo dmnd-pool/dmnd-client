@@ -174,18 +174,13 @@ impl Upstream {
             tokio::task::yield_now().await;
         };
 
-        let updated_timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("Internal error: this operation can not fail because SystemTime should always be later than UNIX_EPOCH")
-            .as_secs() as u32;
-
         let to_send = SetCustomMiningJob {
             channel_id,
             request_id,
             token: signed_token,
             version: declare_mining_job.version,
             prev_hash: set_new_prev_hash.prev_hash,
-            min_ntime: updated_timestamp,
+            min_ntime: set_new_prev_hash.header_timestamp,
             nbits: set_new_prev_hash.n_bits,
             coinbase_tx_version,
             coinbase_prefix,

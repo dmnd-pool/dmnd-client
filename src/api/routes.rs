@@ -13,8 +13,7 @@ impl Api {
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(APIResponse::error(Some(format!(
-                    "Failed to collect stats: {}",
-                    e
+                    "Failed to collect stats: {e}"
                 )))),
             ),
         }
@@ -23,7 +22,7 @@ impl Api {
     // Retrieves system stats (CPU and memory usage)
     pub async fn system_stats() -> impl IntoResponse {
         let (cpu, memory) = get_cpu_and_memory_usage().await;
-        let cpu_usgae = format!("{:.3}", cpu);
+        let cpu_usgae = format!("{cpu:.3}");
         let data = serde_json::json!({"cpu_usage_%": cpu_usgae, "memory_usage_bytes": memory});
         Json(APIResponse::success(Some(data)))
     }
@@ -36,8 +35,7 @@ impl Api {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(APIResponse::error(Some(format!(
-                        "Failed to collect stats: {}",
-                        e
+                        "Failed to collect stats: {e}"
                     )))),
                 );
             }

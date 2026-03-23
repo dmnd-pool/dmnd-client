@@ -166,7 +166,7 @@ impl DownstreamMiningNode {
         let main_task = task::spawn(async move {
             while let Some(message) = receiver.recv().await {
                 if let Err(e) = DownstreamMiningNode::next(&self_mutex, message).await {
-                    error!("Jd error can not receive message from downstream: {e:?}");
+                    error!("Jd error: {e:?}");
                     ProxyState::update_downstream_state(DownstreamType::JdClientMiningDownstream);
                 };
             }
@@ -482,7 +482,7 @@ impl
     }
 
     fn is_work_selection_enabled(&self) -> bool {
-        false
+        true
     }
 
     fn handle_open_standard_mining_channel(
