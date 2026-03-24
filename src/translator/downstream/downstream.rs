@@ -1167,8 +1167,7 @@ mod tests {
 
         let first = downstream
             .safe_lock(|d| {
-                let action = d.handle_authorize_token("token-a");
-                action
+                d.handle_authorize_token("token-a")
             })
             .unwrap();
         let second = downstream
