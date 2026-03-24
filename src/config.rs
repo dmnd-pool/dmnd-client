@@ -271,7 +271,7 @@ impl Configuration {
                     .ok()
                     .and_then(|s| s.parse().ok())
             })
-            .unwrap_or(1);
+            .unwrap_or(0);
 
         let signature = match args.signature {
             Some(s) => {
