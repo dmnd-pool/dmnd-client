@@ -32,6 +32,8 @@ mod shared;
 mod shutdown;
 mod translator;
 
+pub use ingress::sv1_ingress::bind_downstream_listener;
+
 const TRANSLATOR_BUFFER_SIZE: usize = 32;
 const MIN_EXTRANONCE_SIZE: u16 = 6;
 const MIN_EXTRANONCE2_SIZE: u16 = 5;
