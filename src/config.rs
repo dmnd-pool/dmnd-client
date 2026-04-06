@@ -328,7 +328,7 @@ impl Configuration {
         }
 
         let listening_addr = args.listening_addr.or(config.listening_addr).or_else(|| {
-            std::env::var("DOWNSTREAM_HASHRATE")
+            std::env::var("LISTENING_ADDR")
                 .ok()
                 .and_then(|s| s.parse().ok())
         });
