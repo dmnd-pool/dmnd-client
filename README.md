@@ -40,7 +40,7 @@ Note that the `ipcbind=unix` is required and Stratum V2 will not work without it
 
 #### 3.2 Run Template Provider
 Download the Template Provider binary.
-https://github.com/stratum-mining/sv2-tp/releases/tag/v1.0.5
+https://github.com/stratum-mining/sv2-tp/releases/tag/v1.0.6
 
 Run the Template Provider:
 
