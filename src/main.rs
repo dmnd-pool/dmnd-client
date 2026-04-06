@@ -1,5 +1,6 @@
-#![allow(unused_crate_dependencies)] // To avoid warnings about unused dependencies in this binary crate since the dependencies are used in the library crate.
+#![allow(unused_crate_dependencies)]
 #[tokio::main]
 async fn main() {
-    dmnd_client::start().await;
+    let config = dmnd_client::Configuration::from_cli();
+    dmnd_client::start(config).await;
 }

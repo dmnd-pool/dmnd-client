@@ -1,10 +1,10 @@
 use clap::Parser;
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     path::PathBuf,
+    sync::OnceLock,
     time::Duration,
 };
 use tracing::{debug, error, info};
@@ -16,10 +16,10 @@ use crate::{
     },
     DEFAULT_SV1_HASHPOWER, PRODUCTION_URL, STAGING_URL, TESTNET3_URL,
 };
-lazy_static! {
-    pub static ref CONFIG: Configuration = Configuration::load_config();
-}
-#[derive(Parser)]
+
+static CONFIG: OnceLock<Configuration> = OnceLock::new();
+
+#[derive(Parser, Default)]
 struct Args {
     #[clap(long)]
     staging: bool,
@@ -104,6 +104,7 @@ impl ConfigFile {
     }
 }
 
+#[derive(Debug)]
 pub struct Configuration {
     token: Option<String>,
     tp_address: Option<String>,
@@ -125,12 +126,66 @@ pub struct Configuration {
     miner_name: Option<String>,
 }
 impl Configuration {
+    pub fn new(
+        token: Option<String>,
+        tp_address: Option<String>,
+        interval: u64,
+        delay: u64,
+        downstream_hashrate: f32,
+        loglevel: String,
+        nc_loglevel: String,
+        sv1_log: bool,
+        file_logging: bool,
+        staging: bool,
+        testnet3: bool,
+        local: bool,
+        listening_addr: Option<String>,
+        api_server_port: String,
+        monitor: bool,
+        auto_update: bool,
+        signature: String,
+        miner_name: Option<String>,
+    ) -> Self {
+        Configuration {
+            token,
+            tp_address,
+            interval,
+            delay,
+            downstream_hashrate,
+            loglevel,
+            nc_loglevel,
+            sv1_log,
+            file_logging,
+            staging,
+            testnet3,
+            local,
+            listening_addr,
+            api_server_port,
+            monitor,
+            auto_update,
+            signature,
+            miner_name,
+        }
+    }
+
+    pub(crate) fn init(config: Configuration) {
+        CONFIG
+            .set(config)
+            .expect("Configuration already initialized");
+    }
+
+    fn cfg() -> &'static Configuration {
+        CONFIG
+            .get()
+            .expect("Configuration not initialized; call start() first")
+    }
+
     pub fn token() -> Option<String> {
-        CONFIG.token.clone()
+        Self::cfg().token.clone()
     }
 
     pub fn tp_address() -> Option<String> {
-        CONFIG.tp_address.clone()
+        Self::cfg().tp_address.clone()
     }
 
     pub async fn pool_address() -> Option<Vec<SocketAddr>> {
@@ -144,32 +199,32 @@ impl Configuration {
     }
 
     pub fn adjustment_interval() -> u64 {
-        CONFIG.interval
+        Self::cfg().interval
     }
 
     pub fn delay() -> u64 {
-        CONFIG.delay
+        Self::cfg().delay
     }
 
     pub fn downstream_hashrate() -> f32 {
-        CONFIG.downstream_hashrate
+        Self::cfg().downstream_hashrate
     }
 
     pub fn downstream_listening_addr() -> Option<String> {
-        CONFIG.listening_addr.clone()
+        Self::cfg().listening_addr.clone()
     }
 
     pub fn api_server_port() -> String {
-        CONFIG.api_server_port.clone()
+        Self::cfg().api_server_port.clone()
     }
 
     pub fn loglevel() -> &'static str {
-        match CONFIG.loglevel.to_lowercase().as_str() {
-            "trace" | "debug" | "info" | "warn" | "error" | "off" => &CONFIG.loglevel,
+        match Self::cfg().loglevel.to_lowercase().as_str() {
+            "trace" | "debug" | "info" | "warn" | "error" | "off" => &Self::cfg().loglevel,
             _ => {
                 eprintln!(
                     "Invalid log level '{}'. Defaulting to 'info'.",
-                    CONFIG.loglevel
+                    Self::cfg().loglevel
                 );
                 "info"
             }
@@ -177,12 +232,12 @@ impl Configuration {
     }
 
     pub fn nc_loglevel() -> &'static str {
-        match CONFIG.nc_loglevel.as_str() {
-            "trace" | "debug" | "info" | "warn" | "error" | "off" => &CONFIG.nc_loglevel,
+        match Self::cfg().nc_loglevel.as_str() {
+            "trace" | "debug" | "info" | "warn" | "error" | "off" => &Self::cfg().nc_loglevel,
             _ => {
                 eprintln!(
                     "Invalid log level for noise_connection '{}' Defaulting to 'off'.",
-                    &CONFIG.nc_loglevel
+                    &Self::cfg().nc_loglevel
                 );
                 "off"
             }
@@ -190,33 +245,33 @@ impl Configuration {
     }
 
     pub fn enable_file_logging() -> bool {
-        CONFIG.file_logging
+        Self::cfg().file_logging
     }
     pub fn sv1_ingress_log() -> bool {
-        CONFIG.sv1_log
+        Self::cfg().sv1_log
     }
 
     pub fn staging() -> bool {
-        CONFIG.staging
+        Self::cfg().staging
     }
 
     pub fn local() -> bool {
-        CONFIG.local
+        Self::cfg().local
     }
 
     pub fn testnet3() -> bool {
-        CONFIG.testnet3
+        Self::cfg().testnet3
     }
 
     /// Returns the environment based on the configuration.
     /// Possible values: "staging", "local", "production".
     /// If no environment is set, it defaults to "production".
     pub fn environment() -> String {
-        if CONFIG.staging {
+        if Self::cfg().staging {
             "staging".to_string()
-        } else if CONFIG.local {
+        } else if Self::cfg().local {
             "local".to_string()
-        } else if CONFIG.testnet3 {
+        } else if Self::cfg().testnet3 {
             "testnet3".to_string()
         } else {
             "production".to_string()
@@ -224,25 +279,32 @@ impl Configuration {
     }
 
     pub fn monitor() -> bool {
-        CONFIG.monitor
+        Self::cfg().monitor
     }
 
     pub fn auto_update() -> bool {
-        CONFIG.auto_update
+        Self::cfg().auto_update
     }
 
     pub fn signature() -> String {
-        CONFIG.signature.clone()
+        Self::cfg().signature.clone()
     }
 
     pub fn miner_name() -> Option<String> {
-        CONFIG.miner_name.clone()
+        Self::cfg().miner_name.clone()
     }
 
-    // Loads config from CLI, file, or env vars with precedence: CLI > file > env.
-    fn load_config() -> Self {
+    // Loads config from CLI args, config file, and env vars with precedence: CLI > file > env.
+    pub fn from_cli() -> Self {
         let args = Args::parse();
-        let config_path: PathBuf = args.config_file.unwrap_or("config.toml".into());
+        let config_path: PathBuf = args
+            .config_file
+            .or_else(|| {
+                std::env::var("DMND_CLIENT_CONFIG_FILE")
+                    .ok()
+                    .map(PathBuf::from)
+            })
+            .unwrap_or("config.toml".into());
         let config: ConfigFile = std::fs::read_to_string(&config_path)
             .ok()
             .and_then(|content| toml::from_str(&content).ok())
@@ -445,15 +507,15 @@ fn parse_address(addr: String) -> Option<SocketAddr> {
 
 /// Fetches pool URLs from the server based on the environment.
 async fn fetch_pool_urls() -> Result<Vec<SocketAddr>, Error> {
-    if CONFIG.local {
+    if Configuration::cfg().local {
         info!("Running in local mode, using hardcoded address 127.0.0.1:20000");
         return Ok(vec![
             parse_address("127.0.0.1:20000".to_string()).expect("Invalid local address")
         ]);
     };
-    let url = if CONFIG.staging {
+    let url = if Configuration::cfg().staging {
         STAGING_URL
-    } else if CONFIG.testnet3 {
+    } else if Configuration::cfg().testnet3 {
         TESTNET3_URL
     } else {
         PRODUCTION_URL

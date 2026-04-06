@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "dmnd-client"
 path = "src/main.rs"
 
+[features]
+default = ["jemalloc"]
+jemalloc = ["jemallocator"]
+
 [dependencies]
 dashmap = {version = "6.1.0", features = ["inline"]}
 bitcoin = {version = "0.32.5", features = ["serde","rand"]}
@@ -72,6 +76,8 @@ sv1_api = { git = "https://github.com/demand-open-source/stratum",subdirectory =
 [dev-dependencies]
 rand = "0.8.5"
 sha2 = "0.10.8"
+integration_tests_sv2 = { git = "https://github.com/stratum-mining/sv2-apps.git", branch = "main" }
+stratum-apps = { git = "https://github.com/stratum-mining/sv2-apps.git", branch = "main" }
 
 [profile.release]
 strip = true
@@ -82,4 +88,4 @@ panic = 'abort'
 panic = 'abort'
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
-jemallocator = "*"
+jemallocator = { version = "*", optional = true }

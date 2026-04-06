@@ -1,15 +1,19 @@
-#[cfg(not(target_os = "windows"))]
+#[cfg(test)]
+use integration_tests_sv2 as _;
+#[cfg(test)]
+use stratum_apps as _;
+
+#[cfg(all(not(target_os = "windows"), feature = "jemalloc"))]
 use jemallocator::Jemalloc;
 use router::Router;
 use tokio::sync::watch;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), feature = "jemalloc"))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
 use crate::auto_update::check_update_proxy;
 use crate::shared::utils::AbortOnDrop;
-use config::Configuration;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
@@ -22,6 +26,7 @@ mod api;
 mod auto_update;
 mod config;
 mod ingress;
+pub use config::Configuration;
 pub mod jd_client;
 mod minin_pool_connection;
 mod monitor;
@@ -55,14 +60,12 @@ lazy_static! {
 }
 
 lazy_static! {
-
-    // for staging and local environments, use the test auth public key
-    // for production, use the main auth public key
-    pub static ref AUTH_PUB_KEY: &'static str = if Configuration::staging() || Configuration::local() || Configuration::testnet3() {
-        TEST_AUTH_PUB_KEY
-    } else {
-        MAIN_AUTH_PUB_KEY
-    };
+    pub static ref AUTH_PUB_KEY: &'static str =
+        if Configuration::staging() || Configuration::local() || Configuration::testnet3() {
+            TEST_AUTH_PUB_KEY
+        } else {
+            MAIN_AUTH_PUB_KEY
+        };
 }
 lazy_static! {
     static ref SHARE_PER_MIN: f32 = std::env::var("SHARE_PER_MIN")
@@ -73,7 +76,12 @@ lazy_static! {
 
 static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
-pub async fn start() {
+pub async fn start(config: Configuration) {
+    Configuration::init(config);
+    start_internal().await;
+}
+
+async fn start_internal() {
     let log_level = Configuration::loglevel();
     let noise_connection_log_level = Configuration::nc_loglevel();
 
@@ -90,7 +98,7 @@ pub async fn start() {
             "{log_level},demand_sv2_connection::noise_connection_tokio={noise_connection_log_level}"
         )));
 
-    if enable_file_logging {
+    let tracing_init_result = if enable_file_logging {
         let file_appender = tracing_appender::rolling::daily("logs", "dmnd-client.log");
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
         LOG_GUARD.set(guard).unwrap_or(());
@@ -104,12 +112,16 @@ pub async fn start() {
             .with(console_layer)
             .with(file_layer)
             // .with(remote_layer)
-            .init();
+            .try_init()
     } else {
         tracing_subscriber::registry()
             .with(console_layer)
             // .with(remote_layer)
-            .init();
+            .try_init()
+    };
+
+    if let Err(e) = tracing_init_result {
+        eprintln!("Tracing subscriber already set, skipping: {e}");
     }
 
     Configuration::token().expect("TOKEN is not set");
