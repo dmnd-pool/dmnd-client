@@ -26,7 +26,7 @@ struct Args {
     #[clap(long)]
     testnet3: bool,
     #[clap(long)]
-    local: bool,
+    local_pool_addr: Option<String>,
     #[clap(long = "d", short = 'd', value_parser = parse_hashrate)]
     downstream_hashrate: Option<f32>,
     #[clap(long = "loglevel", short = 'l')]
@@ -72,7 +72,7 @@ struct ConfigFile {
     nc_loglevel: Option<String>,
     sv1_log: Option<bool>,
     staging: Option<bool>,
-    local: Option<bool>,
+    local_pool_addr: Option<String>,
     testnet3: Option<bool>,
     listening_addr: Option<String>,
     api_server_port: Option<String>,
@@ -94,7 +94,7 @@ impl ConfigFile {
             sv1_log: None,
             staging: None,
             testnet3: None,
-            local: None,
+            local_pool_addr: None,
             listening_addr: None,
             api_server_port: None,
             monitor: None,
@@ -116,7 +116,7 @@ pub struct Configuration {
     file_logging: bool,
     staging: bool,
     testnet3: bool,
-    local: bool,
+    local_pool_addr: Option<SocketAddr>,
     listening_addr: Option<String>,
     api_server_port: String,
     monitor: bool,
@@ -201,7 +201,7 @@ impl Configuration {
     }
 
     pub fn local() -> bool {
-        CONFIG.local
+        CONFIG.local_pool_addr.is_some()
     }
 
     pub fn testnet3() -> bool {
@@ -214,7 +214,7 @@ impl Configuration {
     pub fn environment() -> String {
         if CONFIG.staging {
             "staging".to_string()
-        } else if CONFIG.local {
+        } else if CONFIG.local_pool_addr.is_some() {
             "local".to_string()
         } else if CONFIG.testnet3 {
             "testnet3".to_string()
@@ -364,7 +364,16 @@ impl Configuration {
             args.staging || config.staging.unwrap_or(false) || std::env::var("STAGING").is_ok();
         let testnet3 =
             args.testnet3 || config.testnet3.unwrap_or(false) || std::env::var("TESTNET3").is_ok();
-        let local = args.local || config.local.unwrap_or(false) || std::env::var("LOCAL").is_ok();
+        let local_pool_addr: Option<SocketAddr> =
+            args.local_pool_addr.or(config.local_pool_addr).map(|addr| {
+                parse_address(addr.clone()).unwrap_or_else(|| {
+                    panic!(
+                        "Invalid local pool address: '{}'. Expected format: 'host:port'",
+                        addr
+                    )
+                })
+            });
+
         let monitor =
             args.monitor || config.monitor.unwrap_or(false) || std::env::var("MONITOR").is_ok();
 
@@ -384,7 +393,7 @@ impl Configuration {
             file_logging,
             staging,
             testnet3,
-            local,
+            local_pool_addr,
             listening_addr,
             api_server_port,
             monitor,
@@ -445,11 +454,9 @@ fn parse_address(addr: String) -> Option<SocketAddr> {
 
 /// Fetches pool URLs from the server based on the environment.
 async fn fetch_pool_urls() -> Result<Vec<SocketAddr>, Error> {
-    if CONFIG.local {
-        info!("Running in local mode, using hardcoded address 127.0.0.1:20000");
-        return Ok(vec![
-            parse_address("127.0.0.1:20000".to_string()).expect("Invalid local address")
-        ]);
+    if let Some(addr) = CONFIG.local_pool_addr {
+        info!("Running in local mode, using address {}", addr);
+        return Ok(vec![addr]);
     };
     let url = if CONFIG.staging {
         STAGING_URL
