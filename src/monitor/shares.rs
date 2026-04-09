@@ -7,6 +7,8 @@ use crate::{
     proxy_state::{DownstreamType, ProxyState},
 };
 
+const SHARE_BATCH_INTERVAL_SECS: u64 = 180;
+
 #[derive(serde::Serialize, Clone, Debug)]
 pub struct ShareInfo {
     worker_name: String,
@@ -91,7 +93,8 @@ impl SharesMonitor {
 
     pub async fn monitor(&self) {
         let api = MonitorAPI::new(shares_server_endpoint());
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // 5 minutes
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(SHARE_BATCH_INTERVAL_SECS));
 
         // First tick completes immediately
         interval.tick().await;
