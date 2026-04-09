@@ -16,6 +16,7 @@ dashmap = {version = "6.1.0", features = ["inline"]}
 bitcoin = {version = "0.32.5", features = ["serde","rand"]}
 serde_json = { version = "1.0.64", default-features = false, features = ["alloc"] }
 tokio-util = { version = "*", features = ["codec"] }
+uuid = { version = "1", features = ["v4"] }
 nohash-hasher = "*"
 futures = "*"
 async-recursion = "1.0.0"
