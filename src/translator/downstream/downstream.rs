@@ -267,9 +267,13 @@ impl Downstream {
             downstream.safe_lock(|s| (s.share_monitor.clone(), s.connection_id))?;
 
         // Create an abortable task for the shares monitor
+        let task_manager_clone = task_manager.clone();
         let abortable = tokio::spawn(async move {
             info!("Starting shares monitor for downstream: {}", connection_id);
             share_monitor.clone().monitor().await;
+            if let Some(kill_signal) = task_manager_clone.safe_lock(|tm| tm.send_kill_signal.clone()).ok() {
+                let _ = kill_signal.send(connection_id).await;
+            }
         });
 
         // Register the task with the task manager so it can be aborted when needed

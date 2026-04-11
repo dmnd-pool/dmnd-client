@@ -14,6 +14,7 @@ pub async fn start_send_to_downstream(
     connection_id: u32,
     host: String,
 ) -> Result<(), Error<'static>> {
+    let task_manager_clone = task_manager.clone();
     let handle = task::spawn(async move {
         while let Some(res) = receiver_outgoing.recv().await {
             let to_send = match serde_json::to_string(&res) {
@@ -28,11 +29,14 @@ pub async fn start_send_to_downstream(
                 break;
             }
         }
-        warn!(
-            "Downstream: Shutting down sv1 downstream writer: {}",
-            connection_id
-        );
-    });
+            warn!(
+                "Downstream: Shutting down sv1 downstream writer: {}",
+                connection_id
+            );
+            if let Some(kill_signal) = task_manager_clone.safe_lock(|tm| tm.send_kill_signal.clone()).ok() {
+                let _ = kill_signal.send(connection_id).await;
+            }
+        });
     TaskManager::add_send_downstream(task_manager, handle.into(), connection_id)
         .await
         .map_err(|_| Error::TranslatorTaskManagerFailed)
