@@ -48,7 +48,7 @@ const TESTNET3_URL: &str = "https://testnet3-user-dashboard-server.dmnd.work";
 const PRODUCTION_URL: &str = "https://production-user-dashboard-server.dmnd.work";
 
 lazy_static! {
-    static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<String>> =
+    static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<SocketAddr>> =
         roles_logic_sv2::utils::Mutex::new(Configuration::tp_address());
     static ref ACTIVE_POOL_ADDRESS: roles_logic_sv2::utils::Mutex<Option<SocketAddr>> =
         roles_logic_sv2::utils::Mutex::new(None); // Connected pool address
@@ -222,7 +222,7 @@ async fn initialize_proxy(
 
         let jdc_abortable: Option<AbortOnDrop>;
         let share_accounter_abortable;
-        let tp = match TP_ADDRESS.safe_lock(|tp| tp.clone()) {
+        let tp = match TP_ADDRESS.safe_lock(|tp| *tp) {
             Ok(tp) => tp,
             Err(e) => {
                 error!("TP_ADDRESS Mutex Corrupted: {e}");

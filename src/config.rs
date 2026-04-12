@@ -16,6 +16,7 @@ use crate::{
     },
     DEFAULT_SV1_HASHPOWER, PRODUCTION_URL, STAGING_URL, TESTNET3_URL,
 };
+
 lazy_static! {
     pub static ref CONFIG: Configuration = Configuration::load_config();
 }
@@ -106,7 +107,7 @@ impl ConfigFile {
 
 pub struct Configuration {
     token: Option<String>,
-    tp_address: Option<String>,
+    tp_address: Option<SocketAddr>,
     interval: u64,
     delay: u64,
     downstream_hashrate: f32,
@@ -129,8 +130,8 @@ impl Configuration {
         CONFIG.token.clone()
     }
 
-    pub fn tp_address() -> Option<String> {
-        CONFIG.tp_address.clone()
+    pub fn tp_address() -> Option<SocketAddr> {
+        CONFIG.tp_address
     }
 
     pub async fn pool_address() -> Option<Vec<SocketAddr>> {
@@ -274,6 +275,17 @@ impl Configuration {
             .tp_address
             .or(config.tp_address)
             .or_else(|| std::env::var("TP_ADDRESS").ok());
+        let tp_address = tp_address.map(|tp| {
+            let addr = tp.parse::<std::net::SocketAddr>().unwrap_or_else(|e| {
+                error!("Invalid TP address '{tp}': {e}. Expected format: 'ip:port' (e.g., '127.0.0.1:8442')");
+                std::process::exit(1);
+            });
+            if let Err(e) = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)) {
+                error!("Error: TP address '{addr}' is not reachable: {e}");
+                std::process::exit(1);
+            }
+            addr
+        });
 
         let miner_name = args
             .miner_name
