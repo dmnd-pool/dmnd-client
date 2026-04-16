@@ -40,7 +40,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build Linux Binary
-        run: cargo build --release
+        run: RUSTFLAGS="-C target-cpu=x86-64" cargo build --release
 
       - name: Rename Linux Binary
         run: mv target/release/dmnd-client dmnd-client-linux
