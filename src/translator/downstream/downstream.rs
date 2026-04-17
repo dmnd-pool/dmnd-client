@@ -577,46 +577,29 @@ impl IsServer<'static> for Downstream {
                 self.extranonce1.clone(),
                 self.version_rolling_mask.clone(),
             ) {
-                // Only forward upstream if the share meets the latest difficulty
-                if let Some(latest_difficulty) = self.difficulty_mgmt.current_difficulties.back() {
-                    if met_difficulty == *latest_difficulty {
-                        let to_send = SubmitShareWithChannelId {
-                            channel_id: self.connection_id,
-                            share: request.clone(),
-                            extranonce: self.extranonce1.clone(),
-                            extranonce2_len: self.extranonce2_len,
-                            version_rolling_mask: self.version_rolling_mask.clone(),
-                        };
-                        if let Err(e) = self
-                            .tx_sv1_bridge
-                            .try_send(DownstreamMessages::SubmitShares(to_send))
-                        {
-                            error!("Failed to start receive downstream task: {e:?}");
-                            self.stats_sender.update_rejected_shares(self.connection_id);
-                            // Return false because submit was not properly handled
-                            return false;
-                        }
-                        // Share is accepted here
-                        let share = ShareInfo::new(
-                            request.user_name.clone(),
-                            Some(met_difficulty),
-                            job_id,
-                            nonce,
-                            None,
-                        );
-                        self.share_monitor.insert_share(share);
-                    } else {
-                        // met_difficulty is not latest difficulty, so we mark it as rejected
-                        let share = ShareInfo::new(
-                            request.user_name.clone(),
-                            None,
-                            job_id, // rejected because it was not sent upstream
-                            nonce,
-                            Some(RejectionReason::DifficultyMismatch),
-                        );
-                        self.share_monitor.insert_share(share);
-                    }
+                let to_send = SubmitShareWithChannelId {
+                    channel_id: self.connection_id,
+                    share: request.clone(),
+                    extranonce: self.extranonce1.clone(),
+                    extranonce2_len: self.extranonce2_len,
+                    version_rolling_mask: self.version_rolling_mask.clone(),
+                };
+                if let Err(e) = self
+                    .tx_sv1_bridge
+                    .try_send(DownstreamMessages::SubmitShares(to_send))
+                {
+                    error!("Failed to forward share to bridge: {e:?}");
+                    self.stats_sender.update_rejected_shares(self.connection_id);
+                    return false;
                 }
+                let share = ShareInfo::new(
+                    request.user_name.clone(),
+                    Some(met_difficulty),
+                    job_id,
+                    nonce,
+                    None,
+                );
+                self.share_monitor.insert_share(share);
                 self.stats_sender.update_accepted_shares(self.connection_id);
                 info!(
                     "Share for Job {} and difficulty {} is accepted",
