@@ -462,10 +462,7 @@ impl Configuration {
         let local_pool_addr: Option<SocketAddr> =
             args.local_pool_addr.or(config.local_pool_addr).map(|addr| {
                 parse_address(addr.clone()).unwrap_or_else(|| {
-                    panic!(
-                        "Invalid local pool address: '{}'. Expected format: 'host:port'",
-                        addr
-                    )
+                    panic!("Invalid local pool address: '{addr}'. Expected format: 'host:port'")
                 })
             });
 

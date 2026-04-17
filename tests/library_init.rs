@@ -1,91 +1,37 @@
 #![allow(unused_crate_dependencies)]
-
+mod common;
 use std::{
     net::{SocketAddr, TcpListener},
     time::Duration,
 };
 
-use integration_tests_sv2::{
-    interceptor::MessageDirection,
-    mock_roles::{MockUpstream, WithSetup},
-    sniffer::Sniffer,
-    start_template_provider,
-    template_provider::DifficultyLevel,
-    utils::get_available_address,
-};
+use integration_tests_sv2::{interceptor::MessageDirection, utils::get_available_address};
 use stratum_apps::stratum_core::common_messages_sv2::{
-    Protocol, MESSAGE_TYPE_SETUP_CONNECTION, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+    MESSAGE_TYPE_SETUP_CONNECTION, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
 };
 
-fn ensure_port_free_or_skip(address: &str) -> bool {
-    match TcpListener::bind(address) {
-        Ok(_) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            eprintln!("skipping: {address} is in use");
-            false
-        }
-        Err(e) => panic!("failed to probe {address}: {e}"),
-    }
-}
+use crate::common::{
+    setup_mock_jd_with_sniffer, setup_mock_pool_with_sniffer, setup_proxy, setup_tp_with_sniffer,
+};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn library_init_sv2_setup_connection() {
-    if !ensure_port_free_or_skip("127.0.0.1:20000") {
-        return;
-    }
-    if !ensure_port_free_or_skip("127.0.0.1:20001") {
-        return;
-    }
-    if !ensure_port_free_or_skip("127.0.0.1:20002") {
-        return;
-    }
-
-    let proxy_target: SocketAddr = "127.0.0.1:20000".parse().unwrap();
-    let mock_pool_mining_addr: SocketAddr = "127.0.0.1:20001".parse().unwrap();
-    let mock_pool_jd_addr: SocketAddr = "127.0.0.1:20002".parse().unwrap();
+    let mock_pool_addr: SocketAddr = get_available_address();
     let tp_sniffer_addr = get_available_address();
-    let (template_provider, template_provider_addr) =
-        start_template_provider(Some(1), DifficultyLevel::Low);
 
-    let _mock_pool_mining = MockUpstream::new(
-        mock_pool_mining_addr,
-        WithSetup::yes_with_defaults(Protocol::MiningProtocol, 0),
-    )
-    .start()
-    .await;
-
-    let _mock_pool_jd = MockUpstream::new(
-        mock_pool_jd_addr,
-        WithSetup::yes_with_defaults(Protocol::JobDeclarationProtocol, 0),
-    )
-    .start()
-    .await;
-
-    let pool_sniffer = Sniffer::new(
-        "proxy-pool-mining",
-        proxy_target,
-        mock_pool_mining_addr,
-        false,
-        vec![],
-        Some(30),
-    );
+    let (pool_sniffer, _) = setup_mock_pool_with_sniffer(mock_pool_addr).await;
     pool_sniffer.start();
 
-    let jd_pool_sniffer = Sniffer::new(
-        "proxy-pool-jd",
-        proxy_target,
-        mock_pool_jd_addr,
-        false,
-        vec![],
-        Some(30),
-    );
+    let jd_sniffer = setup_mock_jd_with_sniffer(mock_pool_addr).await;
     {
-        let jd_pool_sniffer = jd_pool_sniffer.clone();
+        let jd_sniffer = jd_sniffer.clone();
         tokio::spawn(async move {
+            // Sleep briefly to ensure pool_sniffer starts first
+            tokio::time::sleep(Duration::from_millis(10)).await;
             loop {
-                if let Ok(listener) = TcpListener::bind("127.0.0.1:20000") {
+                if let Ok(listener) = TcpListener::bind(mock_pool_addr) {
                     drop(listener);
-                    jd_pool_sniffer.start();
+                    jd_sniffer.start();
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -93,38 +39,10 @@ async fn library_init_sv2_setup_connection() {
         });
     }
 
-    let tp_sniffer = Sniffer::new(
-        "proxy-tp",
-        tp_sniffer_addr,
-        template_provider_addr,
-        false,
-        vec![],
-        Some(30),
-    );
+    let (tp, tp_sniffer) = setup_tp_with_sniffer(tp_sniffer_addr);
     tp_sniffer.start();
 
-    let config = dmnd_client::Configuration::new(
-        Some("test_token".to_string()),
-        Some(tp_sniffer_addr.to_string()),
-        120_000,
-        0,
-        100_000_000_000_000.0,
-        "info".to_string(),
-        "off".to_string(),
-        false,
-        false,
-        false,
-        false,
-        true,
-        None,
-        "3001".to_string(),
-        false,
-        false,
-        "DDxDD".to_string(),
-        None,
-    );
-
-    let proxy = tokio::spawn(dmnd_client::start(config));
+    let (proxy, _) = setup_proxy(Some(mock_pool_addr), Some(tp_sniffer_addr), false);
 
     pool_sniffer
         .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
@@ -137,11 +55,11 @@ async fn library_init_sv2_setup_connection() {
         )
         .await;
 
-    jd_pool_sniffer
+    jd_sniffer
         .wait_for_message_type(MessageDirection::ToUpstream, MESSAGE_TYPE_SETUP_CONNECTION)
         .await;
 
-    jd_pool_sniffer
+    jd_sniffer
         .wait_for_message_type(
             MessageDirection::ToDownstream,
             MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
@@ -160,5 +78,5 @@ async fn library_init_sv2_setup_connection() {
         .await;
 
     proxy.abort();
-    drop(template_provider);
+    drop(tp);
 }
