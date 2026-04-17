@@ -127,7 +127,6 @@ pub enum RejectionReason {
     JobIdNotFound,
     InvalidShare,
     InvalidJobIdFormat,
-    DifficultyMismatch,
 }
 
 impl std::fmt::Display for RejectionReason {
@@ -136,7 +135,6 @@ impl std::fmt::Display for RejectionReason {
             RejectionReason::JobIdNotFound => write!(f, "Job ID not found"),
             RejectionReason::InvalidShare => write!(f, "Invalid share"),
             RejectionReason::InvalidJobIdFormat => write!(f, "Invalid job ID format"),
-            RejectionReason::DifficultyMismatch => write!(f, "Difficulty mismatch"),
         }
     }
 }
