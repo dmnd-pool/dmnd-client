@@ -68,10 +68,12 @@ impl SharesMonitor {
             });
     }
 
-    /// Retrieves the list of pending shares.
-    fn get_next_shares(&self) -> Vec<ShareInfo> {
+    /// Atomically takes all pending shares, leaving the internal list empty for new
+    /// shares. This avoids the race condition where a clone + clear would drop shares
+    /// inserted between the two operations.
+    fn take_shares(&self) -> Vec<ShareInfo> {
         self.shares
-            .safe_lock(|event| event.clone())
+            .safe_lock(|shares| std::mem::take(shares))
             .unwrap_or_else(|e| {
                 error!("Failed to lock pending shares: {:?}", e);
                 ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
@@ -79,11 +81,13 @@ impl SharesMonitor {
             })
     }
 
-    /// Clears the list of pending shares.
-    fn clear_next_shares(&self) {
+    /// Re-inserts shares back into the pending list. Used when a send fails so the
+    /// shares are retried on the next cycle.
+    fn requeue_shares(&self, mut failed_shares: Vec<ShareInfo>) {
         self.shares
-            .safe_lock(|event| {
-                event.clear();
+            .safe_lock(|shares| {
+                failed_shares.append(shares);
+                *shares = failed_shares;
             })
             .unwrap_or_else(|e| {
                 error!("Failed to lock pending shares: {:?}", e);
@@ -100,7 +104,7 @@ impl SharesMonitor {
         interval.tick().await;
         loop {
             interval.tick().await;
-            let shares_to_send = self.get_next_shares();
+            let shares_to_send = self.take_shares();
             if !shares_to_send.is_empty() {
                 let token = self.token.safe_lock(|t| t.clone()).unwrap();
                 match api.send_shares(shares_to_send.clone(), &token).await {
@@ -109,10 +113,10 @@ impl SharesMonitor {
                             "Saved {} shares to the monitoring server",
                             shares_to_send.len()
                         );
-                        self.clear_next_shares();
                     }
                     Err(err) => {
                         warn!("Failed to send shares, this does not affect mining but may cause issues with monitoring: {:?}", err);
+                        self.requeue_shares(shares_to_send);
                     }
                 }
             } else {
