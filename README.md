@@ -14,7 +14,7 @@ full Job Declaration.
 To mine with DMND pool you must first obtain DMND token.  Please complete the registration form at
 https://onboarding.dmnd.work and await our confirmation email before proceeding.
 
-## Connection Flow
+### 2.1 Connection Flow
 
 Bitcoin Core → Template Provider → SV2 Client → DMND Pool
 
@@ -34,7 +34,7 @@ What you need:
   DMND Stratum V2 Client.
 
 #### 3.1 Run Bitcoin Core
-Follow instruction to download and install Bitcoin Core as describe in the official website:
+Follow the instructions to download and install Bitcoin Core from the official website:
 
 https://bitcoincore.org/en/releases/30.2/
 
@@ -92,7 +92,7 @@ When connecting to the DMND pool, your token must be provided in two places:
 1. As a configuration value (TOKEN)
 2. As part of the username in the authentication message
 
-Example:
+**Example:**
 
 username: your_token.worker_name  
 password: x
@@ -107,10 +107,10 @@ The token is used to identify and authorize your miner. Including it in both con
 After you have Bitcoin Core, Stratum V2 Template Provider and DMND Stratum V2 Client running, you
 can point your miner to the DMND Stratum V2 Client.
 
-Enter your DMND token in the password field and point your miners to the machine running the DMND Stratum V2 Client. 
+Enter your DMND token in the password field and include it in the username as shown above and point your miners to the machine running the DMND Stratum V2 Client. 
 The username field must include your DMND token.
 
-Example:
+**Example:
 username: your_token.worker_name  
 password: x
 
