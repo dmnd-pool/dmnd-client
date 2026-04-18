@@ -14,6 +14,12 @@ full Job Declaration.
 To mine with DMND pool you must first obtain DMND token.  Please complete the registration form at
 https://onboarding.dmnd.work and await our confirmation email before proceeding.
 
+### 2.1 Connection Flow
+
+Bitcoin Core → Template Provider → SV2 Client → DMND Pool
+
+(The token is used during authentication between the client and the pool)
+
 # 3. Enable Job Declaration Support
 -------------------------
 
@@ -28,7 +34,7 @@ What you need:
   DMND Stratum V2 Client.
 
 #### 3.1 Run Bitcoin Core
-Follow instruction to download and install Bitcoin Core as describe in the official website:
+Follow the instructions to download and install Bitcoin Core from the official website:
 
 https://bitcoincore.org/en/releases/30.2/
 
@@ -79,13 +85,35 @@ Example:
 
     TOKEN=abc123 cargo run -- -l info -d 200T --tp-address="127.0.0.1:8336"
 
+### 4.2  Authentication Requirement
+
+When connecting to the DMND pool, your token must be provided in two places:
+
+1. As a configuration value (TOKEN)
+2. As part of the username in the authentication message
+
+**Example:**
+
+username: your_token.worker_name  
+password: x
+
+### Why is the token required in two places?
+
+The token is used to identify and authorize your miner. Including it in both configuration and authentication ensures proper communication with the pool.
+
 # 5. Connect Your Miner
 -----------------------------
 
 After you have Bitcoin Core, Stratum V2 Template Provider and DMND Stratum V2 Client running, you
 can point your miner to the DMND Stratum V2 Client.
 
-Enter your DMND token in the password field and point your miners to the machine running the DMND Stratum V2 Client. The username field can be left empty or filled with anything you like. If not changed, the default port of the
+Enter your DMND token in the password field and include it in the username as shown above and point your miners to the machine running the DMND Stratum V2 Client. 
+The username field must include your DMND token.
+
+**Example:
+username: your_token.worker_name  
+password: x
+
 DMND Stratum V2 Client is **32767**. So you should obtain the IP address of the machine running the
 DMND Stratum V2 Client and point your miner to:
 
