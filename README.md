@@ -14,11 +14,6 @@ full Job Declaration.
 To mine with DMND pool you must first obtain DMND token.  Please complete the registration form at
 https://onboarding.dmnd.work and await our confirmation email before proceeding.
 
-### 2.1 Connection Flow
-
-Bitcoin Core → Template Provider → SV2 Client → DMND Pool
-
-(The token is used during authentication between the client and the pool)
 
 # 3. Enable Job Declaration Support
 -------------------------
@@ -85,22 +80,6 @@ Example:
 
     TOKEN=abc123 cargo run -- -l info -d 200T --tp-address="127.0.0.1:8336"
 
-### 4.2  Authentication Requirement
-
-When connecting to the DMND pool, your token must be provided in two places:
-
-1. As a configuration value (TOKEN)
-2. As part of the username in the authentication message
-
-**Example:**
-
-username: your_token.worker_name  
-password: x
-
-### Why is the token required in two places?
-
-The token is used to identify and authorize your miner. Including it in both configuration and authentication ensures proper communication with the pool.
-
 # 5. Connect Your Miner
 -----------------------------
 
@@ -118,6 +97,10 @@ DMND Stratum V2 Client is **32767**. So you should obtain the IP address of the 
 DMND Stratum V2 Client and point your miner to:
 
     stratum+tcp://<machine_running_dmnd_client_ip>:32767
+    
+### Why is the token required in two places?
+
+The token is used to identify and authorize your miner. Including it in both configuration and authentication ensures proper communication with the pool.
 
 
 # 6. Track Hashrate and Earnings
