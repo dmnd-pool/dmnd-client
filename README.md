@@ -89,8 +89,8 @@ can point your miner to the DMND Stratum V2 Client.
 Enter your DMND token in the password field and point your miners to the machine running the DMND Stratum V2 Client. The username field can be left empty or filled with anything you like. If not changed, the default port of the
 
 **Example:
-username: your_token.worker_name  
-password: x
+username: worker1 
+password:  <your_dmnd_token>
 
 DMND Stratum V2 Client is **32767**. So you should obtain the IP address of the machine running the
 DMND Stratum V2 Client and point your miner to:
