@@ -382,6 +382,28 @@ impl Downstream {
             ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
         }
     }
+
+    fn forward_submit_share(&self, request: client_to_server::Submit<'static>) -> bool {
+        let to_send = SubmitShareWithChannelId {
+            channel_id: self.connection_id,
+            share: request,
+            extranonce: self.extranonce1.clone(),
+            extranonce2_len: self.extranonce2_len,
+            version_rolling_mask: self.version_rolling_mask.clone(),
+        };
+
+        if let Err(e) = self
+            .tx_sv1_bridge
+            .try_send(DownstreamMessages::SubmitShares(to_send))
+        {
+            error!("Failed to forward downstream submit: {e:?}");
+            self.stats_sender.update_rejected_shares(self.connection_id);
+            return false;
+        }
+
+        true
+    }
+
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -569,6 +591,21 @@ impl IsServer<'static> for Downstream {
             .get_matching_job(job_id_as_number.expect("checked above"))
         {
             request.job_id = job.job_id.clone();
+            if Configuration::difficulty_updates_disabled() {
+                if !self.forward_submit_share(request.clone()) {
+                    return false;
+                }
+
+                let share = ShareInfo::new(request.user_name.clone(), None, job_id, nonce, None);
+                self.share_monitor.insert_share(share);
+                self.stats_sender.update_accepted_shares(self.connection_id);
+                info!(
+                    "Share for Job {} forwarded with local difficulty management disabled",
+                    request.job_id
+                );
+                return true;
+            }
+
             //check share is valid
             if let Some(met_difficulty) = validate_share(
                 &request,
@@ -580,22 +617,10 @@ impl IsServer<'static> for Downstream {
                 // Only forward upstream if the share meets the latest difficulty
                 if let Some(latest_difficulty) = self.difficulty_mgmt.current_difficulties.back() {
                     if met_difficulty == *latest_difficulty {
-                        let to_send = SubmitShareWithChannelId {
-                            channel_id: self.connection_id,
-                            share: request.clone(),
-                            extranonce: self.extranonce1.clone(),
-                            extranonce2_len: self.extranonce2_len,
-                            version_rolling_mask: self.version_rolling_mask.clone(),
-                        };
-                        if let Err(e) = self
-                            .tx_sv1_bridge
-                            .try_send(DownstreamMessages::SubmitShares(to_send))
-                        {
-                            error!("Failed to start receive downstream task: {e:?}");
-                            self.stats_sender.update_rejected_shares(self.connection_id);
-                            // Return false because submit was not properly handled
+                        if !self.forward_submit_share(request.clone()) {
                             return false;
                         }
+
                         // Share is accepted here
                         let share = ShareInfo::new(
                             request.user_name.clone(),
@@ -722,12 +747,14 @@ impl IsDownstream for Downstream {
     }
 }
 
+const TRACKED_RECENT_JOBS: usize = 256;
+
 #[derive(Debug)]
 pub struct RecentJobs {
     v1_to_v2: HashMap<u32, u32>,
     v2_to_v1: HashMap<u32, Vec<u32>>,
     jobs: VecDeque<Notify<'static>>,
-    last_v2s: CircularBuffer<u32, 3>,
+    last_v2s: CircularBuffer<u32, TRACKED_RECENT_JOBS>,
     tracked_jobs: usize,
 }
 fn apply_mask(mask: Option<HexU32Be>, message: &mut server_to_client::Notify<'static>) {
@@ -806,7 +833,7 @@ impl RecentJobs {
             v2_to_v1: HashMap::new(),
             last_v2s: CircularBuffer::new(),
             jobs: VecDeque::new(),
-            tracked_jobs: 3,
+            tracked_jobs: TRACKED_RECENT_JOBS,
         }
     }
 }

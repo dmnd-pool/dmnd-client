@@ -4,6 +4,7 @@ use std::{
 };
 
 use crate::{
+    config::Configuration,
     proxy_state::{DownstreamType, ProxyState},
     translator::error::Error,
 };
@@ -31,6 +32,10 @@ lazy_static! {
 /// Checks if a share can be sent upstream based on a rate limit of 70 shares per minute.
 /// Returns `true` if the share can be sent, `false` if the limit is exceeded.
 pub async fn check_share_rate_limit(downstream: Arc<Mutex<Downstream>>) {
+    if Configuration::difficulty_updates_disabled() {
+        return;
+    }
+
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
     let mut last_update = tokio::time::Instant::now(); // Track last difficulty update
     let mut rate_limit_hit_count = 0;
@@ -78,6 +83,10 @@ pub async fn check_share_rate_limit(downstream: Arc<Mutex<Downstream>>) {
 
 /// Checks if a share can be sent by checking if rate is limited
 pub fn allow_submit_share() -> crate::translator::error::ProxyResult<'static, bool> {
+    if Configuration::difficulty_updates_disabled() {
+        return Ok(true);
+    }
+
     // Check if rate-limited
     let is_rate_limited = IS_RATE_LIMITED.load(std::sync::atomic::Ordering::SeqCst);
 

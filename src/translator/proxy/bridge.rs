@@ -271,7 +271,10 @@ impl Bridge {
             .safe_lock(|s| {
                 let job_id = share.share.job_id.parse::<u32>().expect("Invalid job_id");
                 if s.channel_factory.job(job_id).is_none() {
-                    warn!("Share rejected: job_id {} not in last three jobs", job_id);
+                    warn!(
+                        "Share rejected: job_id {} not in retained job cache",
+                        job_id
+                    );
                     return Err(roles_logic_sv2::Error::ShareDoNotMatchAnyJob); // rejected
                 }
                 s.channel_factory.set_target(&mut upstream_target);

@@ -239,6 +239,10 @@ impl Configuration {
         Self::cfg().delay
     }
 
+    pub fn difficulty_updates_disabled() -> bool {
+        Self::delay() > 100_000
+    }
+
     pub fn downstream_hashrate() -> f32 {
         Self::cfg().downstream_hashrate
     }

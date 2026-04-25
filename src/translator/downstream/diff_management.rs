@@ -17,6 +17,10 @@ impl Downstream {
     /// Initializes difficult managment.
     /// Send downstream a first target.
     pub async fn init_difficulty_management(self_: &'_ Arc<Mutex<Self>>) -> ProxyResult<'_, ()> {
+        if crate::config::Configuration::difficulty_updates_disabled() {
+            return Ok(());
+        }
+
         let (diff, stats_sender, connection_id, estimated_hashrate) = self_.safe_lock(|d| {
             (
                 d.difficulty_mgmt
@@ -85,6 +89,10 @@ impl Downstream {
     pub async fn try_update_difficulty_settings(
         self_: &Arc<Mutex<Self>>,
     ) -> ProxyResult<'static, ()> {
+        if crate::config::Configuration::difficulty_updates_disabled() {
+            return Ok(());
+        }
+
         let channel_id = self_
             .clone()
             .safe_lock(|d| d.connection_id)
@@ -105,6 +113,10 @@ impl Downstream {
         channel_id: u32,
         new_diff: f64,
     ) -> ProxyResult<'static, ()> {
+        if crate::config::Configuration::difficulty_updates_disabled() {
+            return Ok(());
+        }
+
         // Send messages downstream
         let (message, target) = diff_to_sv1_message(new_diff)?;
         Downstream::send_message_downstream(self_.clone(), message).await;
@@ -133,6 +145,10 @@ impl Downstream {
 
     /// Increments the number of shares since the last difficulty update.
     pub(super) fn save_share(self_: Arc<Mutex<Self>>) -> ProxyResult<'static, ()> {
+        if crate::config::Configuration::difficulty_updates_disabled() {
+            return Ok(());
+        }
+
         self_.safe_lock(|d| {
             d.difficulty_mgmt.on_new_valid_share();
         })?;
