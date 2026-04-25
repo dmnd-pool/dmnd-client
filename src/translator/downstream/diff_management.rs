@@ -17,10 +17,6 @@ impl Downstream {
     /// Initializes difficult managment.
     /// Send downstream a first target.
     pub async fn init_difficulty_management(self_: &'_ Arc<Mutex<Self>>) -> ProxyResult<'_, ()> {
-        if crate::config::Configuration::difficulty_updates_disabled() {
-            return Ok(());
-        }
-
         let (diff, stats_sender, connection_id, estimated_hashrate) = self_.safe_lock(|d| {
             (
                 d.difficulty_mgmt
@@ -36,6 +32,14 @@ impl Downstream {
 
         let (message, _) = diff_to_sv1_message(diff as f64)?;
         Downstream::send_message_downstream(self_.clone(), message.clone()).await;
+        stats_sender.update_diff(connection_id, diff);
+        stats_sender.update_hashrate(connection_id, estimated_hashrate);
+
+        // Even when dynamic difficulty updates are disabled, miners still need the initial
+        // mining.set_difficulty bootstrap before they will submit shares.
+        if crate::config::Configuration::difficulty_updates_disabled() {
+            return Ok(());
+        }
 
         let total_delay = Duration::from_secs(crate::Configuration::delay());
         let repeat_interval = Duration::from_secs(30);
@@ -53,8 +57,6 @@ impl Downstream {
                 Downstream::send_message_downstream(self_clone.clone(), message.clone()).await;
             }
         });
-        stats_sender.update_diff(connection_id, diff);
-        stats_sender.update_hashrate(connection_id, estimated_hashrate);
         let downstream = self_.clone();
         tokio::spawn(crate::translator::utils::check_share_rate_limit(downstream));
 
