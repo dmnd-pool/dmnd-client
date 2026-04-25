@@ -134,6 +134,7 @@ impl Configuration {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         token: Option<String>,
+        max_token_changes_per_connection: u32,
         tp_address: Option<String>,
         interval: u64,
         delay: u64,
@@ -154,6 +155,7 @@ impl Configuration {
     ) -> Self {
         Configuration {
             token,
+            max_token_changes_per_connection,
             tp_address,
             interval,
             delay,
@@ -184,6 +186,7 @@ impl Configuration {
     fn default_for_tests() -> Self {
         Self::new(
             Some("test_token".to_string()),
+            0,
             None,
             120_000,
             0,
@@ -223,7 +226,7 @@ impl Configuration {
     }
 
     pub fn max_token_changes_per_connection() -> u32 {
-        CONFIG.max_token_changes_per_connection
+        Self::cfg().max_token_changes_per_connection
     }
 
     pub fn tp_address() -> Option<String> {
