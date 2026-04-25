@@ -43,6 +43,8 @@ struct Args {
     adjustment_interval: Option<u64>,
     #[clap(long)]
     token: Option<String>,
+    #[clap(long = "max-token-changes-per-connection")]
+    max_token_changes_per_connection: Option<u32>,
     #[clap(long)]
     tp_address: Option<String>,
     #[clap(long)]
@@ -64,6 +66,7 @@ struct Args {
 #[derive(Serialize, Deserialize)]
 struct ConfigFile {
     token: Option<String>,
+    max_token_changes_per_connection: Option<u32>,
     tp_address: Option<String>,
     interval: Option<u64>,
     delay: Option<u64>,
@@ -85,6 +88,7 @@ impl ConfigFile {
     pub fn default() -> Self {
         ConfigFile {
             token: None,
+            max_token_changes_per_connection: None,
             tp_address: None,
             interval: None,
             delay: None,
@@ -107,6 +111,7 @@ impl ConfigFile {
 #[derive(Debug)]
 pub struct Configuration {
     token: Option<String>,
+    max_token_changes_per_connection: u32,
     tp_address: Option<String>,
     interval: u64,
     delay: u64,
@@ -129,6 +134,7 @@ impl Configuration {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         token: Option<String>,
+        max_token_changes_per_connection: u32,
         tp_address: Option<String>,
         interval: u64,
         delay: u64,
@@ -149,6 +155,7 @@ impl Configuration {
     ) -> Self {
         Configuration {
             token,
+            max_token_changes_per_connection,
             tp_address,
             interval,
             delay,
@@ -179,6 +186,7 @@ impl Configuration {
     fn default_for_tests() -> Self {
         Self::new(
             Some("test_token".to_string()),
+            0,
             None,
             120_000,
             0,
@@ -215,6 +223,10 @@ impl Configuration {
 
     pub fn token() -> Option<String> {
         Self::cfg().token.clone()
+    }
+
+    pub fn max_token_changes_per_connection() -> u32 {
+        Self::cfg().max_token_changes_per_connection
     }
 
     pub fn tp_address() -> Option<String> {
@@ -349,6 +361,16 @@ impl Configuration {
             .or_else(|| std::env::var("TOKEN").ok());
         println!("User Token: {token:?}");
 
+        let max_token_changes_per_connection = args
+            .max_token_changes_per_connection
+            .or(config.max_token_changes_per_connection)
+            .or_else(|| {
+                std::env::var("MAX_TOKEN_CHANGES_PER_CONNECTION")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+            })
+            .unwrap_or(0);
+
         let signature = match args.signature {
             Some(s) => {
                 if s.len() == 2 {
@@ -469,6 +491,7 @@ impl Configuration {
 
         Configuration {
             token,
+            max_token_changes_per_connection,
             tp_address,
             interval,
             delay,

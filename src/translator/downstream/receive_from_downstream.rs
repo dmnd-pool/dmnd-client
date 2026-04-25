@@ -33,11 +33,19 @@ pub async fn start_receive_downstream(
                         }
                     }
 
-                    if let Err(error) =
-                        Downstream::handle_incoming_sv1(downstream.clone(), incoming).await
-                    {
-                        error!("Failed to handle incoming sv1 msg: {:?}", error);
-                        break;
+                    match Downstream::handle_incoming_sv1(downstream.clone(), incoming).await {
+                        Ok(()) => {}
+                        Err(Error::DisconnectDownstream) => {
+                            warn!(
+                                "Downstream {} exceeded the token change limit. Closing connection.",
+                                connection_id
+                            );
+                            break;
+                        }
+                        Err(error) => {
+                            error!("Failed to handle incoming sv1 msg: {:?}", error);
+                            break;
+                        }
                     };
                 } else {
                     // Message received could not be converted to rpc message
