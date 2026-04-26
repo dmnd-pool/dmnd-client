@@ -47,6 +47,7 @@ pub async fn start_notify(
         task::spawn(async move {
             let timeout_timer = std::time::Instant::now();
             let mut authorized_in_time = true;
+            let mut logged_waiting_for_auth = false;
             // Initialization loop. As soon as the miner authorizes, seed it with the latest known
             // job snapshot instead of waiting for a future notify or the timeout fallback.
             loop {
@@ -68,8 +69,9 @@ pub async fn start_notify(
                         Downstream::send_message_downstream(downstream.clone(), message).await;
                     }
                     break;
-                } else {
-                    warn!("Downstream {}: waiting for auth", connection_id);
+                } else if !logged_waiting_for_auth {
+                    debug!("Downstream {}: waiting for auth", connection_id);
+                    logged_waiting_for_auth = true;
                 }
 
                 // timeout connection if miner does not send the authorize message after sending a subscribe
@@ -126,7 +128,7 @@ pub async fn start_notify(
                     Downstream::send_message_downstream(downstream.clone(), message).await;
                 }
             }
-            warn!(
+            debug!(
                 "Downstream: Shutting down sv1 downstream job notifier for {}",
                 &host
             );

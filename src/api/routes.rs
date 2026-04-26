@@ -1,4 +1,5 @@
 use super::{utils::get_cpu_and_memory_usage, AppState};
+use crate::config::Configuration;
 use crate::proxy_state::ProxyState;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::Serialize;
@@ -88,7 +89,21 @@ impl Api {
     }
 
     // Returns the status of the Proxy
-    pub async fn health_check() -> impl IntoResponse {
+    pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
+        if let Some(max_active_downstreams) = Configuration::max_active_downstreams() {
+            if let Ok(stats) = state.stats_sender.collect_stats().await {
+                let active_downstreams = stats.len();
+                if active_downstreams >= max_active_downstreams {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(APIResponse::error(Some(format!(
+                            "Overloaded: active downstreams {active_downstreams}/{max_active_downstreams}"
+                        )))),
+                    );
+                }
+            }
+        }
+
         match ProxyState::is_proxy_down() {
             (false, None) => (
                 StatusCode::OK,

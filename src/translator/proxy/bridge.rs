@@ -121,7 +121,7 @@ impl Bridge {
                     .iter()
                     .filter(|m| matches!(m, Mining::OpenExtendedMiningChannelSuccess(_)));
                 if let Some(Mining::OpenExtendedMiningChannelSuccess(success)) = message.next() {
-                    info!("New extended channel opened with id {}", success.channel_id);
+                    debug!("New extended channel opened with id {}", success.channel_id);
                     let extranonce = success.extranonce_prefix.to_vec();
                     let extranonce2_len = success.extranonce_size;
                     self.target

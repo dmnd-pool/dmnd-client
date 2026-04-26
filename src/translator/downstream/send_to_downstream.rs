@@ -5,7 +5,7 @@ use std::sync::Arc;
 use sv1_api::json_rpc;
 use tokio::sync::mpsc;
 use tokio::task;
-use tracing::{error, warn};
+use tracing::{debug, error};
 
 pub async fn start_send_to_downstream(
     task_manager: Arc<Mutex<TaskManager>>,
@@ -24,11 +24,11 @@ pub async fn start_send_to_downstream(
                 }
             };
             if send_to_down.send(to_send).await.is_err() {
-                warn!("Downstream {} dropped", host);
+                debug!("Downstream {} dropped", host);
                 break;
             }
         }
-        warn!(
+        debug!(
             "Downstream: Shutting down sv1 downstream writer: {}",
             connection_id
         );

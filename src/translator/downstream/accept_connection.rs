@@ -15,7 +15,7 @@ use tokio::sync::{
     mpsc::{Receiver, Sender},
 };
 use tokio::task;
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn start_accept_connection(
@@ -35,15 +35,15 @@ pub async fn start_accept_connection(
             // available at least one receiver must be around.
             let _s = tx_mining_notify.subscribe();
             while let Some((send, recv, addr)) = downstreams.recv().await {
-                info!("Translator opening connection for ip {}", addr);
+                debug!("Translator opening connection for ip {}", addr);
                 // The initial difficulty is derived from the formula: difficulty = hash_rate / (shares_per_second * 2^32)
                 let initial_hash_rate = Configuration::downstream_hashrate();
-                info!(
+                debug!(
                     "Translator initial hash rate for ip {} is {} H/s",
                     addr, initial_hash_rate
                 );
                 let share_per_second = *crate::SHARE_PER_MIN / 60.0;
-                info!(
+                debug!(
                     "Translator share per second for ip {} is {} shares/s",
                     addr, share_per_second
                 );
@@ -52,14 +52,14 @@ pub async fn start_accept_connection(
                     crate::translator::downstream::diff_management::nearest_power_of_10(
                         initial_difficulty,
                     );
-                info!(
+                debug!(
                     "Translator initial difficulty for ip {} is {}",
                     addr, initial_difficulty
                 );
                 // Formula: expected_hash_rate = (shares_per_second) * initial_difficulty * 2^32, where shares_per_second = SHARE_PER_MIN / 60
                 let expected_hash_rate =
                     (*crate::SHARE_PER_MIN / 60.0) * initial_difficulty * 2f32.powf(32.0);
-                info!(
+                debug!(
                     "Translator expected hash rate for ip {} is {} H/s",
                     addr, expected_hash_rate
                 );
@@ -84,7 +84,7 @@ pub async fn start_accept_connection(
 
                 match open_sv1_downstream {
                     Ok(opened) => {
-                        info!(
+                        debug!(
                             "Translator opening connection for ip {} with id {}",
                             addr, opened.channel_id
                         );
