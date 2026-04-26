@@ -8,7 +8,7 @@ use crate::{
 };
 
 const SHARE_BATCH_INTERVAL_SECS: u64 = 180;
-const SHARES_PER_REQUEST: usize = 500;
+const SHARES_PER_REQUEST: usize = 200;
 
 #[derive(serde::Serialize, Clone, Debug)]
 pub struct ShareInfo {
