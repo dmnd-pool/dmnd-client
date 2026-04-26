@@ -8,6 +8,7 @@ use crate::{
 };
 
 const SHARE_BATCH_INTERVAL_SECS: u64 = 180;
+const SHARES_PER_REQUEST: usize = 200;
 
 #[derive(serde::Serialize, Clone, Debug)]
 pub struct ShareInfo {
@@ -68,22 +69,24 @@ impl SharesMonitor {
             });
     }
 
-    /// Retrieves the list of pending shares.
-    fn get_next_shares(&self) -> Vec<ShareInfo> {
-        self.shares
-            .safe_lock(|event| event.clone())
-            .unwrap_or_else(|e| {
-                error!("Failed to lock pending shares: {:?}", e);
-                ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
-                Vec::new()
-            })
+    /// Atomically takes ownership of the pending shares, leaving the buffer empty.
+    fn drain_pending_shares(&self) -> Vec<ShareInfo> {
+        self.shares.safe_lock(std::mem::take).unwrap_or_else(|e| {
+            error!("Failed to lock pending shares: {:?}", e);
+            ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+            Vec::new()
+        })
     }
 
-    /// Clears the list of pending shares.
-    fn clear_next_shares(&self) {
+    /// Re-inserts shares at the front of the buffer so they are retried on the next tick.
+    fn requeue_shares(&self, mut shares: Vec<ShareInfo>) {
+        if shares.is_empty() {
+            return;
+        }
         self.shares
             .safe_lock(|event| {
-                event.clear();
+                shares.append(event);
+                *event = shares;
             })
             .unwrap_or_else(|e| {
                 error!("Failed to lock pending shares: {:?}", e);
@@ -100,24 +103,35 @@ impl SharesMonitor {
         interval.tick().await;
         loop {
             interval.tick().await;
-            let shares_to_send = self.get_next_shares();
-            if !shares_to_send.is_empty() {
-                let token = self.token.safe_lock(|t| t.clone()).unwrap();
-                match api.send_shares(shares_to_send.clone(), &token).await {
-                    Ok(_) => {
-                        info!(
-                            "Saved {} shares to the monitoring server",
-                            shares_to_send.len()
-                        );
-                        self.clear_next_shares();
-                    }
+            let pending = self.drain_pending_shares();
+            if pending.is_empty() {
+                warn!("No pending shares to send. If this happens frequently, check your miner.");
+                continue;
+            }
+
+            let token = self.token.safe_lock(|t| t.clone()).unwrap();
+            let total = pending.len();
+            let mut sent = 0usize;
+            let mut failed: Vec<ShareInfo> = Vec::new();
+
+            for chunk in pending.chunks(SHARES_PER_REQUEST) {
+                match api.send_shares(chunk.to_vec(), &token).await {
+                    Ok(_) => sent += chunk.len(),
                     Err(err) => {
-                        warn!("Failed to send shares, this does not affect mining but may cause issues with monitoring: {:?}", err);
+                        warn!(
+                            "Failed to send shares chunk of {}, will retry next tick: {:?}",
+                            chunk.len(),
+                            err
+                        );
+                        failed.extend_from_slice(chunk);
                     }
                 }
-            } else {
-                warn!("No pending shares to send. If this happens frequently, check your miner.");
             }
+
+            if sent > 0 {
+                info!("Saved {}/{} shares to the monitoring server", sent, total);
+            }
+            self.requeue_shares(failed);
         }
     }
 }
