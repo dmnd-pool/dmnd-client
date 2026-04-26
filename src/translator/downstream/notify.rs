@@ -35,13 +35,16 @@ pub async fn start_notify(
         task::spawn(async move {
             let timeout_timer = std::time::Instant::now();
             let mut authorized_in_time = true;
+            let mut logged_waiting_for_auth = false;
+            let mut logged_waiting_for_first_job = false;
             // Initilization loop
             loop {
                 let is_a = downstream
                     .safe_lock(|d| !d.authorized_names.is_empty())
                     .unwrap();
-                if !is_a {
-                    warn!("Downstream {}: waiting for auth", connection_id);
+                if !is_a && !logged_waiting_for_auth {
+                    debug!("Downstream {}: waiting for auth", connection_id);
+                    logged_waiting_for_auth = true;
                 }
                 if let Some(job) = downstream
                     .safe_lock(|d| d.recent_jobs.clone_last())
@@ -56,8 +59,9 @@ pub async fn start_notify(
                         }
                         break;
                     }
-                } else {
-                    warn!("Downstream {}: waiting for first job", connection_id);
+                } else if !logged_waiting_for_first_job {
+                    debug!("Downstream {}: waiting for first job", connection_id);
+                    logged_waiting_for_first_job = true;
                 }
                 // timeout connection if miner does not send the authorize message after sending a subscribe
                 if timeout_timer.elapsed().as_secs() > SUBSCRIBE_TIMEOUT_SECS {
@@ -123,7 +127,7 @@ pub async fn start_notify(
                     Downstream::send_message_downstream(downstream.clone(), message).await;
                 }
             }
-            warn!(
+            debug!(
                 "Downstream: Shutting down sv1 downstream job notifier for {}",
                 &host
             );

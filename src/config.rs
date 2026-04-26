@@ -47,6 +47,10 @@ struct Args {
     tp_address: Option<String>,
     #[clap(long)]
     listening_addr: Option<String>,
+    #[clap(long)]
+    max_active_downstreams: Option<usize>,
+    #[clap(long)]
+    accept_backoff_ms: Option<u64>,
     #[clap(long = "config", short = 'c')]
     config_file: Option<PathBuf>,
     #[clap(long = "api-server-port", short = 's')]
@@ -75,6 +79,8 @@ struct ConfigFile {
     local: Option<bool>,
     testnet3: Option<bool>,
     listening_addr: Option<String>,
+    max_active_downstreams: Option<usize>,
+    accept_backoff_ms: Option<u64>,
     api_server_port: Option<String>,
     monitor: Option<bool>,
     auto_update: Option<bool>,
@@ -96,6 +102,8 @@ impl ConfigFile {
             testnet3: None,
             local: None,
             listening_addr: None,
+            max_active_downstreams: None,
+            accept_backoff_ms: None,
             api_server_port: None,
             monitor: None,
             auto_update: None,
@@ -118,6 +126,8 @@ pub struct Configuration {
     testnet3: bool,
     local: bool,
     listening_addr: Option<String>,
+    max_active_downstreams: Option<usize>,
+    accept_backoff_ms: u64,
     api_server_port: String,
     monitor: bool,
     auto_update: bool,
@@ -157,6 +167,14 @@ impl Configuration {
 
     pub fn downstream_listening_addr() -> Option<String> {
         CONFIG.listening_addr.clone()
+    }
+
+    pub fn max_active_downstreams() -> Option<usize> {
+        CONFIG.max_active_downstreams.filter(|value| *value > 0)
+    }
+
+    pub fn accept_backoff_ms() -> u64 {
+        CONFIG.accept_backoff_ms
     }
 
     pub fn api_server_port() -> String {
@@ -332,6 +350,24 @@ impl Configuration {
                 .ok()
                 .and_then(|s| s.parse().ok())
         });
+        let max_active_downstreams = args
+            .max_active_downstreams
+            .or(config.max_active_downstreams)
+            .or_else(|| {
+                std::env::var("MAX_ACTIVE_DOWNSTREAMS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+            })
+            .filter(|value| *value > 0);
+        let accept_backoff_ms = args
+            .accept_backoff_ms
+            .or(config.accept_backoff_ms)
+            .or_else(|| {
+                std::env::var("ACCEPT_BACKOFF_MS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+            })
+            .unwrap_or(250);
         let api_server_port = args
             .api_server_port
             .or(config.api_server_port)
@@ -386,6 +422,8 @@ impl Configuration {
             testnet3,
             local,
             listening_addr,
+            max_active_downstreams,
+            accept_backoff_ms,
             api_server_port,
             monitor,
             auto_update,

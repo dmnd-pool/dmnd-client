@@ -1,6 +1,7 @@
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -14,10 +15,13 @@ use futures::{
 use roles_logic_sv2::utils::Mutex;
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::mpsc::{channel, Receiver, Sender},
+    sync::{
+        mpsc::{channel, error::TrySendError, Receiver, Sender},
+        OwnedSemaphorePermit, Semaphore,
+    },
 };
 use tokio_util::codec::{Framed, LinesCodec};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub fn start_listen_for_downstream(
     downstreams: Sender<(Sender<String>, Receiver<String>, IpAddr)>,
@@ -26,6 +30,14 @@ pub fn start_listen_for_downstream(
         let down_addr: String = Configuration::downstream_listening_addr()
             .unwrap_or(crate::DEFAULT_LISTEN_ADDRESS.to_string());
         let downstream_addr: SocketAddr = down_addr.parse().expect("Invalid listen address");
+        let max_active_downstreams = Configuration::max_active_downstreams();
+        let connection_slots =
+            max_active_downstreams.map(|max| Arc::new(Semaphore::new(max)));
+        let accept_backoff = Duration::from_millis(Configuration::accept_backoff_ms());
+        let overload_log_interval = Duration::from_secs(5);
+        let mut last_overload_log = Instant::now()
+            .checked_sub(overload_log_interval)
+            .unwrap_or_else(Instant::now);
         info!(
             "Trying to bind to address {} for downstream(miner) connections",
             downstream_addr
@@ -37,13 +49,56 @@ pub fn start_listen_for_downstream(
             "Listening for downstream connections on {:?}",
             downstream_addr
         );
-        while let Ok((stream, addr)) = downstream_listener.accept().await {
-            info!("Try to connect {:#?}", addr);
+        loop {
+            if let Some(slots) = connection_slots.as_ref() {
+                if slots.available_permits() == 0 {
+                    if last_overload_log.elapsed() >= overload_log_interval {
+                        warn!(
+                            "Active downstream limit reached ({max} active connections), pausing accepts for {}ms",
+                            accept_backoff.as_millis(),
+                            max = max_active_downstreams.unwrap_or_default(),
+                        );
+                        last_overload_log = Instant::now();
+                    }
+                    tokio::time::sleep(accept_backoff).await;
+                    continue;
+                }
+            }
+
+            let (stream, addr) = match downstream_listener.accept().await {
+                Ok(connection) => connection,
+                Err(e) => {
+                    error!("Failed to accept downstream connection: {e}");
+                    continue;
+                }
+            };
+
+            debug!("Accepted downstream connection from {:?}", addr);
+            let connection_slot = match connection_slots.as_ref() {
+                Some(slots) => match slots.clone().try_acquire_owned() {
+                    Ok(permit) => Some(permit),
+                    Err(_) => {
+                        if last_overload_log.elapsed() >= overload_log_interval {
+                            warn!(
+                                "Active downstream limit reached after accept ({max} active connections), dropping connection and backing off for {}ms",
+                                accept_backoff.as_millis(),
+                                max = max_active_downstreams.unwrap_or_default(),
+                            );
+                            last_overload_log = Instant::now();
+                        }
+                        drop(stream);
+                        tokio::time::sleep(accept_backoff).await;
+                        continue;
+                    }
+                },
+                None => None,
+            };
             Downstream::initialize(
                 stream,
                 crate::MAX_LEN_DOWN_MSG,
                 addr.ip(),
                 downstreams.clone(),
+                connection_slot,
             );
         }
     })
@@ -57,24 +112,45 @@ impl Downstream {
         max_len_for_downstream_messages: u32,
         address: IpAddr,
         downstreams: Sender<(Sender<String>, Receiver<String>, IpAddr)>,
+        connection_slot: Option<OwnedSemaphorePermit>,
     ) {
         tokio::spawn(async move {
-            info!("spawning downstream");
+            debug!("Spawning downstream task for {}", address);
             let (send_to_upstream, recv) = channel(10);
             let (send, recv_from_upstream) = channel(10);
-            downstreams
-                .send((send, recv, address))
-                .await
-                .expect("Translator busy");
+            match downstreams.try_send((send, recv, address)) {
+                Ok(()) => (),
+                Err(TrySendError::Full(_)) => {
+                    debug!(
+                        "Dropping downstream connection from {} because the translator accept queue is full",
+                        address
+                    );
+                    return;
+                }
+                Err(TrySendError::Closed(_)) => {
+                    error!(
+                        "Dropping downstream connection from {} because the translator accept queue is closed",
+                        address
+                    );
+                    return;
+                }
+            }
             let codec = LinesCodec::new_with_max_length(max_len_for_downstream_messages as usize);
             let framed = Framed::new(stream, codec);
-            Self::start(framed, recv_from_upstream, send_to_upstream).await
+            Self::start(
+                framed,
+                recv_from_upstream,
+                send_to_upstream,
+                connection_slot,
+            )
+            .await
         });
     }
     async fn start(
         framed: Framed<TcpStream, LinesCodec>,
         receiver: Receiver<String>,
         sender: Sender<String>,
+        _connection_slot: Option<OwnedSemaphorePermit>,
     ) {
         let (writer, reader) = framed.split();
         let firmware = Arc::new(Mutex::new(Firmware::Uninitialized));
@@ -113,7 +189,7 @@ impl Downstream {
                     return Sv1IngressError::TranslatorDropped;
                 }
             }
-            warn!("Downstream dropped while trying to send message up");
+            debug!("Downstream dropped while trying to send message up");
             Sv1IngressError::DownstreamDropped
         })
         .await;
@@ -142,7 +218,7 @@ impl Downstream {
                     info!("Sending msg to downstream_: {}", message);
                 }
                 if send.send(message).await.is_err() {
-                    warn!("Downstream dropped while trying to send message down");
+                    debug!("Downstream dropped while trying to send message down");
                     return Sv1IngressError::DownstreamDropped;
                 };
             }

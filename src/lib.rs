@@ -191,7 +191,7 @@ async fn initialize_proxy(
             }
         };
 
-        let (downs_sv1_tx, downs_sv1_rx) = channel(10);
+        let (downs_sv1_tx, downs_sv1_rx) = channel(crate::TRANSLATOR_BUFFER_SIZE);
         let sv1_ingress_abortable = ingress::sv1_ingress::start_listen_for_downstream(downs_sv1_tx);
 
         let (translator_up_tx, mut translator_up_rx) = channel(10);

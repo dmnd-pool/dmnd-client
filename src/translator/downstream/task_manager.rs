@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use crate::{proxy_state::ProxyState, shared::utils::AbortOnDrop};
 use roles_logic_sv2::utils::Mutex;
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{debug, warn};
 
 #[allow(dead_code)]
 enum Task {
@@ -71,7 +71,7 @@ impl TaskManager {
                     tracing::error!("TasKManager Mutex Poisoned");
                     ProxyState::update_inconsistency(Some(1));
                 };
-                tracing::info!(
+                debug!(
                     "Aborted all tasks for downstream connection ID {}",
                     connection_id
                 );
