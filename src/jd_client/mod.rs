@@ -43,11 +43,7 @@ pub static IS_NEW_PHASH_ARRIVED: AtomicBool = AtomicBool::new(false);
 
 use crate::proxy_state::{DownstreamType, ProxyState, TpState};
 use roles_logic_sv2::{parsers::Mining, utils::Mutex};
-use std::{
-    net::{IpAddr, SocketAddr},
-    str::FromStr,
-    sync::Arc,
-};
+use std::{net::SocketAddr, sync::Arc};
 
 use crate::shared::utils::AbortOnDrop;
 
@@ -96,7 +92,7 @@ async fn initialize_jd(
     };
 
     // Initialize JD part
-    let tp_address = match crate::TP_ADDRESS.safe_lock(|tp| tp.clone()) {
+    let tp_address = match crate::TP_ADDRESS.safe_lock(|tp| *tp) {
         Ok(tp_address) => tp_address
             .expect("Unreachable code, jdc is not instantiated when TP_ADDRESS not present"),
         Err(e) => {
@@ -105,10 +101,6 @@ async fn initialize_jd(
             return None;
         }
     };
-
-    let mut parts = tp_address.split(':');
-    let ip_tp = parts.next().expect("The passed value for TP address is not valid. Terminating.... TP_ADDRESS should be in this format `127.0.0.1:8442`").to_string();
-    let port_tp = parts.next().expect("The passed value for TP address is not valid. Terminating.... TP_ADDRESS should be in this format `127.0.0.1:8442`").parse::<u16>().expect("This operation should not fail because a valid port_tp should always be converted to U16");
 
     let auth_pub_k: Secp256k1PublicKey = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
     let address = match crate::ACTIVE_POOL_ADDRESS.safe_lock(|address| *address) {
@@ -205,10 +197,8 @@ async fn initialize_jd(
         drop(abortable); // drop all tasks initailzed upto this point
         return None;
     };
-    let ip = IpAddr::from_str(ip_tp.as_str())
-        .expect("Infallable Operation: Failed tp can always be converted into IpAddr");
     let tp_abortable = match TemplateRx::connect(
-        SocketAddr::new(ip, port_tp),
+        tp_address,
         recv_solution,
         Some(jd.clone()),
         donwstream.clone(),
@@ -249,15 +239,12 @@ async fn initialize_jd(
 }
 
 // Used when tp is down or connection was unsuccessful to retry connection.
-async fn retry_connection(address: String) {
+async fn retry_connection(address: SocketAddr) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
     loop {
         info!("TP Retrying connection....");
         interval.tick().await;
-        if tokio::net::TcpStream::connect(address.clone())
-            .await
-            .is_ok()
-        {
+        if tokio::net::TcpStream::connect(address).await.is_ok() {
             info!("Successfully reconnected to TP: Restarting Proxy...");
             if crate::TP_ADDRESS
                 .safe_lock(|tp| *tp = Some(address))
