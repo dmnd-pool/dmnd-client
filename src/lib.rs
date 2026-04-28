@@ -17,7 +17,10 @@ use crate::shared::utils::AbortOnDrop;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    OnceLock,
+};
 use std::{net::SocketAddr, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{error, info, warn};
@@ -52,6 +55,13 @@ const LOCAL_URL: &str = "http://localhost:8787";
 const TESTNET3_URL: &str = "https://testnet3-user-dashboard-server.dmnd.work";
 const PRODUCTION_URL: &str = "https://production-user-dashboard-server.dmnd.work";
 
+pub(crate) type DownstreamConnection = (
+    tokio::sync::mpsc::Sender<String>,
+    tokio::sync::mpsc::Receiver<String>,
+    std::net::IpAddr,
+);
+pub(crate) type DownstreamHandoffSender = tokio::sync::mpsc::Sender<DownstreamConnection>;
+
 lazy_static! {
     static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<String>> =
         roles_logic_sv2::utils::Mutex::new(Configuration::tp_address());
@@ -75,6 +85,11 @@ lazy_static! {
 }
 
 static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+static SHARE_LOG_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn share_log_enabled() -> bool {
+    SHARE_LOG_ENABLED.load(Ordering::Relaxed)
+}
 
 pub async fn start(config: Configuration) {
     Configuration::init(config);
@@ -84,6 +99,7 @@ pub async fn start(config: Configuration) {
 async fn start_internal() {
     let log_level = Configuration::loglevel();
     let noise_connection_log_level = Configuration::nc_loglevel();
+    SHARE_LOG_ENABLED.store(Configuration::share_log(), Ordering::Relaxed);
 
     let enable_file_logging = Configuration::enable_file_logging();
 
@@ -203,7 +219,8 @@ async fn initialize_proxy(
             }
         };
 
-        let (downs_sv1_tx, downs_sv1_rx) = channel(10);
+        let (downs_sv1_tx, downs_sv1_rx) = channel(crate::TRANSLATOR_BUFFER_SIZE);
+        let downstream_handoff = downs_sv1_tx.clone();
         let sv1_ingress_abortable = ingress::sv1_ingress::start_listen_for_downstream(downs_sv1_tx);
 
         let (translator_up_tx, mut translator_up_rx) = channel(10);
@@ -296,7 +313,8 @@ async fn initialize_proxy(
         if let Some(jdc_handle) = jdc_abortable {
             abort_handles.push((jdc_handle, "jdc".to_string()));
         }
-        let server_handle = tokio::spawn(api::start(router.clone(), stats_sender));
+        let server_handle =
+            tokio::spawn(api::start(router.clone(), stats_sender, downstream_handoff));
         abort_handles.push((server_handle.into(), "api_server".to_string()));
         match monitor(router, abort_handles, epsilon, shutdown_signal.clone()).await {
             Reconnect::NewUpstream(new_pool_addr) => {

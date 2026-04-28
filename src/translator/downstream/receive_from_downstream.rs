@@ -9,7 +9,7 @@ use std::sync::Arc;
 use sv1_api::{client_to_server::Submit, json_rpc};
 use tokio::sync::mpsc;
 use tokio::task;
-use tracing::{error, warn};
+use tracing::{debug, error};
 
 pub async fn start_receive_downstream(
     task_manager: Arc<Mutex<TaskManager>>,
@@ -54,7 +54,7 @@ pub async fn start_receive_downstream(
                 stats_sender.remove_stats(connection_id);
             }
             // No message to receive
-            warn!(
+            debug!(
                 "Downstream: Shutting down sv1 downstream reader {}",
                 connection_id
             );
@@ -87,16 +87,18 @@ pub async fn start_receive_downstream(
                 String::new()
             });
 
-            let worker_activity =
-                WorkerActivity::new(user_agent, worker_name, WorkerActivityType::Disconnected);
+            if !worker_name.is_empty() {
+                let worker_activity =
+                    WorkerActivity::new(user_agent, worker_name, WorkerActivityType::Disconnected);
 
-            worker_activity
-                .monitor_api()
-                .send_worker_activity(worker_activity, &token)
-                .await
-                .unwrap_or_else(|e| {
-                    error!("Failed to send worker activity: {}", e);
-                });
+                worker_activity
+                    .monitor_api()
+                    .send_worker_activity(worker_activity, &token)
+                    .await
+                    .unwrap_or_else(|e| {
+                        error!("Failed to send worker activity: {}", e);
+                    });
+            }
 
             // Apparently there is no way to make the compiler happy without unwrapping here. But
             // is not an issue since:

@@ -11,12 +11,18 @@ use stats::StatsSender;
 pub struct AppState {
     router: Router,
     stats_sender: StatsSender,
+    downstream_handoff: crate::DownstreamHandoffSender,
 }
 
-pub(crate) async fn start(router: Router, stats_sender: StatsSender) {
+pub(crate) async fn start(
+    router: Router,
+    stats_sender: StatsSender,
+    downstream_handoff: crate::DownstreamHandoffSender,
+) {
     let state = AppState {
         router,
         stats_sender,
+        downstream_handoff,
     };
     let app = AxumRouter::new()
         .route("/api/health", get(Api::health_check))

@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
-use tracing::warn;
+use tracing::debug;
 
 #[derive(Debug)]
 enum StatsCommand {
@@ -50,7 +50,7 @@ impl StatsSender {
 
     fn send(&self, command: StatsCommand) {
         if let Err(e) = self.sender.try_send(command) {
-            warn!("Failed to send command: {:?}", e);
+            debug!("Failed to send stats command: {:?}", e);
         }
     }
 
@@ -84,7 +84,10 @@ impl StatsSender {
 
     pub async fn collect_stats(&self) -> Result<HashMap<u32, DownstreamConnectionStats>, String> {
         let (tx, rx) = oneshot::channel();
-        self.send(StatsCommand::GetStats(tx));
+        self.sender
+            .send(StatsCommand::GetStats(tx))
+            .await
+            .map_err(|e| e.to_string())?;
         match rx.await {
             Ok(stats) => Ok(stats),
             Err(e) => Err(e.to_string()),

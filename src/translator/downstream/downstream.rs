@@ -6,6 +6,7 @@ use crate::{
         worker_activity::{WorkerActivity, WorkerActivityType},
     },
     proxy_state::{DownstreamType, ProxyState, UpstreamType},
+    share_log_enabled,
     shared::utils::AbortOnDrop,
     translator::{error::Error, utils::validate_share},
 };
@@ -42,7 +43,7 @@ use sv1_api::{
     utils::{Extranonce, HexU32Be},
     IsServer,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct DownstreamDifficultyConfig {
@@ -268,7 +269,7 @@ impl Downstream {
 
         // Create an abortable task for the shares monitor
         let abortable = tokio::spawn(async move {
-            info!("Starting shares monitor for downstream: {}", connection_id);
+            debug!("Starting shares monitor for downstream: {}", connection_id);
             share_monitor.clone().monitor().await;
         });
 
@@ -455,7 +456,7 @@ impl IsServer<'static> for Downstream {
         &mut self,
         request: &client_to_server::Configure,
     ) -> (Option<server_to_client::VersionRollingParams>, Option<bool>) {
-        info!("Down: Handling mining.configure: {:?}", &request);
+        debug!("Down: Handling mining.configure: {:?}", &request);
         let (version_rolling_mask, version_rolling_min_bit_count) =
             crate::shared::utils::sv1_rolling(request);
 
@@ -482,7 +483,7 @@ impl IsServer<'static> for Downstream {
     /// The subscription messages are erroneous and just used to conform the SV1 protocol spec.
     /// Because no one unsubscribed in practice, they just unplug their machine.
     fn handle_subscribe(&self, request: &client_to_server::Subscribe) -> Vec<(String, String)> {
-        info!("Down: Handling mining.subscribe: {:?}", &request);
+        debug!("Down: Handling mining.subscribe: {:?}", &request);
         self.stats_sender
             .update_device_name(self.connection_id, request.agent_signature.clone());
 
@@ -553,10 +554,12 @@ impl IsServer<'static> for Downstream {
     /// When miner find the job which meets requested difficulty, it can submit share to the server.
     /// Only [Submit](client_to_server::Submit) requests for authorized user names can be submitted.
     fn handle_submit(&self, request: &client_to_server::Submit<'static>) -> bool {
-        info!(
-            "Handling mining.submit request {} from {} with job_id {}, nonce: {:?}",
-            request.id, request.user_name, request.job_id, request.nonce
-        );
+        if share_log_enabled() {
+            info!(
+                "Handling mining.submit request {} from {} with job_id {}, nonce: {:?}",
+                request.id, request.user_name, request.job_id, request.nonce
+            );
+        }
 
         let mut request = request.clone();
         let job_id_as_number = request.job_id.parse::<u32>();
@@ -630,10 +633,12 @@ impl IsServer<'static> for Downstream {
                     }
                 }
                 self.stats_sender.update_accepted_shares(self.connection_id);
-                //info!(
-                //    "Share for Job {} and difficulty {} is accepted",
-                //    request.job_id, met_difficulty
-                //);
+                if share_log_enabled() {
+                    info!(
+                        "Share for Job {} and difficulty {} is accepted",
+                        request.job_id, met_difficulty
+                    );
+                }
                 true
             } else {
                 let share = ShareInfo::new(
