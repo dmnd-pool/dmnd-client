@@ -734,7 +734,7 @@ impl IsDownstream for Downstream {
     }
 }
 
-const TRACKED_RECENT_JOBS: usize = 16;
+const TRACKED_RECENT_JOBS: usize = 3;
 
 #[derive(Debug)]
 pub struct RecentJobs {
