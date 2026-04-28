@@ -35,6 +35,8 @@ struct Args {
     noise_connection_log: Option<String>,
     #[clap(long = "sv1_loglevel")]
     sv1_loglevel: bool,
+    #[clap(long = "share-log")]
+    share_log: bool,
     #[clap(long)]
     file_logging: bool,
     #[clap(long = "delay")]
@@ -75,6 +77,7 @@ struct ConfigFile {
     loglevel: Option<String>,
     nc_loglevel: Option<String>,
     sv1_log: Option<bool>,
+    share_log: Option<bool>,
     staging: Option<bool>,
     local: Option<bool>,
     testnet3: Option<bool>,
@@ -98,6 +101,7 @@ impl ConfigFile {
             loglevel: None,
             nc_loglevel: None,
             sv1_log: None,
+            share_log: None,
             staging: None,
             testnet3: None,
             local: None,
@@ -122,6 +126,7 @@ pub struct Configuration {
     loglevel: String,
     nc_loglevel: String,
     sv1_log: bool,
+    share_log: bool,
     file_logging: bool,
     staging: bool,
     testnet3: bool,
@@ -146,6 +151,7 @@ impl Configuration {
         loglevel: String,
         nc_loglevel: String,
         sv1_log: bool,
+        share_log: bool,
         file_logging: bool,
         staging: bool,
         testnet3: bool,
@@ -168,6 +174,7 @@ impl Configuration {
             loglevel,
             nc_loglevel,
             sv1_log,
+            share_log,
             file_logging,
             staging,
             testnet3,
@@ -199,6 +206,7 @@ impl Configuration {
             DEFAULT_SV1_HASHPOWER,
             "info".to_string(),
             "off".to_string(),
+            false,
             false,
             false,
             false,
@@ -312,6 +320,10 @@ impl Configuration {
     }
     pub fn sv1_ingress_log() -> bool {
         Self::cfg().sv1_log
+    }
+
+    pub fn share_log() -> bool {
+        Self::cfg().share_log
     }
 
     pub fn staging() -> bool {
@@ -501,6 +513,10 @@ impl Configuration {
             || config.sv1_log.unwrap_or(false)
             || std::env::var("SV1_LOGLEVEL").is_ok();
 
+        let share_log = args.share_log
+            || config.share_log.unwrap_or(false)
+            || std::env::var("SHARE_LOG").is_ok();
+
         let file_logging = args.file_logging || std::env::var("FILE_LOGGING").is_ok();
 
         let staging =
@@ -524,6 +540,7 @@ impl Configuration {
             loglevel,
             nc_loglevel,
             sv1_log,
+            share_log,
             file_logging,
             staging,
             testnet3,

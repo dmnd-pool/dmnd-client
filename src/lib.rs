@@ -17,7 +17,10 @@ use crate::shared::utils::AbortOnDrop;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    OnceLock,
+};
 use std::{net::SocketAddr, time::Duration};
 use tokio::sync::mpsc::channel;
 use tracing::{error, info, warn};
@@ -82,6 +85,11 @@ lazy_static! {
 }
 
 static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+static SHARE_LOG_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn share_log_enabled() -> bool {
+    SHARE_LOG_ENABLED.load(Ordering::Relaxed)
+}
 
 pub async fn start(config: Configuration) {
     Configuration::init(config);
@@ -91,6 +99,7 @@ pub async fn start(config: Configuration) {
 async fn start_internal() {
     let log_level = Configuration::loglevel();
     let noise_connection_log_level = Configuration::nc_loglevel();
+    SHARE_LOG_ENABLED.store(Configuration::share_log(), Ordering::Relaxed);
 
     let enable_file_logging = Configuration::enable_file_logging();
 

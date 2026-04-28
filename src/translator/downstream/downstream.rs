@@ -6,6 +6,7 @@ use crate::{
         worker_activity::{WorkerActivity, WorkerActivityType},
     },
     proxy_state::{DownstreamType, ProxyState, UpstreamType},
+    share_log_enabled,
     shared::utils::AbortOnDrop,
     translator::{error::Error, utils::validate_share},
 };
@@ -553,10 +554,12 @@ impl IsServer<'static> for Downstream {
     /// When miner find the job which meets requested difficulty, it can submit share to the server.
     /// Only [Submit](client_to_server::Submit) requests for authorized user names can be submitted.
     fn handle_submit(&self, request: &client_to_server::Submit<'static>) -> bool {
-        info!(
-            "Handling mining.submit request {} from {} with job_id {}, nonce: {:?}",
-            request.id, request.user_name, request.job_id, request.nonce
-        );
+        if share_log_enabled() {
+            info!(
+                "Handling mining.submit request {} from {} with job_id {}, nonce: {:?}",
+                request.id, request.user_name, request.job_id, request.nonce
+            );
+        }
 
         let mut request = request.clone();
         let job_id_as_number = request.job_id.parse::<u32>();
@@ -630,10 +633,12 @@ impl IsServer<'static> for Downstream {
                     }
                 }
                 self.stats_sender.update_accepted_shares(self.connection_id);
-                //info!(
-                //    "Share for Job {} and difficulty {} is accepted",
-                //    request.job_id, met_difficulty
-                //);
+                if share_log_enabled() {
+                    info!(
+                        "Share for Job {} and difficulty {} is accepted",
+                        request.job_id, met_difficulty
+                    );
+                }
                 true
             } else {
                 let share = ShareInfo::new(

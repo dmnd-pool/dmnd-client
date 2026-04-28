@@ -115,6 +115,7 @@ async fn library_init_sv2_setup_connection() {
         false,
         false,
         false,
+        false,
         true,
         None,
         None,

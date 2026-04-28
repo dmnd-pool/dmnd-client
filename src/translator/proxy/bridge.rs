@@ -25,6 +25,7 @@ use super::{
 };
 use crate::{
     proxy_state::{ProxyState, TranslatorState, UpstreamType},
+    share_log_enabled,
     shared::utils::AbortOnDrop,
     translator::utils::allow_submit_share,
 };
@@ -250,10 +251,12 @@ impl Bridge {
         let channel_id = share.channel_id;
         let job_id = share.share.job_id.clone();
         let share_id = share.share.id;
-        info!(
-            "Bridge received share {:?} for channel {:?} and job {:?}",
-            &share_id, &channel_id, &job_id
-        );
+        if share_log_enabled() {
+            info!(
+                "Bridge received share {:?} for channel {:?} and job {:?}",
+                &share_id, &channel_id, &job_id
+            );
+        }
         let (tx_sv2_submit_shares_ext, target_mutex) = self_
             .safe_lock(|s| (s.tx_sv2_submit_shares_ext.clone(), s.target.clone()))
             .map_err(|_| Error::BridgeMutexPoisoned)?;
@@ -310,10 +313,12 @@ impl Bridge {
                         warn!("Share will not be sent upstream: Exceeded 70 shares/min limit");
                         return Ok(());
                     }
-                    info!(
-                        "Share with id {} meets upstream target from channel {} and job {}",
-                        &share_id, &channel_id, &job_id
-                    );
+                    if share_log_enabled() {
+                        info!(
+                            "Share with id {} meets upstream target from channel {} and job {}",
+                            &share_id, &channel_id, &job_id
+                        );
+                    }
                     match s {
                         Share::Extended(share) => {
                             if tx_sv2_submit_shares_ext.send(share).await.is_err() {
@@ -333,10 +338,12 @@ impl Bridge {
             // We are in an extended channel this variant is group channle only
             Ok(OnNewShare::RelaySubmitShareUpstream) => unreachable!(),
             Ok(OnNewShare::ShareMeetDownstreamTarget) => {
-                info!(
-                    "Share with id {} meets downstream target from channel {} and job {}",
-                    &share_id, &channel_id, &job_id
-                );
+                if share_log_enabled() {
+                    info!(
+                        "Share with id {} meets downstream target from channel {} and job {}",
+                        &share_id, &channel_id, &job_id
+                    );
+                }
             }
             // Proxy do not have JD capabilities
             Ok(OnNewShare::ShareMeetBitcoinTarget(..)) => unreachable!(),
@@ -373,10 +380,12 @@ impl Bridge {
         sv1_submit: Submit,
         version_rolling_mask: Option<HexU32Be>,
     ) -> ProxyResult<'static, SubmitSharesExtended<'static>> {
-        info!(
-            "Bridge translating mining.submit {} from downstream with channel {} and job {}",
-            sv1_submit.id, channel_id, sv1_submit.job_id
-        );
+        if share_log_enabled() {
+            info!(
+                "Bridge translating mining.submit {} from downstream with channel {} and job {}",
+                sv1_submit.id, channel_id, sv1_submit.job_id
+            );
+        }
         let last_version = self
             .channel_factory
             .last_valid_job_version()
