@@ -5,9 +5,9 @@ use std::{
 };
 
 use crate::{
-    DownstreamConnection,
     config::Configuration,
     shared::{error::Sv1IngressError, utils::AbortOnDrop},
+    DownstreamConnection,
 };
 use futures::{
     stream::{SplitSink, SplitStream},
@@ -24,9 +24,7 @@ use tokio::{
 use tokio_util::codec::{Framed, LinesCodec};
 use tracing::{debug, error, info, warn};
 
-pub fn start_listen_for_downstream(
-    downstreams: Sender<DownstreamConnection>,
-) -> AbortOnDrop {
+pub fn start_listen_for_downstream(downstreams: Sender<DownstreamConnection>) -> AbortOnDrop {
     tokio::task::spawn(async move {
         let down_addr: String = Configuration::downstream_listening_addr()
             .unwrap_or(crate::DEFAULT_LISTEN_ADDRESS.to_string());
