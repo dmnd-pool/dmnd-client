@@ -90,6 +90,25 @@ impl Api {
 
     // Returns the status of the Proxy
     pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
+        if state.downstream_handoff.is_closed() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(APIResponse::error(Some(
+                    "Overloaded: translator handoff channel is closed".to_string(),
+                ))),
+            );
+        }
+
+        if state.downstream_handoff.capacity() == 0 {
+            let max_capacity = state.downstream_handoff.max_capacity();
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(APIResponse::error(Some(format!(
+                    "Overloaded: translator handoff channel queue is full (0/{max_capacity} slots available)"
+                )))),
+            );
+        }
+
         if let Some(max_active_downstreams) = Configuration::max_active_downstreams() {
             if let Ok(stats) = state.stats_sender.collect_stats().await {
                 let active_downstreams = stats.len();
@@ -154,3 +173,36 @@ impl<T: Serialize> APIResponse<T> {
         }
     }
 }
+
+#[tokio::test]
+  async fn health_check_reports_full_translator_handoff() {
+      use axum::extract::State;
+      use axum::response::IntoResponse;
+      use std::net::IpAddr;
+      use tokio::sync::mpsc;
+
+      let auth_pub_k = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
+      let router = crate::router::Router::new(vec![], auth_pub_k, None, None);
+
+      let (handoff_tx, _handoff_rx) = mpsc::channel(1);
+      let (send_to_upstream, recv_from_downstream) = mpsc::channel(1);
+
+      handoff_tx
+          .try_send((
+              send_to_upstream,
+              recv_from_downstream,
+              IpAddr::from([127, 0, 0, 1]),
+          ))
+          .expect("test handoff queue should accept first item");
+
+      let state = AppState {
+          router,
+          stats_sender: crate::api::stats::StatsSender::new(),
+          downstream_handoff: handoff_tx,
+      };
+
+      let response = Api::health_check(State(state)).await.into_response();
+
+      assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+  }
+

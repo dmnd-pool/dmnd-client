@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::{
+    DownstreamConnection,
     config::Configuration,
     shared::{error::Sv1IngressError, utils::AbortOnDrop},
 };
@@ -24,7 +25,7 @@ use tokio_util::codec::{Framed, LinesCodec};
 use tracing::{debug, error, info, warn};
 
 pub fn start_listen_for_downstream(
-    downstreams: Sender<(Sender<String>, Receiver<String>, IpAddr)>,
+    downstreams: Sender<DownstreamConnection>,
 ) -> AbortOnDrop {
     tokio::task::spawn(async move {
         let down_addr: String = Configuration::downstream_listening_addr()
@@ -111,7 +112,7 @@ impl Downstream {
         stream: TcpStream,
         max_len_for_downstream_messages: u32,
         address: IpAddr,
-        downstreams: Sender<(Sender<String>, Receiver<String>, IpAddr)>,
+        downstreams: Sender<DownstreamConnection>,
         connection_slot: Option<OwnedSemaphorePermit>,
     ) {
         tokio::spawn(async move {
