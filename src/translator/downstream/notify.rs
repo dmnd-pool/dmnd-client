@@ -44,6 +44,7 @@ pub async fn start_notify(
         upstream_difficulty_config
             .safe_lock(|c| c.channel_nominal_hashrate += Configuration::downstream_hashrate())?;
         stats_sender.setup_stats(connection_id);
+        let task_manager_clone = task_manager.clone();
         task::spawn(async move {
             let timeout_timer = std::time::Instant::now();
             let mut authorized_in_time = true;
@@ -83,7 +84,7 @@ pub async fn start_notify(
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
-            if let Err(e) = start_update(task_manager, downstream.clone(), connection_id).await {
+            if let Err(e) = start_update(task_manager_clone.clone(), downstream.clone(), connection_id).await {
                 warn!("Translator impossible to start update task: {e}");
             } else if authorized_in_time {
                 loop {
@@ -130,6 +131,9 @@ pub async fn start_notify(
                 "Downstream: Shutting down sv1 downstream job notifier for {}",
                 &host
             );
+            if let Some(kill_signal) = task_manager_clone.safe_lock(|tm| tm.send_kill_signal.clone()).ok() {
+                let _ = kill_signal.send(connection_id).await;
+            }
         })
     };
     TaskManager::add_notify(task_manager, handle.into(), connection_id)
@@ -142,6 +146,7 @@ async fn start_update(
     downstream: Arc<Mutex<Downstream>>,
     connection_id: u32,
 ) -> Result<(), Error<'static>> {
+    let task_manager_clone = task_manager.clone();
     let handle = task::spawn(async move {
         // Prevent difficulty adjustments until after delay elapses
         tokio::time::sleep(std::time::Duration::from_secs(crate::Configuration::delay())).await;
@@ -162,8 +167,11 @@ async fn start_update(
             // mining.set_difficulty
             if let Err(e) = Downstream::try_update_difficulty_settings(&downstream).await {
                 error!("{e}");
-                return;
+                break;
             };
+        }
+        if let Some(kill_signal) = task_manager_clone.safe_lock(|tm| tm.send_kill_signal.clone()).ok() {
+            let _ = kill_signal.send(connection_id).await;
         }
     });
     TaskManager::add_update(task_manager, handle.into(), connection_id)

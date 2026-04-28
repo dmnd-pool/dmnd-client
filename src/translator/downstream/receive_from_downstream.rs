@@ -47,7 +47,7 @@ pub async fn start_receive_downstream(
                             sv1_api::error::Error::InvalidJsonRpcMessageKind
                         ))
                     );
-                    return;
+                    break;
                 }
             }
             if let Ok(stats_sender) = downstream.safe_lock(|d| d.stats_sender.clone()) {
