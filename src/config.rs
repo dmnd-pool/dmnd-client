@@ -151,6 +151,8 @@ impl Configuration {
         testnet3: bool,
         local: bool,
         listening_addr: Option<String>,
+        max_active_downstreams: Option<usize>,
+        accept_backoff_ms: u64,
         api_server_port: String,
         monitor: bool,
         auto_update: bool,
@@ -171,6 +173,8 @@ impl Configuration {
             testnet3,
             local,
             listening_addr,
+            max_active_downstreams,
+            accept_backoff_ms,
             api_server_port,
             monitor,
             auto_update,
@@ -201,6 +205,8 @@ impl Configuration {
             false,
             true,
             None,
+            None,
+            250,
             "3001".to_string(),
             false,
             false,
@@ -262,11 +268,13 @@ impl Configuration {
     }
 
     pub fn max_active_downstreams() -> Option<usize> {
-        CONFIG.max_active_downstreams.filter(|value| *value > 0)
+        Self::cfg()
+            .max_active_downstreams
+            .filter(|value| *value > 0)
     }
 
     pub fn accept_backoff_ms() -> u64 {
-        CONFIG.accept_backoff_ms
+        Self::cfg().accept_backoff_ms
     }
 
     pub fn api_server_port() -> String {

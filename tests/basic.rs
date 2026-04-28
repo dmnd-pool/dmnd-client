@@ -38,6 +38,14 @@ mod config {
                 .clone()
         }
 
+        pub fn max_active_downstreams() -> Option<usize> {
+            None
+        }
+
+        pub fn accept_backoff_ms() -> u64 {
+            250
+        }
+
         pub fn sv1_ingress_log() -> bool {
             false
         }

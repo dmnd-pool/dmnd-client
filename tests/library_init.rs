@@ -117,6 +117,8 @@ async fn library_init_sv2_setup_connection() {
         false,
         true,
         None,
+        None,
+        250,
         "3001".to_string(),
         false,
         false,
