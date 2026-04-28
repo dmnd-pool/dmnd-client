@@ -591,22 +591,9 @@ impl IsServer<'static> for Downstream {
             .get_matching_job(job_id_as_number.expect("checked above"))
         {
             request.job_id = job.job_id.clone();
-            if Configuration::difficulty_updates_disabled() {
-                if !self.forward_submit_share(request.clone()) {
-                    return false;
-                }
 
-                let share = ShareInfo::new(request.user_name.clone(), None, job_id, nonce, None);
-                self.share_monitor.insert_share(share);
-                self.stats_sender.update_accepted_shares(self.connection_id);
-                info!(
-                    "Share for Job {} forwarded with local difficulty management disabled",
-                    request.job_id
-                );
-                return true;
-            }
-
-            //check share is valid
+            // Shares must always be validated locally. Disabling difficulty updates only
+            // disables downstream/internal retargeting, not share validation itself.
             if let Some(met_difficulty) = validate_share(
                 &request,
                 &job,
@@ -643,10 +630,10 @@ impl IsServer<'static> for Downstream {
                     }
                 }
                 self.stats_sender.update_accepted_shares(self.connection_id);
-                info!(
-                    "Share for Job {} and difficulty {} is accepted",
-                    request.job_id, met_difficulty
-                );
+                //info!(
+                //    "Share for Job {} and difficulty {} is accepted",
+                //    request.job_id, met_difficulty
+                //);
                 true
             } else {
                 let share = ShareInfo::new(

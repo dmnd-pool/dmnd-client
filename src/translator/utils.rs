@@ -18,7 +18,7 @@ use bitcoin::{
 use lazy_static::lazy_static;
 use roles_logic_sv2::utils::Mutex;
 use sv1_api::{client_to_server, server_to_client::Notify};
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 use super::downstream::Downstream;
 lazy_static! {
@@ -113,10 +113,10 @@ pub fn validate_share(
     extranonce1: Vec<u8>,
     version_rolling_mask: Option<sv1_api::utils::HexU32Be>,
 ) -> Option<f32> {
-    info!(
-        "Validating share from request {} and job {}",
-        request.id, request.job_id
-    );
+    //info!(
+    //    "Validating share from request {} and job {}",
+    //    request.id, request.job_id
+    //);
 
     let prev_hash_vec: Vec<u8> = job.prev_hash.clone().into();
     let prev_hash = match binary_sv2::U256::from_vec_(prev_hash_vec) {
@@ -158,9 +158,9 @@ pub fn validate_share(
     );
 
     hash.reverse(); //convert to little-endian
-    info!("Share Hash: {:?}", hash.to_vec().as_hex());
-    // Check against difficulties from latest to earliest
-    // TODO: This is not a sound check - We should check against the difficulty of the specific job
+                    //info!("Share Hash: {:?}", hash.to_vec().as_hex());
+                    // Check against difficulties from latest to earliest
+                    // TODO: This is not a sound check - We should check against the difficulty of the specific job
     for &difficulty in difficulties.iter().rev() {
         let target = Downstream::difficulty_to_target(difficulty);
         debug!(
@@ -169,7 +169,7 @@ pub fn validate_share(
             target.to_vec().as_hex()
         );
         if hash <= target {
-            info!("Share met Target: {:?}", target.to_vec().as_hex());
+            //info!("Share met Target: {:?}", target.to_vec().as_hex());
             return Some(difficulty); // Return the difficulty met
         }
     }
