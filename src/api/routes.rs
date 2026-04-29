@@ -1,8 +1,14 @@
 use super::{utils::get_cpu_and_memory_usage, AppState};
 use crate::config::Configuration;
 use crate::proxy_state::ProxyState;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
 use serde::Serialize;
+use tracing::{error, info};
 
 pub struct Api {}
 
@@ -145,6 +151,25 @@ impl Api {
             ),
         }
     }
+
+    pub async fn send_tx_to_bitcoind(
+        State(state): State<AppState>,
+        Path(tx): Path<String>,
+    ) -> impl IntoResponse {
+        match state.rpc.send_raw_transaction(&tx).await {
+            Ok(txid) => {
+                info!("transaction sent to bitcoind: {txid}");
+                (StatusCode::OK, Json(APIResponse::success(Some(txid))))
+            }
+            Err(e) => {
+                error!("Failed to send transaction to bitcoind: {e}");
+                (
+                    e.status_code(),
+                    Json(APIResponse::error(Some(e.to_string()))),
+                )
+            }
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -207,6 +232,7 @@ async fn health_check_reports_full_translator_handoff() {
         router,
         stats_sender: crate::api::stats::StatsSender::new(),
         downstream_handoff: handoff_tx,
+        rpc: std::sync::Arc::new(crate::api::bitcoin_rpc::BitcoindRpc::new(None, None, None)),
     };
 
     let response = Api::health_check(State(state)).await.into_response();

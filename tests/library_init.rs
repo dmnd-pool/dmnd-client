@@ -146,6 +146,9 @@ async fn library_init_sv2_setup_connection() {
         false,
         "DDxDD".to_string(),
         None,
+        None,
+        None,
+        None,
     );
 
     let proxy = tokio::spawn(dmnd_client::start(config));
