@@ -65,6 +65,12 @@ struct Args {
     signature: Option<String>,
     #[clap(long)]
     miner_name: Option<String>,
+    #[clap(long)]
+    rpc_url: Option<String>,
+    #[clap(long)]
+    rpc_user: Option<String>,
+    #[clap(long)]
+    rpc_pwd: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -88,6 +94,9 @@ struct ConfigFile {
     monitor: Option<bool>,
     auto_update: Option<bool>,
     miner_name: Option<String>,
+    rpc_url: Option<String>,
+    rpc_user: Option<String>,
+    rpc_pwd: Option<String>,
 }
 
 impl ConfigFile {
@@ -112,6 +121,9 @@ impl ConfigFile {
             monitor: None,
             auto_update: None,
             miner_name: None,
+            rpc_url: None,
+            rpc_user: None,
+            rpc_pwd: None,
         }
     }
 }
@@ -139,6 +151,9 @@ pub struct Configuration {
     auto_update: bool,
     signature: String,
     miner_name: Option<String>,
+    rpc_url: Option<String>,
+    rpc_user: Option<String>,
+    rpc_pwd: Option<String>,
 }
 impl Configuration {
     #[allow(clippy::too_many_arguments)]
@@ -164,6 +179,9 @@ impl Configuration {
         auto_update: bool,
         signature: String,
         miner_name: Option<String>,
+        rpc_url: Option<String>,
+        rpc_user: Option<String>,
+        rpc_pwd: Option<String>,
     ) -> Self {
         Configuration {
             token,
@@ -187,6 +205,9 @@ impl Configuration {
             auto_update,
             signature,
             miner_name,
+            rpc_url,
+            rpc_user,
+            rpc_pwd,
         }
     }
 
@@ -219,6 +240,9 @@ impl Configuration {
             false,
             false,
             "DDxDD".to_string(),
+            None,
+            None,
+            None,
             None,
         )
     }
@@ -369,6 +393,18 @@ impl Configuration {
         Self::cfg().miner_name.clone()
     }
 
+    pub fn rpc_url() -> Option<String> {
+        Self::cfg().rpc_url.clone()
+    }
+
+    pub fn rpc_user() -> Option<String> {
+        Self::cfg().rpc_user.clone()
+    }
+
+    pub fn rpc_pwd() -> Option<String> {
+        Self::cfg().rpc_pwd.clone()
+    }
+
     // Loads config from CLI args, config file, and env vars with precedence: CLI > file > env.
     pub fn from_cli() -> Self {
         let args = Args::parse();
@@ -416,6 +452,19 @@ impl Configuration {
             .miner_name
             .or(config.miner_name)
             .or_else(|| std::env::var("MINER_NAME").ok());
+
+        let rpc_url = args
+            .rpc_url
+            .or(config.rpc_url)
+            .or_else(|| std::env::var("RPC_URL").ok());
+        let rpc_user = args
+            .rpc_user
+            .or(config.rpc_user)
+            .or_else(|| std::env::var("RPC_USER").ok());
+        let rpc_pwd = args
+            .rpc_pwd
+            .or(config.rpc_pwd)
+            .or_else(|| std::env::var("RPC_PWD").ok());
         if let Some(ref miner_name) = miner_name {
             validate_miner_name(miner_name).unwrap_or_else(|e| panic!("{e}"));
         }
@@ -553,6 +602,9 @@ impl Configuration {
             auto_update,
             signature,
             miner_name,
+            rpc_url,
+            rpc_user,
+            rpc_pwd,
         }
     }
 }
