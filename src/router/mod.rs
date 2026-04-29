@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::jd_client::job_declarator::{setup_connection::SetupConnectionHandler, JobDeclarator};
-use codec_sv2::{buffer_sv2::Slice, HandshakeRole};
+use codec_sv2::HandshakeRole;
 use demand_share_accounting_ext::parser::PoolExtMessages;
 use demand_sv2_connection::noise_connection_tokio::Connection;
 use key_utils::Secp256k1PublicKey;
@@ -464,8 +464,8 @@ async fn initialize_mining_connections(
     authority_public_key: Secp256k1PublicKey,
 ) -> Result<
     (
-        Receiver<codec_sv2::Frame<PoolExtMessages<'static>, Slice>>,
-        Sender<codec_sv2::Frame<PoolExtMessages<'static>, Slice>>,
+        Receiver<minin_pool_connection::EitherFrame>,
+        Sender<minin_pool_connection::EitherFrame>,
         SetupConnection<'static>,
     ),
     (),

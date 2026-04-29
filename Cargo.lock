@@ -289,7 +289,6 @@ name = "binary_codec_sv2"
 version = "2.0.0"
 source = "git+https://github.com/demand-open-source/stratum#48e510af59231a1885f454e7b5a43e89736abcb0"
 dependencies = [
- "buffer_sv2 2.0.0",
  "hex",
 ]
 
@@ -1326,7 +1325,6 @@ version = "4.0.0"
 source = "git+https://github.com/demand-open-source/stratum#48e510af59231a1885f454e7b5a43e89736abcb0"
 dependencies = [
  "binary_sv2 2.0.0",
- "buffer_sv2 2.0.0",
  "const_sv2",
 ]
 
