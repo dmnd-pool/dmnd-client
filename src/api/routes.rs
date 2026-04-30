@@ -149,7 +149,7 @@ impl Api {
         State(state): State<AppState>,
         Path(tx): Path<String>,
     ) -> impl IntoResponse {
-        match state.rpc.send_raw_transaction(&tx).await {
+        match state.rpc.submit_transaction(&tx).await {
             Ok(txid) => {
                 info!("transaction sent to bitcoind: {txid}");
                 (StatusCode::OK, Json(APIResponse::success(Some(txid))))
@@ -224,7 +224,9 @@ async fn health_check_reports_full_translator_handoff() {
         router,
         stats_sender: crate::api::stats::StatsSender::new(),
         downstream_handoff: handoff_tx,
-        rpc: std::sync::Arc::new(crate::api::bitcoin_rpc::BitcoindRpc::new(None, None, None)),
+        rpc: std::sync::Arc::new(crate::api::bitcoin_rpc::BitcoindRpc::new(
+            None, None, None, None,
+        )),
     };
 
     let response = Api::health_check(State(state)).await.into_response();

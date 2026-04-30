@@ -7,32 +7,65 @@ use tracing::warn;
 const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8332";
 const RPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const DEFAULT_RPC_FEE_DELTA: i64 = 100_000_000;
 
 pub(crate) struct BitcoindRpc {
     url: Option<String>,
     user: Option<String>,
     pwd: Option<String>,
     client: reqwest::Client,
+    fee_delta: i64,
 }
 
 impl BitcoindRpc {
-    pub(crate) fn new(url: Option<String>, user: Option<String>, pwd: Option<String>) -> Self {
+    pub(crate) fn new(
+        url: Option<String>,
+        user: Option<String>,
+        pwd: Option<String>,
+        fee_delta: Option<i64>,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .connect_timeout(RPC_CONNECT_TIMEOUT)
             .timeout(RPC_REQUEST_TIMEOUT)
             .build()
             .expect("Failed to build client");
+        let fee_delta = fee_delta.unwrap_or(DEFAULT_RPC_FEE_DELTA);
 
         Self {
             url,
             user,
             pwd,
             client,
+            fee_delta,
         }
     }
 
-    pub(crate) async fn send_raw_transaction(&self, tx: &str) -> Result<String, BitcoindRpcError> {
+    pub(crate) async fn submit_transaction(&self, tx: &str) -> Result<String, BitcoindRpcError> {
         let tx = validate_transaction_hex(tx)?;
+        let (status, text) = self.send_request("sendrawtransaction", json!([tx])).await?;
+        let txid = RpcResponse::from_response(status, &text)?
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .ok_or_else(|| {
+                BitcoindRpcError::InvalidResponse("empty response from bitcoind".to_string())
+            })?;
+        self.prioritise_transaction(&txid).await?;
+        Ok(txid)
+    }
+
+    async fn prioritise_transaction(&self, txid: &str) -> Result<(), BitcoindRpcError> {
+        let (status, text) = self
+            .send_request("prioritisetransaction", json!([txid, 0, self.fee_delta]))
+            .await?;
+        RpcResponse::from_response(status, &text)
+            .map_err(|e| BitcoindRpcError::Prioritize(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn send_request(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<(StatusCode, String), BitcoindRpcError> {
         let (user, pwd) = match (&self.user, &self.pwd) {
             (Some(u), Some(p)) => (u.as_str(), p.as_str()),
             _ => {
@@ -52,8 +85,8 @@ impl BitcoindRpc {
         let body = json!({
             "jsonrpc": "1.0",
             "id": "dmnd-client",
-            "method": "sendrawtransaction",
-            "params": [tx]
+            "method": method,
+            "params": params
         });
 
         let response = self
@@ -66,8 +99,7 @@ impl BitcoindRpc {
 
         let status = response.status();
         let text = response.text().await?;
-
-        RpcResponse::txid_from_body(status, &text)
+        Ok((status, text))
     }
 }
 
@@ -78,38 +110,31 @@ struct RpcResponse {
 }
 
 impl RpcResponse {
-    fn txid_from_body(status: StatusCode, text: &str) -> Result<String, BitcoindRpcError> {
+    fn from_response(status: StatusCode, text: &str) -> Result<Option<Value>, BitcoindRpcError> {
         let resp: Self = match serde_json::from_str(text) {
-            Ok(resp) => resp,
+            Ok(r) => r,
             Err(e) if status.is_success() => {
                 return Err(BitcoindRpcError::InvalidResponse(format!(
-                    "failed to decode bitcoind response ({e}): {text}",
+                    "failed to decode bitcoind response ({e}): {text}"
                 )));
             }
             Err(_) => {
                 return Err(BitcoindRpcError::Other(format!(
-                    "bitcoind HTTP {status}: {text}",
+                    "bitcoind HTTP {status}: {text}"
                 )));
             }
         };
-
-        if let Some(err) = resp.error {
-            return Err(BitcoindRpcError::Rejected(format!(
-                "bitcoind RPC error: {err}"
-            )));
-        }
-
         if !status.is_success() {
             return Err(BitcoindRpcError::Other(format!(
                 "bitcoind HTTP {status}: {text}"
             )));
         }
-
-        resp.result
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .ok_or_else(|| {
-                BitcoindRpcError::InvalidResponse("empty response from bitcoind".to_string())
-            })
+        if let Some(err) = resp.error {
+            return Err(BitcoindRpcError::Rejected(format!(
+                "bitcoind RPC error: {err}"
+            )));
+        }
+        Ok(resp.result)
     }
 }
 
@@ -143,6 +168,7 @@ pub(crate) enum BitcoindRpcError {
     Timeout(String),
     Other(String),
     InvalidResponse(String),
+    Prioritize(String),
 }
 
 impl BitcoindRpcError {
@@ -153,9 +179,9 @@ impl BitcoindRpcError {
             }
             BitcoindRpcError::MissingConfig(_) => StatusCode::SERVICE_UNAVAILABLE,
             BitcoindRpcError::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
-            BitcoindRpcError::Other(_) | BitcoindRpcError::InvalidResponse(_) => {
-                StatusCode::BAD_GATEWAY
-            }
+            BitcoindRpcError::Other(_)
+            | BitcoindRpcError::InvalidResponse(_)
+            | BitcoindRpcError::Prioritize(_) => StatusCode::BAD_GATEWAY,
         }
     }
 }
@@ -178,7 +204,8 @@ impl fmt::Display for BitcoindRpcError {
             | BitcoindRpcError::Rejected(msg)
             | BitcoindRpcError::Timeout(msg)
             | BitcoindRpcError::Other(msg)
-            | BitcoindRpcError::InvalidResponse(msg) => f.write_str(msg),
+            | BitcoindRpcError::InvalidResponse(msg)
+            | BitcoindRpcError::Prioritize(msg) => f.write_str(msg),
         }
     }
 }

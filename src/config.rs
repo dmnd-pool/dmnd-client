@@ -71,6 +71,8 @@ struct Args {
     rpc_user: Option<String>,
     #[clap(long)]
     rpc_pwd: Option<String>,
+    #[clap(long)]
+    rpc_fee_delta: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -97,6 +99,7 @@ struct ConfigFile {
     rpc_url: Option<String>,
     rpc_user: Option<String>,
     rpc_pwd: Option<String>,
+    rpc_fee_delta: Option<i64>,
 }
 
 impl ConfigFile {
@@ -124,6 +127,7 @@ impl ConfigFile {
             rpc_url: None,
             rpc_user: None,
             rpc_pwd: None,
+            rpc_fee_delta: None,
         }
     }
 }
@@ -154,6 +158,7 @@ pub struct Configuration {
     rpc_url: Option<String>,
     rpc_user: Option<String>,
     rpc_pwd: Option<String>,
+    rpc_fee_delta: Option<i64>,
 }
 impl Configuration {
     #[allow(clippy::too_many_arguments)]
@@ -182,6 +187,7 @@ impl Configuration {
         rpc_url: Option<String>,
         rpc_user: Option<String>,
         rpc_pwd: Option<String>,
+        rpc_fee_delta: Option<i64>,
     ) -> Self {
         Configuration {
             token,
@@ -208,6 +214,7 @@ impl Configuration {
             rpc_url,
             rpc_user,
             rpc_pwd,
+            rpc_fee_delta,
         }
     }
 
@@ -240,6 +247,7 @@ impl Configuration {
             false,
             false,
             "DDxDD".to_string(),
+            None,
             None,
             None,
             None,
@@ -405,6 +413,10 @@ impl Configuration {
         Self::cfg().rpc_pwd.clone()
     }
 
+    pub fn rpc_fee_delta() -> Option<i64> {
+        Self::cfg().rpc_fee_delta.clone()
+    }
+
     // Loads config from CLI args, config file, and env vars with precedence: CLI > file > env.
     pub fn from_cli() -> Self {
         let args = Args::parse();
@@ -465,6 +477,11 @@ impl Configuration {
             .rpc_pwd
             .or(config.rpc_pwd)
             .or_else(|| std::env::var("RPC_PWD").ok());
+        let rpc_fee_delta = args.rpc_fee_delta.or(config.rpc_fee_delta).or_else(|| {
+            std::env::var("RPC_FEE_DELTA")
+                .ok()
+                .and_then(|s| s.parse().ok())
+        });
         if let Some(ref miner_name) = miner_name {
             validate_miner_name(miner_name).unwrap_or_else(|e| panic!("{e}"));
         }
@@ -605,6 +622,7 @@ impl Configuration {
             rpc_url,
             rpc_user,
             rpc_pwd,
+            rpc_fee_delta,
         }
     }
 }
