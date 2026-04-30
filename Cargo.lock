@@ -1114,6 +1114,7 @@ dependencies = [
 name = "dmnd-client"
 version = "0.3.7"
 dependencies = [
+ "async-channel",
  "async-recursion",
  "axum",
  "binary_sv2 2.0.0",
@@ -1125,6 +1126,7 @@ dependencies = [
  "demand-sv2-connection",
  "framing_sv2 4.0.0",
  "futures",
+ "hex",
  "integration_tests_sv2",
  "jemallocator",
  "key-utils",
