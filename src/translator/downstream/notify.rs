@@ -48,6 +48,7 @@ pub async fn start_notify(
             })?;
         upstream_difficulty_config
             .safe_lock(|c| c.channel_nominal_hashrate += Configuration::downstream_hashrate())?;
+        downstream.safe_lock(|d| d.mark_channel_hashrate_registered())?;
         if let Err(e) = stats_sender.setup_stats_reliable(connection_id).await {
             error!("Failed to register downstream stats {connection_id}: {e}");
         }
@@ -57,12 +58,15 @@ pub async fn start_notify(
             if let Err(e) = stats_sender.remove_stats_reliable(connection_id).await {
                 error!("Failed to rollback downstream stats {connection_id}: {e}");
             }
-            upstream_difficulty_config.safe_lock(|u| {
-                u.channel_nominal_hashrate -= f32::min(
-                    Configuration::downstream_hashrate(),
-                    u.channel_nominal_hashrate,
-                );
-            })?;
+            let should_subtract = downstream.safe_lock(|d| d.take_channel_hashrate_registered())?;
+            if should_subtract {
+                upstream_difficulty_config.safe_lock(|u| {
+                    u.channel_nominal_hashrate -= f32::min(
+                        Configuration::downstream_hashrate(),
+                        u.channel_nominal_hashrate,
+                    );
+                })?;
+            }
             return Ok(());
         }
 

@@ -128,6 +128,7 @@ pub struct Downstream {
     tx_update_token: Sender<String>,
     pub session_timing: std::cell::RefCell<DownstreamSessionTiming>,
     submit_counts_for_diff: Cell<bool>,
+    channel_hashrate_registered: Cell<bool>,
     closed: Cell<bool>,
 }
 
@@ -220,6 +221,7 @@ impl Downstream {
             tx_update_token,
             session_timing: std::cell::RefCell::new(DownstreamSessionTiming::new(accepted_at)),
             submit_counts_for_diff: Cell::new(false),
+            channel_hashrate_registered: Cell::new(false),
             closed: Cell::new(false),
         }));
 
@@ -584,6 +586,7 @@ impl Downstream {
                 std::time::Instant::now(),
             )),
             submit_counts_for_diff: Cell::new(false),
+            channel_hashrate_registered: Cell::new(false),
             closed: Cell::new(false),
         }
     }
@@ -594,6 +597,14 @@ impl Downstream {
 
     pub(super) fn take_submit_diff_count_flag(&self) -> bool {
         self.submit_counts_for_diff.replace(false)
+    }
+
+    pub(super) fn mark_channel_hashrate_registered(&self) {
+        self.channel_hashrate_registered.set(true);
+    }
+
+    pub(super) fn take_channel_hashrate_registered(&self) -> bool {
+        self.channel_hashrate_registered.replace(false)
     }
 
     pub(super) fn mark_closed(&self) {
