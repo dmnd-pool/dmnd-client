@@ -68,12 +68,17 @@ impl Downstream {
     pub fn remove_downstream_hashrate_from_channel(
         self_: &Arc<Mutex<Self>>,
     ) -> ProxyResult<'static, ()> {
-        let (upstream_diff, estimated_downstream_hash_rate) = self_.safe_lock(|d| {
-            (
-                d.upstream_difficulty_config.clone(),
-                d.difficulty_mgmt.estimated_downstream_hash_rate,
-            )
-        })?;
+        let (upstream_diff, estimated_downstream_hash_rate, should_subtract) =
+            self_.safe_lock(|d| {
+                (
+                    d.upstream_difficulty_config.clone(),
+                    d.difficulty_mgmt.estimated_downstream_hash_rate,
+                    d.take_channel_hashrate_registered(),
+                )
+            })?;
+        if !should_subtract {
+            return Ok(());
+        }
         info!(
             "Removing downstream hashrate from channel upstream_diff: {:?}, downstream_diff: {:?}",
             upstream_diff, estimated_downstream_hash_rate
