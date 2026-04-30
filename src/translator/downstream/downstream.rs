@@ -53,6 +53,7 @@ pub struct DownstreamDifficultyConfig {
     pub pid_controller: Pid<f32>,
     pub current_difficulties: VecDeque<f32>,
     pub initial_difficulty: f32,
+    pub hard_minimum_difficulty: Option<f32>,
 }
 
 impl DownstreamDifficultyConfig {
@@ -148,6 +149,7 @@ impl Downstream {
         recv_from_down: Receiver<String>,
         task_manager: Arc<Mutex<TaskManager>>,
         initial_difficulty: f32,
+        hard_minimum_difficulty: Option<f32>,
         stats_sender: StatsSender,
         tx_update_token: Sender<String>,
         accepted_at: std::time::Instant,
@@ -194,6 +196,7 @@ impl Downstream {
             pid_controller: pid,
             current_difficulties,
             initial_difficulty,
+            hard_minimum_difficulty,
         };
 
         let token = Arc::new(Mutex::new(
@@ -1099,6 +1102,7 @@ mod tests {
             pid_controller: Pid::new(*crate::SHARE_PER_MIN, 10.0),
             current_difficulties,
             initial_difficulty: 1.0,
+            hard_minimum_difficulty: None,
         };
         let upstream_config = UpstreamDifficultyConfig {
             channel_diff_update_interval: crate::CHANNEL_DIFF_UPDTATE_INTERVAL,

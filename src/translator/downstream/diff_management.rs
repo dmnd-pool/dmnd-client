@@ -13,6 +13,8 @@ use sv1_api::json_rpc;
 
 use tracing::{error, info};
 
+pub const NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY: f32 = 100_000.0;
+
 impl Downstream {
     /// Initializes difficult managment.
     /// Send downstream a first target.
@@ -227,20 +229,25 @@ impl Downstream {
             return Err(Error::Unrecoverable);
         }
 
-        let (mut pid, latest_difficulty, initial_difficulty) = self_.safe_lock(|d| {
-            (
-                d.difficulty_mgmt.pid_controller,
-                d.difficulty_mgmt
-                    .current_difficulties
-                    .back()
-                    .copied()
-                    .unwrap_or(d.difficulty_mgmt.initial_difficulty),
-                d.difficulty_mgmt.initial_difficulty,
-            )
-        })?;
+        let (mut pid, latest_difficulty, initial_difficulty, hard_minimum_difficulty) = self_
+            .safe_lock(|d| {
+                (
+                    d.difficulty_mgmt.pid_controller,
+                    d.difficulty_mgmt
+                        .current_difficulties
+                        .back()
+                        .copied()
+                        .unwrap_or(d.difficulty_mgmt.initial_difficulty),
+                    d.difficulty_mgmt.initial_difficulty,
+                    d.difficulty_mgmt.hard_minimum_difficulty,
+                )
+            })?;
 
         let pid_output = pid.next_control_output(realized_share_per_min).output;
-        let new_difficulty = (latest_difficulty + pid_output).max(initial_difficulty * 0.1);
+        let new_difficulty = clamp_downstream_difficulty_to_floor(
+            (latest_difficulty + pid_output).max(initial_difficulty * 0.1),
+            hard_minimum_difficulty,
+        );
         let nearest = nearest_power_of_10(new_difficulty);
         if nearest != initial_difficulty {
             let mut pid: Pid<f32> = Pid::new(*crate::SHARE_PER_MIN, nearest * 10.0);
@@ -330,9 +337,28 @@ pub fn nearest_power_of_10(x: f32) -> f32 {
     10f32.powi(exponent)
 }
 
+pub fn hard_minimum_difficulty_for_proxy_mode(local_mode: bool) -> Option<f32> {
+    if local_mode {
+        None
+    } else {
+        Some(NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY)
+    }
+}
+
+pub fn clamp_downstream_difficulty_to_floor(
+    difficulty: f32,
+    hard_minimum_difficulty: Option<f32>,
+) -> f32 {
+    hard_minimum_difficulty.map_or(difficulty, |minimum| difficulty.max(minimum))
+}
+
 #[cfg(test)]
 mod test {
     use super::super::super::upstream::diff_management::UpstreamDifficultyConfig;
+    use super::{
+        clamp_downstream_difficulty_to_floor, hard_minimum_difficulty_for_proxy_mode,
+        NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY,
+    };
     use crate::translator::downstream::{downstream::DownstreamDifficultyConfig, Downstream};
     use binary_sv2::U256;
     use pid::Pid;
@@ -440,6 +466,80 @@ mod test {
         crate::translator::downstream::diff_management::nearest_power_of_10(initial_difficulty)
     }
 
+    #[test]
+    fn non_local_proxy_mode_floor_is_100k() {
+        assert_eq!(
+            hard_minimum_difficulty_for_proxy_mode(false),
+            Some(NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY)
+        );
+        assert_eq!(
+            clamp_downstream_difficulty_to_floor(
+                10_000.0,
+                Some(NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY)
+            ),
+            NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY
+        );
+        assert_eq!(
+            clamp_downstream_difficulty_to_floor(
+                1_000_000.0,
+                Some(NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY)
+            ),
+            1_000_000.0
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_downstream_retarget_respects_hard_floor() {
+        let mut diff = VecDeque::new();
+        diff.push_back(10_000.0);
+        let downstream_conf = DownstreamDifficultyConfig {
+            estimated_downstream_hash_rate: 0.0,
+            pid_controller: Pid::new(10.0, 100_000.0),
+            current_difficulties: diff,
+            submits: VecDeque::new(),
+            initial_difficulty: 10_000.0,
+            hard_minimum_difficulty: Some(NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY),
+        };
+        let upstream_config = UpstreamDifficultyConfig {
+            channel_diff_update_interval: 60,
+            channel_nominal_hashrate: 0.0,
+        };
+        let (tx_sv1_submit, _rx_sv1_submit) = tokio::sync::mpsc::channel(10);
+        let (tx_outgoing, _rx_outgoing) = channel(10);
+        let (tx_update_token, _rx_update_token) = channel(10);
+        let random_str = rand::thread_rng().gen::<[u8; 32]>().to_vec();
+        let first_job = Notify {
+            job_id: "ciao".to_string(),
+            prev_hash: PrevHash::try_from("0".repeat(64).as_str()).unwrap(),
+            coin_base1: "ffff".try_into().unwrap(),
+            coin_base2: "ffff".try_into().unwrap(),
+            merkle_branch: vec![MerkleNode::try_from(random_str).unwrap()],
+            version: HexU32Be(5667),
+            bits: HexU32Be(5678),
+            time: HexU32Be(5609),
+            clean_jobs: true,
+        };
+        let downstream = Arc::new(Mutex::new(Downstream::new(
+            1,
+            vec![],
+            vec![],
+            None,
+            None,
+            tx_sv1_submit,
+            tx_outgoing,
+            0,
+            downstream_conf,
+            Arc::new(Mutex::new(upstream_config)),
+            crate::api::stats::StatsSender::new(),
+            first_job,
+            tx_update_token,
+        )));
+
+        let updated = Downstream::update_difficulty_and_hashrate(&downstream).unwrap();
+
+        assert_eq!(updated, Some(NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY));
+    }
+
     #[tokio::test]
     async fn test_converge_to_spm_from_low() {
         test_converge_to_spm(1.0).await
@@ -460,6 +560,7 @@ mod test {
             current_difficulties: diff,
             submits: VecDeque::new(),
             initial_difficulty: 10_000_000_000.0,
+            hard_minimum_difficulty: None,
         };
         let upstream_config = UpstreamDifficultyConfig {
             channel_diff_update_interval: 60,

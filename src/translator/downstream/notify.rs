@@ -265,6 +265,7 @@ mod tests {
             pid_controller: Pid::new(*crate::SHARE_PER_MIN, 10.0),
             current_difficulties,
             initial_difficulty: 1.0,
+            hard_minimum_difficulty: None,
         };
         let upstream_config = UpstreamDifficultyConfig {
             channel_diff_update_interval: crate::CHANNEL_DIFF_UPDTATE_INTERVAL,
