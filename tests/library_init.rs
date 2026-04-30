@@ -28,6 +28,23 @@ fn ensure_port_free_or_skip(address: &str) -> bool {
     }
 }
 
+async fn wait_for_port_to_be_bound(address: &str) {
+    let started = std::time::Instant::now();
+    loop {
+        match TcpListener::bind(address) {
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return,
+            Ok(listener) => drop(listener),
+            Err(e) => panic!("failed to probe {address}: {e}"),
+        }
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "timed out waiting for {address} to be bound"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn library_init_sv2_setup_connection() {
     if !ensure_port_free_or_skip("127.0.0.1:20000") {
@@ -70,6 +87,7 @@ async fn library_init_sv2_setup_connection() {
         Some(30),
     );
     pool_sniffer.start();
+    wait_for_port_to_be_bound("127.0.0.1:20000").await;
 
     let jd_pool_sniffer = Sniffer::new(
         "proxy-pool-jd",
@@ -118,6 +136,9 @@ async fn library_init_sv2_setup_connection() {
         false,
         true,
         None,
+        None,
+        250,
+        16_384,
         None,
         250,
         "3001".to_string(),

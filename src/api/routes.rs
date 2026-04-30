@@ -63,6 +63,13 @@ impl Api {
         (StatusCode::OK, Json(APIResponse::success(Some(result))))
     }
 
+    pub async fn get_session_timing() -> impl IntoResponse {
+        (
+            StatusCode::OK,
+            Json(APIResponse::success(Some(crate::debug_timing::snapshot()))),
+        )
+    }
+
     // Retrieves the current pool information
     pub async fn get_pool_info(State(state): State<AppState>) -> impl IntoResponse {
         let current_pool_address = state.router.current_pool;
@@ -178,7 +185,7 @@ impl<T: Serialize> APIResponse<T> {
 async fn health_check_reports_full_translator_handoff() {
     use axum::extract::State;
     use axum::response::IntoResponse;
-    use std::net::IpAddr;
+    use std::{net::IpAddr, time::Instant};
     use tokio::sync::mpsc;
 
     let auth_pub_k = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
@@ -188,11 +195,12 @@ async fn health_check_reports_full_translator_handoff() {
     let (send_to_upstream, recv_from_downstream) = mpsc::channel(1);
 
     handoff_tx
-        .try_send((
-            send_to_upstream,
+        .try_send(crate::DownstreamConnection {
+            send_to_downstream: send_to_upstream,
             recv_from_downstream,
-            IpAddr::from([127, 0, 0, 1]),
-        ))
+            address: IpAddr::from([127, 0, 0, 1]),
+            accepted_at: Instant::now(),
+        })
         .expect("test handoff queue should accept first item");
 
     let state = AppState {

@@ -15,14 +15,55 @@ use futures::{
 };
 use roles_logic_sv2::utils::Mutex;
 use tokio::{
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpSocket, TcpStream},
     sync::{
-        mpsc::{channel, error::TrySendError, Receiver, Sender},
+        mpsc::{channel, Receiver, Sender},
         OwnedSemaphorePermit, Semaphore,
     },
 };
 use tokio_util::codec::{Framed, LinesCodec};
 use tracing::{debug, error, info, warn};
+
+struct AcceptWindowLimiter {
+    max_accepts_per_window: Option<usize>,
+    window: Duration,
+    window_started_at: Instant,
+    accepted_in_window: usize,
+}
+
+impl AcceptWindowLimiter {
+    fn new(max_accepts_per_window: Option<usize>, window: Duration) -> Self {
+        Self {
+            max_accepts_per_window: max_accepts_per_window.filter(|value| *value > 0),
+            window,
+            window_started_at: Instant::now(),
+            accepted_in_window: 0,
+        }
+    }
+
+    fn wait_duration(&mut self) -> Option<Duration> {
+        self.refresh_window();
+        let limit = self.max_accepts_per_window?;
+        if self.accepted_in_window < limit {
+            return None;
+        }
+        Some(self.window.saturating_sub(self.window_started_at.elapsed()))
+    }
+
+    fn record_accept(&mut self) {
+        self.refresh_window();
+        if self.max_accepts_per_window.is_some() {
+            self.accepted_in_window = self.accepted_in_window.saturating_add(1);
+        }
+    }
+
+    fn refresh_window(&mut self) {
+        if self.window_started_at.elapsed() >= self.window {
+            self.window_started_at = Instant::now();
+            self.accepted_in_window = 0;
+        }
+    }
+}
 
 pub fn start_listen_for_downstream(downstreams: Sender<DownstreamConnection>) -> AbortOnDrop {
     tokio::task::spawn(async move {
@@ -33,6 +74,10 @@ pub fn start_listen_for_downstream(downstreams: Sender<DownstreamConnection>) ->
         let connection_slots =
             max_active_downstreams.map(|max| Arc::new(Semaphore::new(max)));
         let accept_backoff = Duration::from_millis(Configuration::accept_backoff_ms());
+        let accept_window = Duration::from_millis(Configuration::accept_window_ms());
+        let max_accepts_per_window = Configuration::max_accepts_per_window();
+        let mut accept_window_limiter =
+            AcceptWindowLimiter::new(max_accepts_per_window, accept_window);
         let overload_log_interval = Duration::from_secs(5);
         let mut last_overload_log = Instant::now()
             .checked_sub(overload_log_interval)
@@ -41,9 +86,11 @@ pub fn start_listen_for_downstream(downstreams: Sender<DownstreamConnection>) ->
             "Trying to bind to address {} for downstream(miner) connections",
             downstream_addr
         );
-        let downstream_listener = TcpListener::bind(downstream_addr)
-            .await
-            .expect("impossible to bind downstream");
+        let downstream_listener = bind_downstream_listener(
+            downstream_addr,
+            Configuration::accept_backlog(),
+        )
+        .expect("impossible to bind downstream");
         info!(
             "Listening for downstream connections on {:?}",
             downstream_addr
@@ -64,6 +111,20 @@ pub fn start_listen_for_downstream(downstreams: Sender<DownstreamConnection>) ->
                 }
             }
 
+            if let Some(wait_for) = accept_window_limiter.wait_duration() {
+                if last_overload_log.elapsed() >= overload_log_interval {
+                    warn!(
+                        "Accept rate limit reached ({limit} downstreams per {}ms), pausing accepts for {}ms",
+                        accept_window.as_millis(),
+                        wait_for.as_millis(),
+                        limit = max_accepts_per_window.unwrap_or_default(),
+                    );
+                    last_overload_log = Instant::now();
+                }
+                tokio::time::sleep(wait_for).await;
+                continue;
+            }
+
             let (stream, addr) = match downstream_listener.accept().await {
                 Ok(connection) => connection,
                 Err(e) => {
@@ -71,37 +132,43 @@ pub fn start_listen_for_downstream(downstreams: Sender<DownstreamConnection>) ->
                     continue;
                 }
             };
+            let accepted_at = Instant::now();
 
             debug!("Accepted downstream connection from {:?}", addr);
             let connection_slot = match connection_slots.as_ref() {
-                Some(slots) => match slots.clone().try_acquire_owned() {
+                Some(slots) => match slots.clone().acquire_owned().await {
                     Ok(permit) => Some(permit),
                     Err(_) => {
-                        if last_overload_log.elapsed() >= overload_log_interval {
-                            warn!(
-                                "Active downstream limit reached after accept ({max} active connections), dropping connection and backing off for {}ms",
-                                accept_backoff.as_millis(),
-                                max = max_active_downstreams.unwrap_or_default(),
-                            );
-                            last_overload_log = Instant::now();
-                        }
+                        error!("Failed to acquire downstream connection slot after accept");
                         drop(stream);
-                        tokio::time::sleep(accept_backoff).await;
                         continue;
                     }
                 },
                 None => None,
             };
+            accept_window_limiter.record_accept();
             Downstream::initialize(
                 stream,
                 crate::MAX_LEN_DOWN_MSG,
                 addr.ip(),
+                accepted_at,
                 downstreams.clone(),
                 connection_slot,
             );
         }
     })
     .into()
+}
+
+fn bind_downstream_listener(addr: SocketAddr, backlog: u32) -> std::io::Result<TcpListener> {
+    let socket = if addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(backlog)
 }
 struct Downstream {}
 
@@ -110,6 +177,7 @@ impl Downstream {
         stream: TcpStream,
         max_len_for_downstream_messages: u32,
         address: IpAddr,
+        accepted_at: Instant,
         downstreams: Sender<DownstreamConnection>,
         connection_slot: Option<OwnedSemaphorePermit>,
     ) {
@@ -117,32 +185,34 @@ impl Downstream {
             debug!("Spawning downstream task for {}", address);
             let (send_to_upstream, recv) = channel(10);
             let (send, recv_from_upstream) = channel(10);
-            match downstreams.try_send((send, recv, address)) {
-                Ok(()) => (),
-                Err(TrySendError::Full(_)) => {
-                    debug!(
-                        "Dropping downstream connection from {} because the translator accept queue is full",
-                        address
-                    );
-                    return;
-                }
-                Err(TrySendError::Closed(_)) => {
-                    error!(
-                        "Dropping downstream connection from {} because the translator accept queue is closed",
-                        address
-                    );
-                    return;
-                }
-            }
             let codec = LinesCodec::new_with_max_length(max_len_for_downstream_messages as usize);
             let framed = Framed::new(stream, codec);
-            Self::start(
+            let relay_handle = tokio::spawn(Self::start(
                 framed,
                 recv_from_upstream,
                 send_to_upstream,
                 connection_slot,
-            )
-            .await
+            ));
+            if downstreams
+                .send(DownstreamConnection {
+                    send_to_downstream: send,
+                    recv_from_downstream: recv,
+                    address,
+                    accepted_at,
+                })
+                .await
+                .is_err()
+            {
+                error!(
+                    "Dropping downstream connection from {} because the translator accept queue is closed",
+                    address
+                );
+                relay_handle.abort();
+                return;
+            }
+            if let Err(e) = relay_handle.await {
+                debug!("Downstream relay task for {} ended: {}", address, e);
+            }
         });
     }
     async fn start(

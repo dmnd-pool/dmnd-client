@@ -6,10 +6,39 @@ use crate::{
 };
 use roles_logic_sv2::utils::Mutex;
 use std::sync::Arc;
-use sv1_api::{client_to_server::Submit, json_rpc};
+use sv1_api::json_rpc;
 use tokio::sync::mpsc;
 use tokio::task;
 use tracing::{debug, error};
+
+pub(super) async fn process_incoming_message(
+    downstream: Arc<Mutex<Downstream>>,
+    incoming: json_rpc::Message,
+) -> Result<(), Error<'static>> {
+    let is_submit = matches!(
+        &incoming,
+        json_rpc::Message::StandardRequest(request) if request.method == "mining.submit"
+    );
+    if is_submit {
+        downstream
+            .safe_lock(|d| d.reset_submit_diff_count_flag())
+            .map_err(|_| Error::TranslatorTaskManagerMutexPoisoned)?;
+    }
+
+    Downstream::handle_incoming_sv1(downstream.clone(), incoming).await?;
+
+    if is_submit {
+        let should_count_submit = downstream
+            .safe_lock(|d| d.take_submit_diff_count_flag())
+            .map_err(|_| Error::TranslatorTaskManagerMutexPoisoned)?;
+
+        if should_count_submit {
+            Downstream::save_share(downstream)?;
+        }
+    }
+
+    Ok(())
+}
 
 pub async fn start_receive_downstream(
     task_manager: Arc<Mutex<TaskManager>>,
@@ -23,22 +52,11 @@ pub async fn start_receive_downstream(
             while let Some(incoming) = recv_from_down.recv().await {
                 let incoming: Result<json_rpc::Message, _> = serde_json::from_str(&incoming);
                 if let Ok(incoming) = incoming {
-                    // if message is Submit Shares update difficulty management
-                    if let sv1_api::Message::StandardRequest(standard_req) = incoming.clone() {
-                        if let Ok(Submit { .. }) = standard_req.try_into() {
-                            if let Err(e) = Downstream::save_share(downstream.clone()) {
-                                error!("{}", e);
-                                break;
-                            }
-                        }
-                    }
-
-                    if let Err(error) =
-                        Downstream::handle_incoming_sv1(downstream.clone(), incoming).await
+                    if let Err(error) = process_incoming_message(downstream.clone(), incoming).await
                     {
                         error!("Failed to handle incoming sv1 msg: {:?}", error);
                         break;
-                    };
+                    }
                 } else {
                     // Message received could not be converted to rpc message
                     error!(
@@ -50,8 +68,11 @@ pub async fn start_receive_downstream(
                     return;
                 }
             }
-            if let Ok(stats_sender) = downstream.safe_lock(|d| d.stats_sender.clone()) {
-                stats_sender.remove_stats(connection_id);
+            let stats_sender = downstream.safe_lock(|d| d.stats_sender.clone()).ok();
+            if let Some(stats_sender) = stats_sender {
+                if let Err(e) = stats_sender.remove_stats_reliable(connection_id).await {
+                    error!("Failed to remove downstream stats {connection_id}: {e}");
+                }
             }
             // No message to receive
             debug!(

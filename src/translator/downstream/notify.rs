@@ -43,7 +43,9 @@ pub async fn start_notify(
             })?;
         upstream_difficulty_config
             .safe_lock(|c| c.channel_nominal_hashrate += Configuration::downstream_hashrate())?;
-        stats_sender.setup_stats(connection_id);
+        if let Err(e) = stats_sender.setup_stats_reliable(connection_id).await {
+            error!("Failed to register downstream stats {connection_id}: {e}");
+        }
         task::spawn(async move {
             let timeout_timer = std::time::Instant::now();
             let mut authorized_in_time = true;
@@ -65,6 +67,13 @@ pub async fn start_notify(
                     if let Err(e) = Downstream::init_difficulty_management(&downstream).await {
                         error!("Failed to initailize difficulty managemant {e}")
                     } else {
+                        if let Err(e) = downstream.safe_lock(|d| {
+                            d.session_timing
+                                .borrow_mut()
+                                .record_first_notify_if_needed();
+                        }) {
+                            error!("Failed to record first notify timing: {e}");
+                        }
                         let message: json_rpc::Message = job.into();
                         Downstream::send_message_downstream(downstream.clone(), message).await;
                     }
@@ -124,6 +133,13 @@ pub async fn start_notify(
                         "Sending Job {:?} to miner. Difficulty: {:?}",
                         &sv1_mining_notify_msg, latest_diff
                     );
+                    if let Err(e) = downstream.safe_lock(|d| {
+                        d.session_timing
+                            .borrow_mut()
+                            .record_first_notify_if_needed();
+                    }) {
+                        error!("Failed to record first notify timing: {e}");
+                    }
                     let message: json_rpc::Message = sv1_mining_notify_msg.into();
                     Downstream::send_message_downstream(downstream.clone(), message).await;
                 }

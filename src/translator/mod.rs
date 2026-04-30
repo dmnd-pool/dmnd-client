@@ -11,7 +11,7 @@ use error::Error;
 use roles_logic_sv2::{parsers::Mining, utils::Mutex};
 use tracing::error;
 
-use std::{net::IpAddr, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::mpsc::channel;
 
 use sv1_api::server_to_client;
@@ -28,7 +28,7 @@ mod task_manager;
 use task_manager::TaskManager;
 
 pub async fn start(
-    downstreams: TReceiver<(TSender<String>, TReceiver<String>, IpAddr)>,
+    downstreams: TReceiver<crate::DownstreamConnection>,
     pool_connection: TSender<(
         TSender<Mining<'static>>,
         TReceiver<Mining<'static>>,

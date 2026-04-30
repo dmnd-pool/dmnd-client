@@ -1,6 +1,7 @@
 #![allow(unused_crate_dependencies)]
 
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use tokio::{
     net::TcpListener,
@@ -11,7 +12,17 @@ use tokio::{
 
 const DEFAULT_LISTEN_ADDRESS: &str = dmnd_client::DEFAULT_LISTEN_ADDRESS;
 const MAX_LEN_DOWN_MSG: u32 = 10_000;
-type DownstreamConnection = (Sender<String>, Receiver<String>, std::net::IpAddr);
+
+struct DownstreamConnection {
+    #[allow(dead_code)]
+    send_to_downstream: Sender<String>,
+    #[allow(dead_code)]
+    recv_from_downstream: Receiver<String>,
+    #[allow(dead_code)]
+    address: std::net::IpAddr,
+    #[allow(dead_code)]
+    accepted_at: Instant,
+}
 
 mod config {
     use super::{Mutex, OnceLock};
@@ -43,6 +54,18 @@ mod config {
         }
 
         pub fn accept_backoff_ms() -> u64 {
+            250
+        }
+
+        pub fn accept_backlog() -> u32 {
+            16_384
+        }
+
+        pub fn max_accepts_per_window() -> Option<usize> {
+            None
+        }
+
+        pub fn accept_window_ms() -> u64 {
             250
         }
 
