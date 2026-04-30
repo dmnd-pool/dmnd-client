@@ -1112,7 +1112,7 @@ dependencies = [
 
 [[package]]
 name = "dmnd-client"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "async-recursion",
  "axum",

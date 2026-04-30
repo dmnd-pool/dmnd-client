@@ -41,19 +41,21 @@ pub async fn start_accept_connection(
             // These values are global startup inputs, not per-miner properties.
             let initial_hash_rate = Configuration::downstream_hashrate();
             let share_per_second = *crate::SHARE_PER_MIN / 60.0;
-            let initial_difficulty = initial_hash_rate / (share_per_second * 2f32.powf(32.0));
-            let initial_difficulty =
+            let base_initial_difficulty = initial_hash_rate / (share_per_second * 2f32.powf(32.0));
+            let base_initial_difficulty =
                 crate::translator::downstream::diff_management::nearest_power_of_10(
-                    initial_difficulty,
+                    base_initial_difficulty,
                 );
-            let expected_hash_rate = share_per_second * initial_difficulty * 2f32.powf(32.0);
+            let hard_minimum_difficulty =
+                crate::translator::downstream::diff_management::hard_minimum_difficulty_for_proxy_mode(
+                    Configuration::local(),
+                );
 
             debug!(
-                "Translator downstream startup params: hash_rate={} H/s, shares_per_second={}, initial_difficulty={}, expected_hash_rate={} H/s",
+                "Translator downstream startup params: hash_rate={} H/s, shares_per_second={}, base_initial_difficulty={}",
                 initial_hash_rate,
                 share_per_second,
-                initial_difficulty,
-                expected_hash_rate
+                base_initial_difficulty,
             );
 
             match Bridge::ready(&bridge).await {
@@ -73,7 +75,19 @@ pub async fn start_accept_connection(
                     address: addr,
                     accepted_at,
                 } = connection;
+                let initial_difficulty =
+                    crate::translator::downstream::diff_management::clamp_downstream_difficulty_to_floor(
+                        base_initial_difficulty,
+                        hard_minimum_difficulty,
+                    );
+                let expected_hash_rate = share_per_second * initial_difficulty * 2f32.powf(32.0);
                 debug!("Translator opening connection for ip {}", addr);
+                if initial_difficulty != base_initial_difficulty {
+                    debug!(
+                        "Translator clamped downstream {} initial difficulty from {} to {}",
+                        addr, base_initial_difficulty, initial_difficulty
+                    );
+                }
                 record_stage(SessionTimingStage::AcceptQueueWait, accepted_at.elapsed());
                 let bridge_open_started_at = std::time::Instant::now();
                 let open_sv1_downstream =
@@ -126,6 +140,7 @@ pub async fn start_accept_connection(
                                 recv,
                                 task_manager,
                                 initial_difficulty,
+                                hard_minimum_difficulty,
                                 stats_sender,
                                 tx_update_token,
                                 accepted_at,
