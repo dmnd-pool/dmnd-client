@@ -26,8 +26,9 @@ pub struct TaskManager {
 impl TaskManager {
     pub fn initialize() -> Arc<Mutex<Self>> {
         let (sender, mut receiver): (mpsc::Sender<TaskMessage>, mpsc::Receiver<TaskMessage>) =
-            mpsc::channel(10);
-        let (send_kill_signal, mut receiver_kill_signal) = mpsc::channel(10);
+            mpsc::channel(crate::DOWNSTREAM_TASK_MANAGER_BUFFER_SIZE);
+        let (send_kill_signal, mut receiver_kill_signal) =
+            mpsc::channel(crate::DOWNSTREAM_TASK_MANAGER_BUFFER_SIZE);
 
         let tasks = Arc::new(Mutex::new(HashMap::new()));
         let task_clone = tasks.clone();

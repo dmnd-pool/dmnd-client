@@ -1,6 +1,7 @@
 use crate::{
     api::stats::StatsSender,
     config::Configuration,
+    debug_timing::DownstreamSessionTiming,
     monitor::{
         shares::{RejectionReason, ShareInfo, SharesMonitor},
         worker_activity::{WorkerActivity, WorkerActivityType},
@@ -34,8 +35,8 @@ use roles_logic_sv2::{
 use rand::Rng;
 use server_to_client::Notify;
 use std::{
+    cell::Cell,
     collections::{hash_map::Entry, HashMap, VecDeque},
-    net::IpAddr,
     sync::Arc,
 };
 use sv1_api::{
@@ -125,6 +126,8 @@ pub struct Downstream {
     pub user_agent: std::cell::RefCell<String>, // RefCell is used here because `handle_subscribe` and `handle_authorize` take &self not &mut self and we need to mutate user_agent
     pub token: Arc<Mutex<String>>,
     tx_update_token: Sender<String>,
+    pub session_timing: std::cell::RefCell<DownstreamSessionTiming>,
+    submit_counts_for_diff: Cell<bool>,
 }
 
 impl Downstream {
@@ -145,6 +148,7 @@ impl Downstream {
         initial_difficulty: f32,
         stats_sender: StatsSender,
         tx_update_token: Sender<String>,
+        accepted_at: std::time::Instant,
     ) {
         assert!(last_notify.is_some());
 
@@ -213,6 +217,8 @@ impl Downstream {
             user_agent: std::cell::RefCell::new(String::new()),
             token,
             tx_update_token,
+            session_timing: std::cell::RefCell::new(DownstreamSessionTiming::new(accepted_at)),
+            submit_counts_for_diff: Cell::new(false),
         }));
 
         if let Err(e) = start_receive_downstream(
@@ -240,23 +246,30 @@ impl Downstream {
             ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
         };
 
-        if let Err(e) = start_notify(
-            task_manager.clone(),
-            downstream.clone(),
-            rx_sv1_notify,
-            host.clone(),
-            connection_id,
-        )
-        .await
-        {
-            error!("Failed to start notify task: {e}");
-            ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
-        };
+        // Notify/bootstrap and share-monitor startup are not required before the miner can
+        // receive subscribe/authorize responses. Defer them off the connection-open critical
+        // path so startup slots are held only for the bidirectional SV1 relay tasks.
+        tokio::spawn(async move {
+            if let Err(e) = start_notify(
+                task_manager.clone(),
+                downstream.clone(),
+                rx_sv1_notify,
+                host.clone(),
+                connection_id,
+            )
+            .await
+            {
+                error!("Failed to start notify task: {e}");
+                ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+            };
 
-        if let Err(e) = Self::start_share_monitor(task_manager.clone(), downstream.clone()).await {
-            error!("Failed to start share monitor task: {e}");
-            ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
-        }
+            if let Err(e) =
+                Self::start_share_monitor(task_manager.clone(), downstream.clone()).await
+            {
+                error!("Failed to start share monitor task: {e}");
+                ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+            }
+        });
     }
 
     /// Starts the shares monitor task.
@@ -286,7 +299,7 @@ impl Downstream {
         tx_mining_notify: broadcast::Sender<server_to_client::Notify<'static>>,
         bridge: Arc<Mutex<super::super::proxy::Bridge>>,
         upstream_difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
-        downstreams: Receiver<(Sender<String>, Receiver<String>, IpAddr)>,
+        downstreams: Receiver<crate::DownstreamConnection>,
         stats_sender: StatsSender,
         tx_update_token: Sender<String>,
     ) -> Result<AbortOnDrop, Error<'static>> {
@@ -342,9 +355,94 @@ impl Downstream {
                 }
             }
             Err(e) => {
+                if matches!(e, sv1_api::error::Error::InvalidSubmission) {
+                    if let Some(response) = Self::invalid_submit_rejection(&message_sv1) {
+                        let (connection_id, reason) = self_.safe_lock(|s| {
+                            s.stats_sender.update_rejected_shares(s.connection_id);
+                            (s.connection_id, s.invalid_submit_reason(&message_sv1))
+                        })?;
+                        error!(
+                            "Downstream {}: rejected invalid mining.submit without disconnecting downstream: {}",
+                            connection_id, reason
+                        );
+                        Self::send_message_downstream(self_, response).await;
+                        return Ok(());
+                    }
+                }
                 error!("{e}");
                 Err(Error::V1Protocol(Box::new(e)))
             }
+        }
+    }
+
+    fn invalid_submit_rejection(message_sv1: &json_rpc::Message) -> Option<json_rpc::Message> {
+        match message_sv1 {
+            json_rpc::Message::StandardRequest(request) if request.method == "mining.submit" => {
+                Some(
+                    json_rpc::Response {
+                        id: request.id,
+                        result: serde_json::to_value(false)
+                            .expect("bool serialization is infallible"),
+                        error: None,
+                    }
+                    .into(),
+                )
+            }
+            _ => None,
+        }
+    }
+
+    fn invalid_submit_reason(&self, message_sv1: &json_rpc::Message) -> String {
+        let request = match message_sv1 {
+            json_rpc::Message::StandardRequest(request) if request.method == "mining.submit" => {
+                request
+            }
+            _ => return "message is not mining.submit".to_string(),
+        };
+
+        let submit = match client_to_server::Submit::try_from(request.clone()) {
+            Ok(submit) => submit,
+            Err(e) => {
+                return format!("failed to parse mining.submit after InvalidSubmission: {e:?}",)
+            }
+        };
+
+        let mut reasons = Vec::new();
+
+        if !self.is_authorized(&submit.user_name) {
+            reasons.push(format!("unauthorized worker `{}`", submit.user_name));
+        }
+
+        let expected_extranonce2_len = self.extranonce2_size();
+        let received_extranonce2_len = submit.extra_nonce2.len();
+        if expected_extranonce2_len != received_extranonce2_len {
+            reasons.push(format!(
+                "invalid extranonce2 length: expected {expected_extranonce2_len}, got {received_extranonce2_len}"
+            ));
+        }
+
+        match (self.version_rolling_mask(), submit.version_bits.clone()) {
+            (Some(mask), Some(version_bits)) if !mask.check_mask(&version_bits) => {
+                reasons.push(format!(
+                    "invalid version_bits `{:08x}` for version-rolling mask `{:08x}`",
+                    version_bits.0, mask.0
+                ))
+            }
+            (Some(mask), None) => reasons.push(format!(
+                "missing version_bits while version-rolling mask `{:08x}` is configured",
+                mask.0
+            )),
+            (None, Some(version_bits)) => reasons.push(format!(
+                "unexpected version_bits `{:08x}` when version rolling is not enabled",
+                version_bits.0
+            )),
+            _ => {}
+        }
+
+        if reasons.is_empty() {
+            "validation failed but no local InvalidSubmission reason matched".to_string()
+        } else {
+            reasons.join("; ")
         }
     }
 
@@ -444,7 +542,19 @@ impl Downstream {
             user_agent: std::cell::RefCell::new(String::new()),
             token,
             tx_update_token,
+            session_timing: std::cell::RefCell::new(DownstreamSessionTiming::new(
+                std::time::Instant::now(),
+            )),
+            submit_counts_for_diff: Cell::new(false),
         }
+    }
+
+    pub(super) fn reset_submit_diff_count_flag(&self) {
+        self.submit_counts_for_diff.set(false);
+    }
+
+    pub(super) fn take_submit_diff_count_flag(&self) -> bool {
+        self.submit_counts_for_diff.replace(false)
     }
 }
 
@@ -484,6 +594,9 @@ impl IsServer<'static> for Downstream {
     /// Because no one unsubscribed in practice, they just unplug their machine.
     fn handle_subscribe(&self, request: &client_to_server::Subscribe) -> Vec<(String, String)> {
         debug!("Down: Handling mining.subscribe: {:?}", &request);
+        self.session_timing
+            .borrow_mut()
+            .record_subscribe_if_needed();
         self.stats_sender
             .update_device_name(self.connection_id, request.agent_signature.clone());
 
@@ -541,6 +654,10 @@ impl IsServer<'static> for Downstream {
                     error!("Failed to send worker activity: {}", e);
                 }
             });
+
+            self.session_timing
+                .borrow_mut()
+                .record_authorize_if_needed();
 
             true
         } else {
@@ -620,6 +737,8 @@ impl IsServer<'static> for Downstream {
                             None,
                         );
                         self.share_monitor.insert_share(share);
+                        self.submit_counts_for_diff.set(true);
+                        self.stats_sender.update_accepted_shares(self.connection_id);
                     } else {
                         // met_difficulty is not latest difficulty, so we mark it as rejected
                         let share = ShareInfo::new(
@@ -630,9 +749,9 @@ impl IsServer<'static> for Downstream {
                             Some(RejectionReason::DifficultyMismatch),
                         );
                         self.share_monitor.insert_share(share);
+                        self.stats_sender.update_rejected_shares(self.connection_id);
                     }
                 }
-                self.stats_sender.update_accepted_shares(self.connection_id);
                 if share_log_enabled() {
                     info!(
                         "Share for Job {} and difficulty {} is accepted",
@@ -868,18 +987,290 @@ impl<T, const N: usize> CircularBuffer<T, N> {
     }
 }
 
-//#[cfg(test)]
-//mod tests {
-//    use super::*;
-//
-//    #[test]
-//    fn gets_difficulty_from_target() {
-//        let target = vec![
-//            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 255, 127,
-//            0, 0, 0, 0, 0,
-//        ];
-//        let actual = Downstream::difficulty_from_target(target).unwrap();
-//        let expect = 512.0;
-//        assert_eq!(actual, expect);
-//    }
-//}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        api::stats::StatsSender,
+        translator::{
+            downstream::{receive_from_downstream::process_incoming_message, DownstreamMessages},
+            upstream::diff_management::UpstreamDifficultyConfig,
+        },
+    };
+    use pid::Pid;
+    use roles_logic_sv2::utils::Mutex;
+    use std::{collections::VecDeque, sync::Arc, time::Duration};
+    use sv1_api::{
+        client_to_server,
+        server_to_client::Notify,
+        utils::{Extranonce, MerkleNode, PrevHash},
+    };
+    use tokio::{
+        sync::mpsc::{channel, Receiver},
+        time::timeout,
+    };
+
+    fn first_job(job_id: &str) -> Notify<'static> {
+        Notify {
+            job_id: job_id.to_string(),
+            prev_hash: PrevHash::try_from("0".repeat(64).as_str()).unwrap(),
+            coin_base1: "ffff".try_into().unwrap(),
+            coin_base2: "ffff".try_into().unwrap(),
+            merkle_branch: vec![MerkleNode::try_from(vec![1_u8; 32]).unwrap()],
+            version: HexU32Be(5667),
+            bits: HexU32Be(5678),
+            time: HexU32Be(5609),
+            clean_jobs: true,
+        }
+    }
+
+    async fn test_downstream(
+        authorized_names: Vec<String>,
+        extranonce2_len: usize,
+        version_rolling_mask: Option<HexU32Be>,
+    ) -> (
+        Arc<Mutex<Downstream>>,
+        Receiver<json_rpc::Message>,
+        StatsSender,
+    ) {
+        let mut current_difficulties = VecDeque::new();
+        current_difficulties.push_back(1.0);
+        let difficulty_mgmt = DownstreamDifficultyConfig {
+            estimated_downstream_hash_rate: 1.0,
+            submits: VecDeque::new(),
+            pid_controller: Pid::new(*crate::SHARE_PER_MIN, 10.0),
+            current_difficulties,
+            initial_difficulty: 1.0,
+        };
+        let upstream_config = UpstreamDifficultyConfig {
+            channel_diff_update_interval: crate::CHANNEL_DIFF_UPDTATE_INTERVAL,
+            channel_nominal_hashrate: 0.0,
+        };
+        let (tx_sv1_submit, _rx_sv1_submit) = channel::<DownstreamMessages>(8);
+        let (tx_outgoing, rx_outgoing) = channel(8);
+        let (tx_update_token, _rx_update_token) = channel(8);
+        let stats_sender = StatsSender::new();
+        stats_sender.setup_stats_reliable(1).await.unwrap();
+
+        (
+            Arc::new(Mutex::new(Downstream::new(
+                1,
+                authorized_names,
+                vec![],
+                version_rolling_mask,
+                None,
+                tx_sv1_submit,
+                tx_outgoing,
+                extranonce2_len,
+                difficulty_mgmt,
+                Arc::new(Mutex::new(upstream_config)),
+                stats_sender.clone(),
+                first_job("42"),
+                tx_update_token,
+            ))),
+            rx_outgoing,
+            stats_sender,
+        )
+    }
+
+    async fn assert_invalid_submit_is_rejected(
+        downstream: Arc<Mutex<Downstream>>,
+        rx_outgoing: &mut Receiver<json_rpc::Message>,
+        stats_sender: &StatsSender,
+        submit: client_to_server::Submit<'static>,
+        expected_rejected_shares: u64,
+    ) {
+        let submit_id = submit.id;
+        let result = Downstream::handle_incoming_sv1(downstream, submit.into()).await;
+        assert!(result.is_ok());
+
+        let response = timeout(Duration::from_secs(1), rx_outgoing.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let response = serde_json::to_value(&response).unwrap();
+        assert_eq!(response["id"], serde_json::json!(submit_id));
+        assert_eq!(response["result"], serde_json::json!(false));
+        assert!(response["error"].is_null());
+
+        let stats = stats_sender.collect_stats().await.unwrap();
+        assert_eq!(
+            stats.get(&1).unwrap().rejected_shares,
+            expected_rejected_shares
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_extranonce2_submit_returns_false_without_erroring() {
+        let (downstream, mut rx_outgoing, stats_sender) =
+            test_downstream(vec!["worker".to_string()], 4, None).await;
+
+        assert_invalid_submit_is_rejected(
+            downstream,
+            &mut rx_outgoing,
+            &stats_sender,
+            client_to_server::Submit {
+                user_name: "worker".to_string(),
+                job_id: "42".to_string(),
+                extra_nonce2: Extranonce::try_from(vec![1_u8]).unwrap(),
+                time: HexU32Be(5609),
+                nonce: HexU32Be(1),
+                version_bits: None,
+                id: 7,
+            },
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn invalid_submit_does_not_count_for_difficulty_adjustment() {
+        let (downstream, mut rx_outgoing, stats_sender) =
+            test_downstream(vec!["worker".to_string()], 4, None).await;
+
+        let submit: json_rpc::Message = client_to_server::Submit {
+            user_name: "worker".to_string(),
+            job_id: "42".to_string(),
+            extra_nonce2: Extranonce::try_from(vec![1_u8]).unwrap(),
+            time: HexU32Be(5609),
+            nonce: HexU32Be(11),
+            version_bits: None,
+            id: 11,
+        }
+        .into();
+
+        process_incoming_message(downstream.clone(), submit)
+            .await
+            .unwrap();
+
+        let response = timeout(Duration::from_secs(1), rx_outgoing.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let response = serde_json::to_value(&response).unwrap();
+        assert_eq!(response["id"], serde_json::json!(11));
+        assert_eq!(response["result"], serde_json::json!(false));
+        assert!(response["error"].is_null());
+
+        let stats = stats_sender.collect_stats().await.unwrap();
+        assert_eq!(stats.get(&1).unwrap().rejected_shares, 1);
+
+        let counted_shares = downstream
+            .safe_lock(|d| d.difficulty_mgmt.submits.len())
+            .unwrap();
+        assert_eq!(counted_shares, 0);
+    }
+
+    #[tokio::test]
+    async fn unauthorized_submit_returns_false_without_erroring() {
+        let (downstream, mut rx_outgoing, stats_sender) = test_downstream(vec![], 4, None).await;
+
+        assert_invalid_submit_is_rejected(
+            downstream,
+            &mut rx_outgoing,
+            &stats_sender,
+            client_to_server::Submit {
+                user_name: "intruder".to_string(),
+                job_id: "42".to_string(),
+                extra_nonce2: Extranonce::try_from(vec![1_u8; 4]).unwrap(),
+                time: HexU32Be(5609),
+                nonce: HexU32Be(2),
+                version_bits: None,
+                id: 8,
+            },
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn invalid_version_bits_submit_returns_false_without_erroring() {
+        let (downstream, mut rx_outgoing, stats_sender) =
+            test_downstream(vec!["worker".to_string()], 4, Some(HexU32Be(0x0000_0001))).await;
+
+        assert_invalid_submit_is_rejected(
+            downstream,
+            &mut rx_outgoing,
+            &stats_sender,
+            client_to_server::Submit {
+                user_name: "worker".to_string(),
+                job_id: "42".to_string(),
+                extra_nonce2: Extranonce::try_from(vec![1_u8; 4]).unwrap(),
+                time: HexU32Be(5609),
+                nonce: HexU32Be(3),
+                version_bits: Some(HexU32Be(0x0000_0002)),
+                id: 9,
+            },
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn invalid_submit_reason_reports_extranonce_length() {
+        let (downstream, _rx_outgoing, _stats_sender) =
+            test_downstream(vec!["worker".to_string()], 4, None).await;
+        let message: json_rpc::Message = client_to_server::Submit {
+            user_name: "worker".to_string(),
+            job_id: "42".to_string(),
+            extra_nonce2: Extranonce::try_from(vec![1_u8]).unwrap(),
+            time: HexU32Be(5609),
+            nonce: HexU32Be(1),
+            version_bits: None,
+            id: 7,
+        }
+        .into();
+
+        let reason = downstream
+            .safe_lock(|d| d.invalid_submit_reason(&message))
+            .unwrap();
+
+        assert_eq!(reason, "invalid extranonce2 length: expected 4, got 1");
+    }
+
+    #[tokio::test]
+    async fn invalid_submit_reason_reports_unauthorized_worker() {
+        let (downstream, _rx_outgoing, _stats_sender) = test_downstream(vec![], 4, None).await;
+        let message: json_rpc::Message = client_to_server::Submit {
+            user_name: "intruder".to_string(),
+            job_id: "42".to_string(),
+            extra_nonce2: Extranonce::try_from(vec![1_u8; 4]).unwrap(),
+            time: HexU32Be(5609),
+            nonce: HexU32Be(2),
+            version_bits: None,
+            id: 8,
+        }
+        .into();
+
+        let reason = downstream
+            .safe_lock(|d| d.invalid_submit_reason(&message))
+            .unwrap();
+
+        assert_eq!(reason, "unauthorized worker `intruder`");
+    }
+
+    #[tokio::test]
+    async fn invalid_submit_reason_reports_version_bits() {
+        let (downstream, _rx_outgoing, _stats_sender) =
+            test_downstream(vec!["worker".to_string()], 4, Some(HexU32Be(0x0000_0001))).await;
+        let message: json_rpc::Message = client_to_server::Submit {
+            user_name: "worker".to_string(),
+            job_id: "42".to_string(),
+            extra_nonce2: Extranonce::try_from(vec![1_u8; 4]).unwrap(),
+            time: HexU32Be(5609),
+            nonce: HexU32Be(3),
+            version_bits: Some(HexU32Be(0x0000_0002)),
+            id: 9,
+        }
+        .into();
+
+        let reason = downstream
+            .safe_lock(|d| d.invalid_submit_reason(&message))
+            .unwrap();
+
+        assert_eq!(
+            reason,
+            "invalid version_bits `00000002` for version-rolling mask `00000001`"
+        );
+    }
+}

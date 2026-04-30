@@ -53,6 +53,12 @@ struct Args {
     max_active_downstreams: Option<usize>,
     #[clap(long)]
     accept_backoff_ms: Option<u64>,
+    #[clap(long)]
+    accept_backlog: Option<u32>,
+    #[clap(long)]
+    max_accepts_per_window: Option<usize>,
+    #[clap(long)]
+    accept_window_ms: Option<u64>,
     #[clap(long = "config", short = 'c')]
     config_file: Option<PathBuf>,
     #[clap(long = "api-server-port", short = 's')]
@@ -84,6 +90,9 @@ struct ConfigFile {
     listening_addr: Option<String>,
     max_active_downstreams: Option<usize>,
     accept_backoff_ms: Option<u64>,
+    accept_backlog: Option<u32>,
+    max_accepts_per_window: Option<usize>,
+    accept_window_ms: Option<u64>,
     api_server_port: Option<String>,
     monitor: Option<bool>,
     auto_update: Option<bool>,
@@ -108,6 +117,9 @@ impl ConfigFile {
             listening_addr: None,
             max_active_downstreams: None,
             accept_backoff_ms: None,
+            accept_backlog: None,
+            max_accepts_per_window: None,
+            accept_window_ms: None,
             api_server_port: None,
             monitor: None,
             auto_update: None,
@@ -134,6 +146,9 @@ pub struct Configuration {
     listening_addr: Option<String>,
     max_active_downstreams: Option<usize>,
     accept_backoff_ms: u64,
+    accept_backlog: u32,
+    max_accepts_per_window: Option<usize>,
+    accept_window_ms: u64,
     api_server_port: String,
     monitor: bool,
     auto_update: bool,
@@ -159,6 +174,9 @@ impl Configuration {
         listening_addr: Option<String>,
         max_active_downstreams: Option<usize>,
         accept_backoff_ms: u64,
+        accept_backlog: u32,
+        max_accepts_per_window: Option<usize>,
+        accept_window_ms: u64,
         api_server_port: String,
         monitor: bool,
         auto_update: bool,
@@ -182,6 +200,9 @@ impl Configuration {
             listening_addr,
             max_active_downstreams,
             accept_backoff_ms,
+            accept_backlog,
+            max_accepts_per_window,
+            accept_window_ms,
             api_server_port,
             monitor,
             auto_update,
@@ -213,7 +234,10 @@ impl Configuration {
             false,
             true,
             None,
-            None,
+            Some(8000),
+            250,
+            16_384,
+            Some(512),
             250,
             "3001".to_string(),
             false,
@@ -283,6 +307,20 @@ impl Configuration {
 
     pub fn accept_backoff_ms() -> u64 {
         Self::cfg().accept_backoff_ms
+    }
+
+    pub fn accept_backlog() -> u32 {
+        Self::cfg().accept_backlog
+    }
+
+    pub fn max_accepts_per_window() -> Option<usize> {
+        Self::cfg()
+            .max_accepts_per_window
+            .filter(|value| *value > 0)
+    }
+
+    pub fn accept_window_ms() -> u64 {
+        Self::cfg().accept_window_ms
     }
 
     pub fn api_server_port() -> String {
@@ -477,12 +515,41 @@ impl Configuration {
                     .ok()
                     .and_then(|s| s.parse().ok())
             })
+            .or(Some(8000))
             .filter(|value| *value > 0);
         let accept_backoff_ms = args
             .accept_backoff_ms
             .or(config.accept_backoff_ms)
             .or_else(|| {
                 std::env::var("ACCEPT_BACKOFF_MS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+            })
+            .unwrap_or(250);
+        let accept_backlog = args
+            .accept_backlog
+            .or(config.accept_backlog)
+            .or_else(|| {
+                std::env::var("ACCEPT_BACKLOG")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+            })
+            .unwrap_or(16_384);
+        let max_accepts_per_window = args
+            .max_accepts_per_window
+            .or(config.max_accepts_per_window)
+            .or_else(|| {
+                std::env::var("MAX_ACCEPTS_PER_WINDOW")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+            })
+            .or(Some(512))
+            .filter(|value| *value > 0);
+        let accept_window_ms = args
+            .accept_window_ms
+            .or(config.accept_window_ms)
+            .or_else(|| {
+                std::env::var("ACCEPT_WINDOW_MS")
                     .ok()
                     .and_then(|s| s.parse().ok())
             })
@@ -548,6 +615,9 @@ impl Configuration {
             listening_addr,
             max_active_downstreams,
             accept_backoff_ms,
+            accept_backlog,
+            max_accepts_per_window,
+            accept_window_ms,
             api_server_port,
             monitor,
             auto_update,

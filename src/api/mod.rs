@@ -29,6 +29,7 @@ pub(crate) async fn start(
         .route("/api/pool/info", get(Api::get_pool_info))
         .route("/api/stats/miners", get(Api::get_downstream_stats))
         .route("/api/stats/aggregate", get(Api::get_aggregate_stats))
+        .route("/api/stats/session-timing", get(Api::get_session_timing))
         .route("/api/stats/system", get(Api::system_stats))
         .with_state(state);
 

@@ -54,8 +54,13 @@ impl StatsSender {
         }
     }
 
-    pub fn setup_stats(&self, connection_id: u32) {
-        self.send(StatsCommand::SetupStats(connection_id));
+    async fn send_reliable(&self, command: StatsCommand) -> Result<(), String> {
+        self.sender.send(command).await.map_err(|e| e.to_string())
+    }
+
+    pub async fn setup_stats_reliable(&self, connection_id: u32) -> Result<(), String> {
+        self.send_reliable(StatsCommand::SetupStats(connection_id))
+            .await
     }
 
     pub fn update_hashrate(&self, connection_id: u32, hashrate: f32) {
@@ -78,8 +83,9 @@ impl StatsSender {
         self.send(StatsCommand::UpdateDeviceName(connection_id, name));
     }
 
-    pub fn remove_stats(&self, connection_id: u32) {
-        self.send(StatsCommand::RemoveStats(connection_id));
+    pub async fn remove_stats_reliable(&self, connection_id: u32) -> Result<(), String> {
+        self.send_reliable(StatsCommand::RemoveStats(connection_id))
+            .await
     }
 
     pub async fn collect_stats(&self) -> Result<HashMap<u32, DownstreamConnectionStats>, String> {

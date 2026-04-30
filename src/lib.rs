@@ -28,6 +28,7 @@ use tracing::{error, info, warn};
 mod api;
 mod auto_update;
 mod config;
+mod debug_timing;
 mod ingress;
 pub use config::Configuration;
 pub mod jd_client;
@@ -40,7 +41,10 @@ mod shared;
 mod shutdown;
 mod translator;
 
-const TRANSLATOR_BUFFER_SIZE: usize = 32;
+const TRANSLATOR_BUFFER_SIZE: usize = 128;
+const DOWNSTREAM_ACCEPT_BUFFER_SIZE: usize = 1024;
+const DOWNSTREAM_INIT_CONCURRENCY: usize = 512;
+const DOWNSTREAM_TASK_MANAGER_BUFFER_SIZE: usize = 128_000;
 const MIN_EXTRANONCE_SIZE: u16 = 6;
 const MIN_EXTRANONCE2_SIZE: u16 = 5;
 const UPSTREAM_EXTRANONCE1_SIZE: usize = 20;
@@ -55,11 +59,12 @@ const LOCAL_URL: &str = "http://localhost:8787";
 const TESTNET3_URL: &str = "https://testnet3-user-dashboard-server.dmnd.work";
 const PRODUCTION_URL: &str = "https://production-user-dashboard-server.dmnd.work";
 
-pub(crate) type DownstreamConnection = (
-    tokio::sync::mpsc::Sender<String>,
-    tokio::sync::mpsc::Receiver<String>,
-    std::net::IpAddr,
-);
+pub(crate) struct DownstreamConnection {
+    pub send_to_downstream: tokio::sync::mpsc::Sender<String>,
+    pub recv_from_downstream: tokio::sync::mpsc::Receiver<String>,
+    pub address: std::net::IpAddr,
+    pub accepted_at: std::time::Instant,
+}
 pub(crate) type DownstreamHandoffSender = tokio::sync::mpsc::Sender<DownstreamConnection>;
 
 lazy_static! {
@@ -219,7 +224,7 @@ async fn initialize_proxy(
             }
         };
 
-        let (downs_sv1_tx, downs_sv1_rx) = channel(crate::TRANSLATOR_BUFFER_SIZE);
+        let (downs_sv1_tx, downs_sv1_rx) = channel(crate::DOWNSTREAM_ACCEPT_BUFFER_SIZE);
         let downstream_handoff = downs_sv1_tx.clone();
         let sv1_ingress_abortable = ingress::sv1_ingress::start_listen_for_downstream(downs_sv1_tx);
 
