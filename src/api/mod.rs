@@ -34,7 +34,12 @@ pub(crate) async fn start(
         router,
         stats_sender,
         downstream_handoff,
-        rpc: Arc::new(BitcoindRpc::new(rpc_url, rpc_user, rpc_pwd)),
+        rpc: Arc::new(BitcoindRpc::new(
+            rpc_url,
+            rpc_user,
+            rpc_pwd,
+            Configuration::rpc_fee_delta(),
+        )),
     };
     let app = AxumRouter::new()
         .route("/api/health", get(Api::health_check))
