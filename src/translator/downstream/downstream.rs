@@ -128,6 +128,7 @@ pub struct Downstream {
     tx_update_token: Sender<String>,
     pub session_timing: std::cell::RefCell<DownstreamSessionTiming>,
     submit_counts_for_diff: Cell<bool>,
+    closed: Cell<bool>,
 }
 
 impl Downstream {
@@ -219,6 +220,7 @@ impl Downstream {
             tx_update_token,
             session_timing: std::cell::RefCell::new(DownstreamSessionTiming::new(accepted_at)),
             submit_counts_for_diff: Cell::new(false),
+            closed: Cell::new(false),
         }));
 
         if let Err(e) = start_receive_downstream(
@@ -249,7 +251,18 @@ impl Downstream {
         // Notify/bootstrap and share-monitor startup are not required before the miner can
         // receive subscribe/authorize responses. Defer them off the connection-open critical
         // path so startup slots are held only for the bidirectional SV1 relay tasks.
-        tokio::spawn(async move {
+        let bootstrap_registration_manager = task_manager.clone();
+        let bootstrap_handle = tokio::spawn(async move {
+            let should_skip_bootstrap =
+                downstream.safe_lock(|d| d.is_closed()).unwrap_or_else(|e| {
+                    error!("Failed to read downstream closed state for bootstrap: {e}");
+                    ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+                    true
+                });
+            if should_skip_bootstrap {
+                return;
+            }
+
             if let Err(e) = start_notify(
                 task_manager.clone(),
                 downstream.clone(),
@@ -263,6 +276,16 @@ impl Downstream {
                 ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
             };
 
+            let should_skip_share_monitor =
+                downstream.safe_lock(|d| d.is_closed()).unwrap_or_else(|e| {
+                    error!("Failed to read downstream closed state before share monitor: {e}");
+                    ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+                    true
+                });
+            if should_skip_share_monitor {
+                return;
+            }
+
             if let Err(e) =
                 Self::start_share_monitor(task_manager.clone(), downstream.clone()).await
             {
@@ -270,6 +293,16 @@ impl Downstream {
                 ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
             }
         });
+        if let Err(e) = TaskManager::add_bootstrap(
+            bootstrap_registration_manager,
+            bootstrap_handle.into(),
+            connection_id,
+        )
+        .await
+        {
+            error!("Failed to register bootstrap task for downstream {connection_id}: {e:?}");
+            ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+        }
     }
 
     /// Starts the shares monitor task.
@@ -277,6 +310,11 @@ impl Downstream {
         task_manager: Arc<Mutex<TaskManager>>,
         downstream: Arc<Mutex<Self>>,
     ) -> Result<(), Error<'static>> {
+        let is_closed = downstream.safe_lock(|s| s.is_closed())?;
+        if is_closed {
+            return Ok(());
+        }
+
         let (share_monitor, connection_id) =
             downstream.safe_lock(|s| (s.share_monitor.clone(), s.connection_id))?;
 
@@ -546,6 +584,7 @@ impl Downstream {
                 std::time::Instant::now(),
             )),
             submit_counts_for_diff: Cell::new(false),
+            closed: Cell::new(false),
         }
     }
 
@@ -555,6 +594,14 @@ impl Downstream {
 
     pub(super) fn take_submit_diff_count_flag(&self) -> bool {
         self.submit_counts_for_diff.replace(false)
+    }
+
+    pub(super) fn mark_closed(&self) {
+        self.closed.set(true);
+    }
+
+    pub(super) fn is_closed(&self) -> bool {
+        self.closed.get()
     }
 }
 

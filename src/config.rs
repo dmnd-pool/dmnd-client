@@ -234,7 +234,7 @@ impl Configuration {
             false,
             true,
             None,
-            Some(8000),
+            Some(8001),
             250,
             16_384,
             Some(512),
@@ -515,7 +515,7 @@ impl Configuration {
                     .ok()
                     .and_then(|s| s.parse().ok())
             })
-            .or(Some(8000))
+            .or(Some(8001))
             .filter(|value| *value > 0);
         let accept_backoff_ms = args
             .accept_backoff_ms

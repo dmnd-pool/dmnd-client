@@ -31,6 +31,11 @@ pub async fn start_notify(
     host: String,
     connection_id: u32,
 ) -> Result<(), Error<'static>> {
+    let is_closed = downstream.safe_lock(|d| d.is_closed())?;
+    if is_closed {
+        return Ok(());
+    }
+
     let handle = {
         let task_manager = task_manager.clone();
         let (upstream_difficulty_config, stats_sender, latest_diff) =
@@ -46,6 +51,21 @@ pub async fn start_notify(
         if let Err(e) = stats_sender.setup_stats_reliable(connection_id).await {
             error!("Failed to register downstream stats {connection_id}: {e}");
         }
+
+        let is_closed = downstream.safe_lock(|d| d.is_closed())?;
+        if is_closed {
+            if let Err(e) = stats_sender.remove_stats_reliable(connection_id).await {
+                error!("Failed to rollback downstream stats {connection_id}: {e}");
+            }
+            upstream_difficulty_config.safe_lock(|u| {
+                u.channel_nominal_hashrate -= f32::min(
+                    Configuration::downstream_hashrate(),
+                    u.channel_nominal_hashrate,
+                );
+            })?;
+            return Ok(());
+        }
+
         task::spawn(async move {
             let timeout_timer = std::time::Instant::now();
             let mut authorized_in_time = true;

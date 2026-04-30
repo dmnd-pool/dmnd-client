@@ -68,6 +68,9 @@ pub async fn start_receive_downstream(
                     return;
                 }
             }
+            if let Err(e) = downstream.safe_lock(|d| d.mark_closed()) {
+                error!("Failed to mark downstream {connection_id} closed: {e}");
+            }
             let stats_sender = downstream.safe_lock(|d| d.stats_sender.clone()).ok();
             if let Some(stats_sender) = stats_sender {
                 if let Err(e) = stats_sender.remove_stats_reliable(connection_id).await {

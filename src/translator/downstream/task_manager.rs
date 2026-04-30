@@ -8,6 +8,7 @@ use tracing::{debug, warn};
 #[allow(dead_code)]
 enum Task {
     AcceptConnection(AbortOnDrop),
+    Bootstrap(AbortOnDrop),
     ReceiveDownstream(AbortOnDrop),
     SendDownstream(AbortOnDrop),
     Notify(AbortOnDrop),
@@ -102,6 +103,17 @@ impl TaskManager {
             .await
             .map_err(|_| ())
     }
+    pub async fn add_bootstrap(
+        self_: Arc<Mutex<Self>>,
+        abortable: AbortOnDrop,
+        connection_id: u32,
+    ) -> Result<(), ()> {
+        let send_task = self_.safe_lock(|s| s.send_task.clone()).unwrap();
+        send_task
+            .send((Some(connection_id), Task::Bootstrap(abortable)))
+            .await
+            .map_err(|_| ())
+    }
     pub async fn add_update(
         self_: Arc<Mutex<Self>>,
         abortable: AbortOnDrop,
@@ -163,6 +175,7 @@ impl From<Task> for AbortOnDrop {
     fn from(task: Task) -> Self {
         match task {
             Task::AcceptConnection(handle) => handle,
+            Task::Bootstrap(handle) => handle,
             Task::ReceiveDownstream(handle) => handle,
             Task::SendDownstream(handle) => handle,
             Task::Notify(handle) => handle,
