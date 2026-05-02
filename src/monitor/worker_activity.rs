@@ -1,12 +1,10 @@
-use crate::monitor::{worker_activity_server_endpoint, MonitorAPI};
-
-#[derive(serde::Serialize, Debug)]
+#[derive(serde::Serialize, Debug, Clone, Copy, Eq, PartialEq)]
 pub enum WorkerActivityType {
     Connected,
     Disconnected,
 }
 
-#[derive(serde::Serialize, Debug)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct WorkerActivity {
     user_agent: String,
     worker_name: String,
@@ -22,7 +20,12 @@ impl WorkerActivity {
         }
     }
 
-    pub fn monitor_api(&self) -> MonitorAPI {
-        MonitorAPI::new(worker_activity_server_endpoint())
+    pub(crate) fn worker_name(&self) -> &str {
+        &self.worker_name
+    }
+
+    #[cfg(test)]
+    pub(crate) fn activity(&self) -> WorkerActivityType {
+        self.activity
     }
 }

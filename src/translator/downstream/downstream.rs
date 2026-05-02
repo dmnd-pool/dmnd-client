@@ -4,7 +4,7 @@ use crate::{
     debug_timing::DownstreamSessionTiming,
     monitor::{
         shares::{RejectionReason, ShareInfo, SharesMonitor},
-        worker_activity::{WorkerActivity, WorkerActivityType},
+        MonitorAPI,
     },
     proxy_state::{DownstreamType, ProxyState, UpstreamType},
     share_log_enabled,
@@ -700,21 +700,12 @@ impl IsServer<'static> for Downstream {
                 String::new()
             });
             let user_agent = self.user_agent.borrow().clone();
-            let worker_activity = WorkerActivity::new(
+            MonitorAPI::worker_connected(
+                self.connection_id,
                 user_agent,
                 request.name.clone(),
-                WorkerActivityType::Connected,
+                token,
             );
-
-            tokio::spawn(async move {
-                if let Err(e) = worker_activity
-                    .monitor_api()
-                    .send_worker_activity(worker_activity, &token)
-                    .await
-                {
-                    error!("Failed to send worker activity: {}", e);
-                }
-            });
 
             self.session_timing
                 .borrow_mut()

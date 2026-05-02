@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use crate::{
-    monitor::{shares_server_endpoint, MonitorAPI},
+    monitor::MonitorAPI,
     proxy_state::{DownstreamType, ProxyState},
 };
 
@@ -95,7 +95,7 @@ impl SharesMonitor {
     }
 
     pub async fn monitor(&self) {
-        let api = MonitorAPI::new(shares_server_endpoint());
+        let api = MonitorAPI::shares();
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(SHARE_BATCH_INTERVAL_SECS));
 
@@ -115,7 +115,7 @@ impl SharesMonitor {
             let mut failed: Vec<ShareInfo> = Vec::new();
 
             for chunk in pending.chunks(SHARES_PER_REQUEST) {
-                match api.send_shares(chunk.to_vec(), &token).await {
+                match api.send_shares(chunk, &token).await {
                     Ok(_) => sent += chunk.len(),
                     Err(err) => {
                         warn!(
