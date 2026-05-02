@@ -1,9 +1,5 @@
 use super::{downstream::Downstream, task_manager::TaskManager};
-use crate::{
-    monitor::worker_activity::{WorkerActivity, WorkerActivityType},
-    proxy_state::ProxyState,
-    translator::error::Error,
-};
+use crate::{monitor::MonitorAPI, proxy_state::ProxyState, translator::error::Error};
 use roles_logic_sv2::utils::Mutex;
 use std::sync::Arc;
 use sv1_api::json_rpc;
@@ -87,41 +83,21 @@ pub async fn start_receive_downstream(
                 error!("Failed to remove downstream hashrate from channel: {}", e)
             };
 
-            let (worker_name, user_agent, token_handle) = downstream
+            let (worker_name, user_agent) = downstream
                 .safe_lock(|d| {
                     (
                         d.authorized_names.first().cloned().unwrap_or_default(),
                         d.user_agent.borrow().clone(),
-                        d.token.clone(),
                     )
                 })
                 .unwrap_or_else(|e| {
                     error!("Failed to lock downstream: {:?}", e);
                     ProxyState::update_inconsistency(Some(1));
-                    (
-                        "unknown".to_string(),
-                        "unknown".to_string(),
-                        Arc::new(Mutex::new(String::new())),
-                    )
+                    ("unknown".to_string(), "unknown".to_string())
                 });
 
-            let token = token_handle.safe_lock(|t| t.clone()).unwrap_or_else(|e| {
-                error!("Failed to lock token: {:?}", e);
-                ProxyState::update_inconsistency(Some(1));
-                String::new()
-            });
-
             if !worker_name.is_empty() {
-                let worker_activity =
-                    WorkerActivity::new(user_agent, worker_name, WorkerActivityType::Disconnected);
-
-                worker_activity
-                    .monitor_api()
-                    .send_worker_activity(worker_activity, &token)
-                    .await
-                    .unwrap_or_else(|e| {
-                        error!("Failed to send worker activity: {}", e);
-                    });
+                MonitorAPI::worker_disconnected(connection_id, user_agent);
             }
 
             // Apparently there is no way to make the compiler happy without unwrapping here. But
