@@ -1,7 +1,7 @@
 use super::{Downstream, DownstreamMessages, SetDownstreamTarget};
 use pid::Pid;
 use roles_logic_sv2::{self, utils::from_u128_to_u256};
-use sv1_api::{self, methods::server_to_client::SetDifficulty};
+use sv1_api::{self};
 
 use super::super::error::{Error, ProxyResult};
 use primitive_types::U256;
@@ -13,7 +13,8 @@ use sv1_api::json_rpc;
 
 use tracing::{error, info};
 
-pub const NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY: f32 = 100_000.0;
+// Keep the non-local floor aligned with the power-of-two downstream difficulty policy.
+pub const NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY: f32 = 131_072.0;
 
 impl Downstream {
     /// Initializes difficult managment.
@@ -244,39 +245,30 @@ impl Downstream {
             })?;
 
         let pid_output = pid.next_control_output(realized_share_per_min).output;
-        let new_difficulty = clamp_downstream_difficulty_to_floor(
+        let new_difficulty = quantize_downstream_difficulty(
             (latest_difficulty + pid_output).max(initial_difficulty * 0.1),
             hard_minimum_difficulty,
         );
-        let nearest = nearest_power_of_10(new_difficulty);
-        if nearest != initial_difficulty {
-            let mut pid: Pid<f32> = Pid::new(*crate::SHARE_PER_MIN, nearest * 10.0);
-            let pk = -nearest * 0.01;
+        if new_difficulty == latest_difficulty {
+            return Ok(None);
+        }
+
+        if new_difficulty != initial_difficulty {
+            let mut pid: Pid<f32> = Pid::new(*crate::SHARE_PER_MIN, new_difficulty * 10.0);
+            let pk = -new_difficulty * 0.01;
             //let pi = initial_difficulty * 0.1;
             //let pd = initial_difficulty * 0.01;
             pid.p(pk, f32::MAX).i(0.0, f32::MAX).d(0.0, f32::MAX);
             self_.safe_lock(|d| {
-                d.difficulty_mgmt.initial_difficulty = nearest;
+                d.difficulty_mgmt.initial_difficulty = new_difficulty;
                 d.difficulty_mgmt.pid_controller = pid;
             })?;
-
-            let new_estimation =
-                Self::estimate_hash_rate_from_difficulty(nearest, *crate::SHARE_PER_MIN);
-            Self::update_self_with_new_hash_rate(self_, new_estimation, nearest)?;
-            Ok(Some(nearest))
-        } else {
-            // TODO check if we can improve stale share with a threshold here
-            let threshold = 0.0;
-            let change = (new_difficulty - latest_difficulty).abs() / latest_difficulty;
-            if change > threshold {
-                let new_estimation =
-                    Self::estimate_hash_rate_from_difficulty(new_difficulty, *crate::SHARE_PER_MIN);
-                Self::update_self_with_new_hash_rate(self_, new_estimation, new_difficulty)?;
-                Ok(Some(new_difficulty))
-            } else {
-                Ok(None)
-            }
         }
+
+        let new_estimation =
+            Self::estimate_hash_rate_from_difficulty(new_difficulty, *crate::SHARE_PER_MIN);
+        Self::update_self_with_new_hash_rate(self_, new_estimation, new_difficulty)?;
+        Ok(Some(new_difficulty))
     }
 
     /// Estimates a miner's hash rate from its difficulty and share submission rate.
@@ -323,18 +315,34 @@ impl Downstream {
 // Converts difficulty to SV1 `SetDifficulty` message and corresponding target.
 /// Returns JSON-RPC message and the target.
 fn diff_to_sv1_message(diff: f64) -> ProxyResult<'static, (json_rpc::Message, [u8; 32])> {
-    let set_difficulty = SetDifficulty { value: diff };
-    let message: json_rpc::Message = set_difficulty.into();
+    let message: json_rpc::Message = json_rpc::Notification {
+        method: "mining.set_difficulty".to_string(),
+        params: serde_json::Value::Array(vec![downstream_difficulty_param(diff)]),
+    }
+    .into();
     let target = Downstream::difficulty_to_target(diff as f32);
     Ok((message, target))
 }
 
-pub fn nearest_power_of_10(x: f32) -> f32 {
-    if x <= 0.0 {
-        return 0.001;
+fn downstream_difficulty_param(diff: f64) -> serde_json::Value {
+    let rounded = diff.round();
+    if diff.is_finite()
+        && diff >= 0.0
+        && rounded <= u64::MAX as f64
+        && (diff - rounded).abs() <= f64::EPSILON * rounded.abs().max(1.0) * 8.0
+    {
+        serde_json::Value::from(rounded as u64)
+    } else {
+        serde_json::Value::from(diff)
     }
-    let exponent = x.log10().round() as i32;
-    10f32.powi(exponent)
+}
+
+pub fn nearest_power_of_2(x: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.000_976_562_5;
+    }
+    let exponent = x.log2().round() as i32;
+    2f32.powi(exponent)
 }
 
 pub fn hard_minimum_difficulty_for_proxy_mode(local_mode: bool) -> Option<f32> {
@@ -352,11 +360,22 @@ pub fn clamp_downstream_difficulty_to_floor(
     hard_minimum_difficulty.map_or(difficulty, |minimum| difficulty.max(minimum))
 }
 
+pub fn quantize_downstream_difficulty(
+    difficulty: f32,
+    hard_minimum_difficulty: Option<f32>,
+) -> f32 {
+    nearest_power_of_2(clamp_downstream_difficulty_to_floor(
+        difficulty,
+        hard_minimum_difficulty,
+    ))
+}
+
 #[cfg(test)]
 mod test {
     use super::super::super::upstream::diff_management::UpstreamDifficultyConfig;
     use super::{
-        clamp_downstream_difficulty_to_floor, hard_minimum_difficulty_for_proxy_mode,
+        clamp_downstream_difficulty_to_floor, diff_to_sv1_message,
+        hard_minimum_difficulty_for_proxy_mode, nearest_power_of_2, quantize_downstream_difficulty,
         NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY,
     };
     use crate::translator::downstream::{downstream::DownstreamDifficultyConfig, Downstream};
@@ -463,11 +482,35 @@ mod test {
     fn get_diff(hashrate: f32) -> f32 {
         let share_per_second = *crate::SHARE_PER_MIN / 60.0;
         let initial_difficulty = hashrate / (share_per_second * 2f32.powf(32.0));
-        crate::translator::downstream::diff_management::nearest_power_of_10(initial_difficulty)
+        crate::translator::downstream::diff_management::nearest_power_of_2(initial_difficulty)
     }
 
     #[test]
-    fn non_local_proxy_mode_floor_is_100k() {
+    fn downstream_difficulties_are_quantized_to_powers_of_two() {
+        assert_eq!(nearest_power_of_2(1.0), 1.0);
+        assert_eq!(nearest_power_of_2(3.0), 4.0);
+        assert_eq!(nearest_power_of_2(12.0), 16.0);
+        assert_eq!(nearest_power_of_2(0.2), 0.25);
+
+        assert_eq!(
+            quantize_downstream_difficulty(10_000.0, Some(NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY)),
+            NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY
+        );
+    }
+
+    #[test]
+    fn integer_difficulty_serializes_without_decimal_point() {
+        let (message, _) = diff_to_sv1_message(NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY as f64).unwrap();
+        let message = serde_json::to_value(message).unwrap();
+
+        assert_eq!(
+            message["params"][0],
+            serde_json::json!(NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY as u64)
+        );
+    }
+
+    #[test]
+    fn non_local_proxy_mode_floor_is_power_of_two() {
         assert_eq!(
             hard_minimum_difficulty_for_proxy_mode(false),
             Some(NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY)
