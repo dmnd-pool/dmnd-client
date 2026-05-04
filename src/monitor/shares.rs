@@ -136,12 +136,14 @@ impl SharesMonitor {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum RejectionReason {
     JobIdNotFound,
     InvalidShare,
     InvalidJobIdFormat,
     DifficultyMismatch,
+    UpstreamRejected,
+    RateLimited,
 }
 
 impl std::fmt::Display for RejectionReason {
@@ -151,6 +153,8 @@ impl std::fmt::Display for RejectionReason {
             RejectionReason::InvalidShare => write!(f, "Invalid share"),
             RejectionReason::InvalidJobIdFormat => write!(f, "Invalid job ID format"),
             RejectionReason::DifficultyMismatch => write!(f, "Difficulty mismatch"),
+            RejectionReason::UpstreamRejected => write!(f, "Upstream rejected share"),
+            RejectionReason::RateLimited => write!(f, "Share rate limited"),
         }
     }
 }

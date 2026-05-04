@@ -5,6 +5,7 @@ use std::{
 
 use crate::{
     config::Configuration,
+    monitor::shares::RejectionReason,
     proxy_state::{DownstreamType, ProxyState},
     share_log_enabled,
     translator::error::Error,
@@ -110,10 +111,10 @@ pub fn allow_submit_share() -> crate::translator::error::ProxyResult<'static, bo
 pub fn validate_share(
     request: &client_to_server::Submit<'static>,
     job: &Notify<'static>,
-    difficulties: &VecDeque<f32>,
+    difficulty: f32,
     extranonce1: Vec<u8>,
     version_rolling_mask: Option<sv1_api::utils::HexU32Be>,
-) -> Option<f32> {
+) -> bool {
     if share_log_enabled() {
         info!(
             "Validating share from request {} and job {}",
@@ -126,7 +127,7 @@ pub fn validate_share(
         Ok(hash) => hash,
         Err(e) => {
             error!("Share rejected: Invalid previous hash: {:?}", e);
-            return None;
+            return false;
         }
     };
     let mut merkle_branch = Vec::new();
@@ -164,25 +165,39 @@ pub fn validate_share(
     if share_log_enabled() {
         info!("Share Hash: {:?}", hash.to_vec().as_hex());
     }
-    // Check against difficulties from latest to earliest
-    // TODO: This is not a sound check - We should check against the difficulty of the specific job
-    for &difficulty in difficulties.iter().rev() {
-        let target = Downstream::difficulty_to_target(difficulty);
-        debug!(
-            "Checking difficulty: {}, Target: {:?}",
-            difficulty,
-            target.to_vec().as_hex()
-        );
-        if hash <= target {
-            if share_log_enabled() {
-                info!("Share met Target: {:?}", target.to_vec().as_hex());
-            }
-            return Some(difficulty); // Return the difficulty met
+    let target = Downstream::difficulty_to_target(difficulty);
+    debug!(
+        "Checking job difficulty: {}, Target: {:?}",
+        difficulty,
+        target.to_vec().as_hex()
+    );
+    if hash <= target {
+        if share_log_enabled() {
+            info!("Share met Target: {:?}", target.to_vec().as_hex());
         }
+        return true;
     }
 
-    error!("Share rejected: Does not meet any difficulty");
-    None // Share does not meet any difficulty
+    error!("Share rejected: Does not meet job difficulty");
+    false
+}
+
+pub fn submit_error_to_rejection_reason(error_code: &str) -> RejectionReason {
+    match error_code {
+        code if code
+            == roles_logic_sv2::mining_sv2::SubmitSharesError::difficulty_too_low_error_code() =>
+        {
+            RejectionReason::DifficultyMismatch
+        }
+        code if code
+            == roles_logic_sv2::mining_sv2::SubmitSharesError::stale_share_error_code()
+            || code
+                == roles_logic_sv2::mining_sv2::SubmitSharesError::invalid_job_id_error_code() =>
+        {
+            RejectionReason::JobIdNotFound
+        }
+        _ => RejectionReason::UpstreamRejected,
+    }
 }
 
 pub fn get_hash(

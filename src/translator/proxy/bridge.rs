@@ -18,7 +18,10 @@ use tokio::sync::broadcast;
 
 use super::{
     super::{
-        downstream::{DownstreamMessages, SetDownstreamTarget, SubmitShareWithChannelId},
+        downstream::{
+            DownstreamMessages, SetDownstreamTarget, SubmitShareResult, SubmitShareWithChannelId,
+            UpstreamSubmitShare,
+        },
         error::{Error, ProxyResult},
     },
     task_manager::TaskManager,
@@ -27,7 +30,7 @@ use crate::{
     proxy_state::{ProxyState, TranslatorState, UpstreamType},
     share_log_enabled,
     shared::utils::AbortOnDrop,
-    translator::utils::allow_submit_share,
+    translator::utils::{allow_submit_share, submit_error_to_rejection_reason},
 };
 use lazy_static::lazy_static;
 use roles_logic_sv2::{channel_logic::channel_factory::OnNewShare, Error as RolesLogicError};
@@ -45,7 +48,7 @@ lazy_static! {
 pub struct Bridge {
     /// Sends SV2 `SubmitSharesExtended` messages translated from SV1 `mining.submit` messages to
     /// the `Upstream`.
-    tx_sv2_submit_shares_ext: tokio::sync::mpsc::Sender<SubmitSharesExtended<'static>>,
+    tx_sv2_submit_shares_ext: tokio::sync::mpsc::Sender<UpstreamSubmitShare>,
     /// Sends SV1 `mining.notify` message (translated from the SV2 `SetNewPrevHash` and
     /// `NewExtendedMiningJob` messages stored in the `NextMiningNotify`) to the `Downstream`.
     tx_sv1_notify: broadcast::Sender<server_to_client::Notify<'static>>,
@@ -80,7 +83,7 @@ impl Bridge {
     #[allow(clippy::too_many_arguments)]
     /// Instantiate a new `Bridge`.
     pub fn new(
-        tx_sv2_submit_shares_ext: tokio::sync::mpsc::Sender<SubmitSharesExtended<'static>>,
+        tx_sv2_submit_shares_ext: tokio::sync::mpsc::Sender<UpstreamSubmitShare>,
         tx_sv1_notify: broadcast::Sender<server_to_client::Notify<'static>>,
         extranonces: ExtendedExtranonce,
         target: Arc<Mutex<Vec<u8>>>,
@@ -242,15 +245,28 @@ impl Bridge {
         Ok(())
     }
 
+    fn resolve_submit(
+        result_tx: tokio::sync::oneshot::Sender<SubmitShareResult>,
+        result: SubmitShareResult,
+    ) {
+        let _ = result_tx.send(result);
+    }
+
     /// receives a `SubmitShareWithChannelId` and validates the shares and sends to `Upstream` if
     /// the share meets the upstream target
     async fn handle_submit_shares(
         self_: Arc<Mutex<Self>>,
         share: SubmitShareWithChannelId,
     ) -> ProxyResult<'static, ()> {
-        let channel_id = share.channel_id;
-        let job_id = share.share.job_id.clone();
-        let share_id = share.share.id;
+        let SubmitShareWithChannelId {
+            channel_id,
+            share,
+            version_rolling_mask,
+            result_tx,
+            ..
+        } = share;
+        let job_id = share.job_id.clone();
+        let share_id = share.id;
         if share_log_enabled() {
             info!(
                 "Bridge received share {:?} for channel {:?} and job {:?}",
@@ -270,9 +286,9 @@ impl Bridge {
         dbg_target.reverse();
         debug!("Pool target: {:?}", dbg_target.as_hex());
         let mut upstream_target: Target = upstream_target.into();
-        let res = self_
+        let translated_share = match self_
             .safe_lock(|s| {
-                let job_id = share.share.job_id.parse::<u32>().expect("Invalid job_id");
+                let job_id = share.job_id.parse::<u32>().expect("Invalid job_id");
                 if s.channel_factory.job(job_id).is_none() {
                     warn!(
                         "Share rejected: job_id {} not in retained job cache",
@@ -281,23 +297,63 @@ impl Bridge {
                     return Err(roles_logic_sv2::Error::ShareDoNotMatchAnyJob); // rejected
                 }
                 s.channel_factory.set_target(&mut upstream_target);
-                match s.translate_submit(share.channel_id, share.share, share.version_rolling_mask)
-                {
-                    Ok(submit_shares_extended) => {
-                        // Ordering::Relaxed is safe here because we only need simple counter updates.
-                        // No need for strict ordering since it just tracks failures.
-                        SUBMIT_FAIL_COUNTER.store(0, Ordering::Relaxed); // Reset on success
-                        s.channel_factory
-                            .on_submit_shares_extended(submit_shares_extended)
-                    }
-                    Err(_) => {
-                        Err(roles_logic_sv2::Error::NoValidJob) // Error will be handled by the caller
-                    }
+                s.translate_submit(channel_id, share.clone(), version_rolling_mask.clone())
+                    .map_err(|_| roles_logic_sv2::Error::NoValidJob)
+            })
+            .map_err(|_| Error::BridgeMutexPoisoned)?
+        {
+            Ok(share) => share,
+            Err(roles_logic_sv2::Error::NoValidJob) => {
+                let count = SUBMIT_FAIL_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+                if count >= 10 {
+                    error!("Failed to translate SV1 mining.submit message to SV2 SubmitSharesExtended message after 10 attempts");
+                    Self::resolve_submit(
+                        result_tx,
+                        Err(crate::monitor::shares::RejectionReason::JobIdNotFound),
+                    );
+                    return Err(Error::RolesSv2Logic(roles_logic_sv2::Error::NoValidJob));
                 }
+                warn!(
+                    "Failed to translate SV1 mining.submit message to SV2 SubmitSharesExtended message, attempt {}",
+                    count
+                );
+                Self::resolve_submit(
+                    result_tx,
+                    Err(crate::monitor::shares::RejectionReason::JobIdNotFound),
+                );
+                return Ok(());
+            }
+            Err(roles_logic_sv2::Error::ShareDoNotMatchAnyJob) => {
+                warn!(
+                    "Channel factory can not get this share's job_id: {}",
+                    job_id
+                );
+                Self::resolve_submit(
+                    result_tx,
+                    Err(crate::monitor::shares::RejectionReason::JobIdNotFound),
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                Self::resolve_submit(
+                    result_tx,
+                    Err(crate::monitor::shares::RejectionReason::UpstreamRejected),
+                );
+                return Err(Error::RolesSv2Logic(e));
+            }
+        };
+
+        let res = self_
+            .safe_lock(|s| {
+                // Ordering::Relaxed is safe here because we only need simple counter updates.
+                // No need for strict ordering since it just tracks failures.
+                SUBMIT_FAIL_COUNTER.store(0, Ordering::Relaxed);
+                s.channel_factory
+                    .on_submit_shares_extended(translated_share.clone())
             })
             .map_err(|_| Error::BridgeMutexPoisoned)?;
 
-        match res {
+        let upstream_share = match res {
             Ok(OnNewShare::SendErrorDownstream(e)) => {
                 let error_code = std::str::from_utf8(&e.error_code.to_vec()[..])
                     .unwrap_or("unparsable error code")
@@ -306,33 +362,23 @@ impl Bridge {
                     "Submit share {} from channel {} and job {} error {}",
                     &share_id, &channel_id, &job_id, error_code
                 );
+                Self::resolve_submit(
+                    result_tx,
+                    Err(submit_error_to_rejection_reason(&error_code)),
+                );
+                return Ok(());
             }
             Ok(OnNewShare::SendSubmitShareUpstream((s, _))) => {
-                if let Ok(is_rate_limited) = allow_submit_share() {
-                    if !is_rate_limited {
-                        warn!("Share will not be sent upstream: Exceeded 70 shares/min limit");
-                        return Ok(());
-                    }
-                    if share_log_enabled() {
-                        info!(
-                            "Share with id {} meets upstream target from channel {} and job {}",
-                            &share_id, &channel_id, &job_id
-                        );
-                    }
-                    match s {
-                        Share::Extended(share) => {
-                            if tx_sv2_submit_shares_ext.send(share).await.is_err() {
-                                error!("Failed to send SubmitShareExtended downstream");
-                                return Err(Error::AsyncChannelError);
-                            }
-                        }
-                        // We are in an extended channel shares are extended
-                        Share::Standard(_) => unreachable!(),
-                    }
-                } else {
-                    error!("Failed to record share: Bridge mutex poisoned");
-                    ProxyState::update_inconsistency(Some(1));
-                    return Err(Error::BridgeMutexPoisoned);
+                if share_log_enabled() {
+                    info!(
+                        "Share with id {} meets upstream target from channel {} and job {}",
+                        &share_id, &channel_id, &job_id
+                    );
+                }
+                match s {
+                    Share::Extended(share) => share,
+                    // We are in an extended channel shares are extended
+                    Share::Standard(_) => unreachable!(),
                 }
             }
             // We are in an extended channel this variant is group channle only
@@ -340,34 +386,55 @@ impl Bridge {
             Ok(OnNewShare::ShareMeetDownstreamTarget) => {
                 if share_log_enabled() {
                     info!(
-                        "Share with id {} meets downstream target from channel {} and job {}",
+                        "Share with id {} meets downstream target from channel {} and job {}; forwarding upstream for final acceptance",
                         &share_id, &channel_id, &job_id
                     );
                 }
+                translated_share
             }
             // Proxy do not have JD capabilities
             Ok(OnNewShare::ShareMeetBitcoinTarget(..)) => unreachable!(),
-            Err(roles_logic_sv2::Error::NoValidJob) => {
-                let count = SUBMIT_FAIL_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
-                if count >= 10 {
-                    error!("Failed to translate SV1 mining.submit message to SV2 SubmitSharesExtended message after 10 attempts");
-                    return Err(Error::RolesSv2Logic(roles_logic_sv2::Error::NoValidJob));
-                } else {
-                    warn!(
-                        "Failed to translate SV1 mining.submit message to SV2 SubmitSharesExtended message, attempt {}",
-                        count
-                    );
-                }
-            }
-            Err(roles_logic_sv2::Error::ShareDoNotMatchAnyJob) => {
-                warn!(
-                    "Channel factory can not get this share's job_id: {}",
-                    job_id
-                );
-            }
             Err(e) => {
+                Self::resolve_submit(
+                    result_tx,
+                    Err(crate::monitor::shares::RejectionReason::UpstreamRejected),
+                );
                 return Err(Error::RolesSv2Logic(e));
             }
+        };
+
+        if let Ok(is_rate_limited) = allow_submit_share() {
+            if !is_rate_limited {
+                warn!("Share will not be sent upstream: Exceeded 70 shares/min limit");
+                Self::resolve_submit(
+                    result_tx,
+                    Err(crate::monitor::shares::RejectionReason::RateLimited),
+                );
+                return Ok(());
+            }
+        } else {
+            error!("Failed to record share: Bridge mutex poisoned");
+            ProxyState::update_inconsistency(Some(1));
+            Self::resolve_submit(
+                result_tx,
+                Err(crate::monitor::shares::RejectionReason::UpstreamRejected),
+            );
+            return Err(Error::BridgeMutexPoisoned);
+        }
+
+        if let Err(e) = tx_sv2_submit_shares_ext
+            .send(UpstreamSubmitShare {
+                share: upstream_share,
+                result_tx,
+            })
+            .await
+        {
+            error!("Failed to send SubmitShareExtended upstream");
+            Self::resolve_submit(
+                e.0.result_tx,
+                Err(crate::monitor::shares::RejectionReason::UpstreamRejected),
+            );
+            return Err(Error::AsyncChannelError);
         }
         Ok(())
     }
