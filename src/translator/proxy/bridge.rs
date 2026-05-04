@@ -353,7 +353,7 @@ impl Bridge {
             })
             .map_err(|_| Error::BridgeMutexPoisoned)?;
 
-        let upstream_share = match res {
+        match res {
             Ok(OnNewShare::SendErrorDownstream(e)) => {
                 let error_code = std::str::from_utf8(&e.error_code.to_vec()[..])
                     .unwrap_or("unparsable error code")
@@ -366,7 +366,7 @@ impl Bridge {
                     result_tx,
                     Err(submit_error_to_rejection_reason(&error_code)),
                 );
-                return Ok(());
+                Ok(())
             }
             Ok(OnNewShare::SendSubmitShareUpstream((s, _))) => {
                 if share_log_enabled() {
@@ -375,22 +375,58 @@ impl Bridge {
                         &share_id, &channel_id, &job_id
                     );
                 }
-                match s {
+                let upstream_share = match s {
                     Share::Extended(share) => share,
                     // We are in an extended channel shares are extended
                     Share::Standard(_) => unreachable!(),
+                };
+
+                if let Ok(is_rate_limited) = allow_submit_share() {
+                    if !is_rate_limited {
+                        warn!("Share will not be sent upstream: Exceeded 70 shares/min limit");
+                        Self::resolve_submit(
+                            result_tx,
+                            Err(crate::monitor::shares::RejectionReason::RateLimited),
+                        );
+                        return Ok(());
+                    }
+                } else {
+                    error!("Failed to record share: Bridge mutex poisoned");
+                    ProxyState::update_inconsistency(Some(1));
+                    Self::resolve_submit(
+                        result_tx,
+                        Err(crate::monitor::shares::RejectionReason::UpstreamRejected),
+                    );
+                    return Err(Error::BridgeMutexPoisoned);
                 }
+
+                if let Err(e) = tx_sv2_submit_shares_ext
+                    .send(UpstreamSubmitShare {
+                        share: upstream_share,
+                        result_tx,
+                    })
+                    .await
+                {
+                    error!("Failed to send SubmitShareExtended upstream");
+                    Self::resolve_submit(
+                        e.0.result_tx,
+                        Err(crate::monitor::shares::RejectionReason::UpstreamRejected),
+                    );
+                    return Err(Error::AsyncChannelError);
+                }
+                Ok(())
             }
             // We are in an extended channel this variant is group channle only
             Ok(OnNewShare::RelaySubmitShareUpstream) => unreachable!(),
             Ok(OnNewShare::ShareMeetDownstreamTarget) => {
                 if share_log_enabled() {
                     info!(
-                        "Share with id {} meets downstream target from channel {} and job {}; forwarding upstream for final acceptance",
+                        "Share with id {} meets downstream target from channel {} and job {}; resolving locally",
                         &share_id, &channel_id, &job_id
                     );
                 }
-                translated_share
+                Self::resolve_submit(result_tx, Ok(()));
+                Ok(())
             }
             // Proxy do not have JD capabilities
             Ok(OnNewShare::ShareMeetBitcoinTarget(..)) => unreachable!(),
@@ -399,44 +435,9 @@ impl Bridge {
                     result_tx,
                     Err(crate::monitor::shares::RejectionReason::UpstreamRejected),
                 );
-                return Err(Error::RolesSv2Logic(e));
+                Err(Error::RolesSv2Logic(e))
             }
-        };
-
-        if let Ok(is_rate_limited) = allow_submit_share() {
-            if !is_rate_limited {
-                warn!("Share will not be sent upstream: Exceeded 70 shares/min limit");
-                Self::resolve_submit(
-                    result_tx,
-                    Err(crate::monitor::shares::RejectionReason::RateLimited),
-                );
-                return Ok(());
-            }
-        } else {
-            error!("Failed to record share: Bridge mutex poisoned");
-            ProxyState::update_inconsistency(Some(1));
-            Self::resolve_submit(
-                result_tx,
-                Err(crate::monitor::shares::RejectionReason::UpstreamRejected),
-            );
-            return Err(Error::BridgeMutexPoisoned);
         }
-
-        if let Err(e) = tx_sv2_submit_shares_ext
-            .send(UpstreamSubmitShare {
-                share: upstream_share,
-                result_tx,
-            })
-            .await
-        {
-            error!("Failed to send SubmitShareExtended upstream");
-            Self::resolve_submit(
-                e.0.result_tx,
-                Err(crate::monitor::shares::RejectionReason::UpstreamRejected),
-            );
-            return Err(Error::AsyncChannelError);
-        }
-        Ok(())
     }
 
     /// Translates a SV1 `mining.submit` message to a SV2 `SubmitSharesExtended` message.
