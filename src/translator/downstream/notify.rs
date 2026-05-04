@@ -1,4 +1,3 @@
-use crate::config::Configuration;
 use crate::proxy_state::{DownstreamType, ProxyState};
 use crate::translator::downstream::SUBSCRIBE_TIMEOUT_SECS;
 use crate::translator::error::Error;
@@ -41,16 +40,17 @@ pub async fn start_notify(
 
     let handle = {
         let task_manager = task_manager.clone();
-        let (upstream_difficulty_config, stats_sender, latest_diff) =
+        let (upstream_difficulty_config, stats_sender, latest_diff, registered_hashrate) =
             downstream.safe_lock(|d| {
                 (
                     d.upstream_difficulty_config.clone(),
                     d.stats_sender.clone(),
                     d.difficulty_mgmt.current_difficulties.back().copied(),
+                    d.difficulty_mgmt.estimated_downstream_hash_rate,
                 )
             })?;
         upstream_difficulty_config
-            .safe_lock(|c| c.channel_nominal_hashrate += Configuration::downstream_hashrate())?;
+            .safe_lock(|c| c.channel_nominal_hashrate += registered_hashrate)?;
         downstream.safe_lock(|d| d.mark_channel_hashrate_registered())?;
         if let Err(e) = stats_sender.setup_stats_reliable(connection_id).await {
             error!("Failed to register downstream stats {connection_id}: {e}");
@@ -64,10 +64,8 @@ pub async fn start_notify(
             let should_subtract = downstream.safe_lock(|d| d.take_channel_hashrate_registered())?;
             if should_subtract {
                 upstream_difficulty_config.safe_lock(|u| {
-                    u.channel_nominal_hashrate -= f32::min(
-                        Configuration::downstream_hashrate(),
-                        u.channel_nominal_hashrate,
-                    );
+                    u.channel_nominal_hashrate -=
+                        f32::min(registered_hashrate, u.channel_nominal_hashrate);
                 })?;
             }
             return Ok(());
@@ -193,6 +191,12 @@ async fn start_update(
         // Prevent difficulty adjustments until after delay elapses
         tokio::time::sleep(std::time::Duration::from_secs(crate::Configuration::delay())).await;
         loop {
+            // Reconcile immediately after the delay instead of waiting a full interval first.
+            if let Err(e) = Downstream::try_update_difficulty_settings(&downstream).await {
+                error!("{e}");
+                return;
+            };
+
             let share_count = crate::translator::utils::get_share_count(connection_id);
             let sleep_duration = if share_count >= *crate::SHARE_PER_MIN * 3.0
                 || share_count <= *crate::SHARE_PER_MIN / 3.0
@@ -204,13 +208,6 @@ async fn start_update(
             };
 
             tokio::time::sleep(sleep_duration).await;
-
-            // if hashrate has changed, update difficulty management, and send new
-            // mining.set_difficulty
-            if let Err(e) = Downstream::try_update_difficulty_settings(&downstream).await {
-                error!("{e}");
-                return;
-            };
         }
     });
     TaskManager::add_update(task_manager, handle.into(), connection_id)
@@ -220,7 +217,7 @@ async fn start_update(
 
 #[cfg(test)]
 mod tests {
-    use super::{current_or_initial_job, start_notify};
+    use super::{current_or_initial_job, start_notify, start_update};
     use crate::{
         api::stats::StatsSender,
         translator::{
@@ -234,12 +231,18 @@ mod tests {
     };
     use pid::Pid;
     use roles_logic_sv2::utils::Mutex;
-    use std::{collections::VecDeque, sync::Arc, time::Duration};
+    use std::{
+        collections::VecDeque,
+        sync::Arc,
+        time::{Duration, Instant},
+    };
     use sv1_api::{
         server_to_client::Notify,
         utils::{HexU32Be, MerkleNode, PrevHash},
     };
     use tokio::sync::{broadcast, mpsc::channel};
+
+    const RAW_BOOTSTRAP_HASHRATE: f32 = 500_000_000_000_000.0;
 
     fn first_job(job_id: &str) -> Notify<'static> {
         Notify {
@@ -300,6 +303,73 @@ mod tests {
         )
     }
 
+    fn quantized_difficulty_for_hashrate(hashrate: f32) -> f32 {
+        let share_per_second = *crate::SHARE_PER_MIN / 60.0;
+        let raw_difficulty = hashrate / (share_per_second * 2f32.powi(32));
+        crate::translator::downstream::diff_management::quantize_downstream_difficulty(
+            raw_difficulty,
+            None,
+        )
+    }
+
+    fn hashrate_for_diff(diff: f32) -> f32 {
+        let share_per_second = *crate::SHARE_PER_MIN / 60.0;
+        share_per_second * diff * 2f32.powi(32)
+    }
+
+    fn assert_hashrate_close(actual: f32, expected: f32) {
+        let tolerance = expected.abs().max(1.0) * 0.001;
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "expected hashrate near {expected}, got {actual}",
+        );
+    }
+
+    fn seeded_downstream_for_update_loop(
+        estimated_downstream_hash_rate: f32,
+        latest_difficulty: f32,
+        pid_controller: Pid<f32>,
+        submits: VecDeque<Instant>,
+        channel_nominal_hashrate: f32,
+    ) -> (Arc<Mutex<Downstream>>, Arc<Mutex<UpstreamDifficultyConfig>>) {
+        let mut current_difficulties = VecDeque::new();
+        current_difficulties.push_back(latest_difficulty);
+        let difficulty_mgmt = DownstreamDifficultyConfig {
+            estimated_downstream_hash_rate,
+            submits,
+            pid_controller,
+            current_difficulties,
+            initial_difficulty: latest_difficulty,
+            hard_minimum_difficulty: None,
+        };
+        let upstream_config = Arc::new(Mutex::new(UpstreamDifficultyConfig {
+            channel_diff_update_interval: crate::CHANNEL_DIFF_UPDTATE_INTERVAL,
+            channel_nominal_hashrate,
+        }));
+        let (tx_sv1_submit, _rx_sv1_submit) = channel::<DownstreamMessages>(8);
+        let (tx_outgoing, _rx_outgoing) = channel(8);
+        let (tx_update_token, _rx_update_token) = channel(8);
+
+        (
+            Arc::new(Mutex::new(Downstream::new(
+                1,
+                vec!["worker".to_string()],
+                vec![],
+                None,
+                None,
+                tx_sv1_submit,
+                tx_outgoing,
+                0,
+                difficulty_mgmt,
+                upstream_config.clone(),
+                StatsSender::new(),
+                first_job("88"),
+                tx_update_token,
+            ))),
+            upstream_config,
+        )
+    }
+
     #[tokio::test]
     async fn current_or_initial_job_seeds_recent_jobs_without_mutating_snapshot() {
         let first_job = first_job("42");
@@ -349,5 +419,47 @@ mod tests {
         if let Some(aborter) = task_manager.safe_lock(|t| t.get_aborter()).unwrap() {
             drop(aborter);
         }
+    }
+
+    #[tokio::test]
+    async fn first_retarget_waits_full_adjustment_interval_before_fixing_upstream_hashrate() {
+        let quantized_difficulty = quantized_difficulty_for_hashrate(RAW_BOOTSTRAP_HASHRATE);
+        let expected_first_retarget_hashrate = hashrate_for_diff(quantized_difficulty / 2.0);
+        let mut pid = Pid::new(*crate::SHARE_PER_MIN, quantized_difficulty * 10.0);
+        // If the first retarget runs immediately, this forces the bootstrap seed down one bucket.
+        pid.p(-(quantized_difficulty * 0.05), f32::MAX)
+            .i(0.0, f32::MAX)
+            .d(0.0, f32::MAX);
+
+        let (downstream, upstream_config) = seeded_downstream_for_update_loop(
+            RAW_BOOTSTRAP_HASHRATE,
+            quantized_difficulty,
+            pid,
+            VecDeque::new(),
+            RAW_BOOTSTRAP_HASHRATE,
+        );
+        let task_manager = TaskManager::initialize();
+
+        start_update(task_manager.clone(), downstream.clone(), 1)
+            .await
+            .unwrap();
+
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let last_call_to_update_hr = downstream.safe_lock(|d| d.last_call_to_update_hr).unwrap();
+        let channel_nominal_hashrate = upstream_config
+            .safe_lock(|u| u.channel_nominal_hashrate)
+            .unwrap();
+
+        if let Some(aborter) = task_manager.safe_lock(|t| t.get_aborter()).unwrap() {
+            drop(aborter);
+        }
+
+        assert_ne!(
+            last_call_to_update_hr, 0,
+            "the first retarget should reconcile the bootstrap seed immediately instead of waiting a full adjustment interval",
+        );
+        assert_hashrate_close(channel_nominal_hashrate, expected_first_retarget_hashrate);
     }
 }
