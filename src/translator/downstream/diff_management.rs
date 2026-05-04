@@ -199,9 +199,11 @@ impl Downstream {
 
     /// 1. Calculates the realized share rate since the last update.
     /// 2. Adjusts difficulty using a PID controller, with aggressive tuning for zero-share cases over 5 secs.
-    /// 3. Estimates a new hash rate and updates the miner’s state if a change is needed.
+    /// 3. Estimates a new hash rate and reconciles the miner state immediately, even when the
+    ///    quantized difficulty bucket stays unchanged.
     ///
-    /// Returns `Some(new_difficulty)` if updated, or `None` if no update is needed.
+    /// Returns `Some(new_difficulty)` when a new downstream difficulty should be sent, or `None`
+    /// when no `mining.set_difficulty` update is needed.
     pub fn update_difficulty_and_hashrate(
         self_: &Arc<Mutex<Self>>,
     ) -> ProxyResult<'static, Option<f32>> {
@@ -249,7 +251,10 @@ impl Downstream {
             (latest_difficulty + pid_output).max(initial_difficulty * 0.1),
             hard_minimum_difficulty,
         );
+        let new_estimation =
+            Self::estimate_hash_rate_from_difficulty(new_difficulty, *crate::SHARE_PER_MIN);
         if new_difficulty == latest_difficulty {
+            Self::reconcile_hash_rate_estimation(self_, new_estimation)?;
             return Ok(None);
         }
 
@@ -265,8 +270,6 @@ impl Downstream {
             })?;
         }
 
-        let new_estimation =
-            Self::estimate_hash_rate_from_difficulty(new_difficulty, *crate::SHARE_PER_MIN);
         Self::update_self_with_new_hash_rate(self_, new_estimation, new_difficulty)?;
         Ok(Some(new_difficulty))
     }
@@ -278,28 +281,38 @@ impl Downstream {
         share_per_second * difficulty * 2f32.powi(32)
     }
 
-    /// Updates the downstream miner's difficulty mgmt states and adjusts the upstream channel's nominal
-    fn update_self_with_new_hash_rate(
+    fn hashrate_estimation_changed(old_estimation: f32, new_estimation: f32) -> bool {
+        let tolerance =
+            f32::EPSILON * old_estimation.abs().max(new_estimation.abs()).max(1.0) * 16.0;
+        (old_estimation - new_estimation).abs() > tolerance
+    }
+
+    fn reconcile_hash_rate_estimation(
         self_: &Arc<Mutex<Self>>,
         new_estimation: f32,
-        current_diff: f32,
     ) -> ProxyResult<'static, ()> {
-        let (upstream_difficulty_config, old_estimation, connection_id, stats_sender) = self_
-            .safe_lock(|d| {
+        let (upstream_difficulty_config, old_estimation, connection_id, stats_sender, changed) =
+            self_.safe_lock(|d| {
                 let old_estimation = d.difficulty_mgmt.estimated_downstream_hash_rate;
-                d.difficulty_mgmt.estimated_downstream_hash_rate = new_estimation;
-                d.difficulty_mgmt.reset();
-                d.difficulty_mgmt.add_difficulty(current_diff);
+                let changed = Self::hashrate_estimation_changed(old_estimation, new_estimation);
+                if changed {
+                    d.difficulty_mgmt.estimated_downstream_hash_rate = new_estimation;
+                }
 
                 (
                     d.upstream_difficulty_config.clone(),
                     old_estimation,
                     d.connection_id,
                     d.stats_sender.clone(),
+                    changed,
                 )
             })?;
+
+        if !changed {
+            return Ok(());
+        }
+
         stats_sender.update_hashrate(connection_id, new_estimation);
-        stats_sender.update_diff(connection_id, current_diff);
         let hash_rate_delta = new_estimation - old_estimation;
         upstream_difficulty_config.safe_lock(|c| {
             if (c.channel_nominal_hashrate + hash_rate_delta) > 0.0 {
@@ -308,6 +321,23 @@ impl Downstream {
                 c.channel_nominal_hashrate = 0.0;
             }
         })?;
+        Ok(())
+    }
+
+    /// Updates the downstream miner's difficulty mgmt states and adjusts the upstream channel's nominal
+    fn update_self_with_new_hash_rate(
+        self_: &Arc<Mutex<Self>>,
+        new_estimation: f32,
+        current_diff: f32,
+    ) -> ProxyResult<'static, ()> {
+        let (connection_id, stats_sender) = self_.safe_lock(|d| {
+            d.difficulty_mgmt.reset();
+            d.difficulty_mgmt.add_difficulty(current_diff);
+
+            (d.connection_id, d.stats_sender.clone())
+        })?;
+        stats_sender.update_diff(connection_id, current_diff);
+        Self::reconcile_hash_rate_estimation(self_, new_estimation)?;
         Ok(())
     }
 }
@@ -378,7 +408,10 @@ mod test {
         hard_minimum_difficulty_for_proxy_mode, nearest_power_of_2, quantize_downstream_difficulty,
         NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY,
     };
-    use crate::translator::downstream::{downstream::DownstreamDifficultyConfig, Downstream};
+    use crate::{
+        api::stats::StatsSender,
+        translator::downstream::{downstream::DownstreamDifficultyConfig, Downstream},
+    };
     use binary_sv2::U256;
     use pid::Pid;
     use rand::{thread_rng, Rng};
@@ -483,6 +516,109 @@ mod test {
         let share_per_second = *crate::SHARE_PER_MIN / 60.0;
         let initial_difficulty = hashrate / (share_per_second * 2f32.powf(32.0));
         crate::translator::downstream::diff_management::nearest_power_of_2(initial_difficulty)
+    }
+
+    const RAW_BOOTSTRAP_HASHRATE: f32 = 500_000_000_000_000.0;
+
+    fn hashrate_for_diff(diff: f32) -> f32 {
+        let share_per_second = *crate::SHARE_PER_MIN / 60.0;
+        share_per_second * diff * 2f32.powi(32)
+    }
+
+    fn target_rate_submits() -> VecDeque<Instant> {
+        let oldest = Instant::now() - Duration::from_secs(30);
+        std::iter::repeat_n(oldest,5).collect()
+    }
+
+    fn assert_hashrate_close(actual: f32, expected: f32) {
+        let tolerance = expected.abs().max(1.0) * 0.001;
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "expected hashrate near {expected}, got {actual}",
+        );
+    }
+
+    fn seeded_downstream(
+        estimated_downstream_hash_rate: f32,
+        latest_difficulty: f32,
+        pid_controller: Pid<f32>,
+        submits: VecDeque<Instant>,
+        channel_nominal_hashrate: f32,
+    ) -> (Arc<Mutex<Downstream>>, Arc<Mutex<UpstreamDifficultyConfig>>) {
+        let mut current_difficulties = VecDeque::new();
+        current_difficulties.push_back(latest_difficulty);
+        let difficulty_mgmt = DownstreamDifficultyConfig {
+            estimated_downstream_hash_rate,
+            submits,
+            pid_controller,
+            current_difficulties,
+            initial_difficulty: latest_difficulty,
+            hard_minimum_difficulty: None,
+        };
+        let upstream_config = Arc::new(Mutex::new(UpstreamDifficultyConfig {
+            channel_diff_update_interval: 60,
+            channel_nominal_hashrate,
+        }));
+        let (tx_sv1_submit, _rx_sv1_submit) = tokio::sync::mpsc::channel(10);
+        let (tx_outgoing, _rx_outgoing) = channel(10);
+        let (tx_update_token, _rx_update_token) = channel(10);
+        let first_job = Notify {
+            job_id: "seed".to_string(),
+            prev_hash: PrevHash::try_from("0".repeat(64).as_str()).unwrap(),
+            coin_base1: "ffff".try_into().unwrap(),
+            coin_base2: "ffff".try_into().unwrap(),
+            merkle_branch: vec![MerkleNode::try_from(vec![7_u8; 32]).unwrap()],
+            version: HexU32Be(5667),
+            bits: HexU32Be(5678),
+            time: HexU32Be(5609),
+            clean_jobs: true,
+        };
+
+        (
+            Arc::new(Mutex::new(Downstream::new(
+                1,
+                vec![],
+                vec![],
+                None,
+                None,
+                tx_sv1_submit,
+                tx_outgoing,
+                0,
+                difficulty_mgmt,
+                upstream_config.clone(),
+                StatsSender::new(),
+                first_job,
+                tx_update_token,
+            ))),
+            upstream_config,
+        )
+    }
+
+    #[tokio::test]
+    async fn initial_seed_is_not_reconciled_when_quantized_difficulty_is_unchanged() {
+        let quantized_difficulty = get_diff(RAW_BOOTSTRAP_HASHRATE);
+        let quantized_hashrate = hashrate_for_diff(quantized_difficulty);
+        let pid = Pid::new(*crate::SHARE_PER_MIN, quantized_difficulty * 10.0);
+
+        let (downstream, upstream_config) = seeded_downstream(
+            RAW_BOOTSTRAP_HASHRATE,
+            quantized_difficulty,
+            pid,
+            target_rate_submits(),
+            RAW_BOOTSTRAP_HASHRATE,
+        );
+
+        Downstream::update_difficulty_and_hashrate(&downstream).unwrap();
+
+        let estimated_downstream_hash_rate = downstream
+            .safe_lock(|d| d.difficulty_mgmt.estimated_downstream_hash_rate)
+            .unwrap();
+        let channel_nominal_hashrate = upstream_config
+            .safe_lock(|u| u.channel_nominal_hashrate)
+            .unwrap();
+
+        assert_hashrate_close(estimated_downstream_hash_rate, quantized_hashrate);
+        assert_hashrate_close(channel_nominal_hashrate, quantized_hashrate);
     }
 
     #[test]
