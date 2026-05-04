@@ -1,5 +1,9 @@
+use roles_logic_sv2::mining_sv2::SubmitSharesExtended;
 use roles_logic_sv2::mining_sv2::Target;
 use sv1_api::{client_to_server::Submit, utils::HexU32Be};
+use tokio::sync::oneshot;
+
+use crate::monitor::shares::RejectionReason;
 pub mod diff_management;
 #[allow(clippy::module_inception)]
 pub mod downstream;
@@ -18,15 +22,19 @@ mod task_manager;
 const SUBSCRIBE_TIMEOUT_SECS: u64 = 10;
 
 /// enum of messages sent to the Bridge
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum DownstreamMessages {
     SubmitShares(SubmitShareWithChannelId),
     SetDownstreamTarget(SetDownstreamTarget),
 }
 
+pub type SubmitShareResult = Result<(), RejectionReason>;
+pub type SubmitShareResultReceiver = oneshot::Receiver<SubmitShareResult>;
+pub type SubmitShareResultSender = oneshot::Sender<SubmitShareResult>;
+
 /// wrapper around a `mining.submit` with extra channel informationfor the Bridge to
 /// process
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SubmitShareWithChannelId {
     pub channel_id: u32,
     pub share: Submit<'static>,
@@ -36,6 +44,13 @@ pub struct SubmitShareWithChannelId {
     #[allow(dead_code)]
     extranonce2_len: usize,
     pub version_rolling_mask: Option<HexU32Be>,
+    pub result_tx: SubmitShareResultSender,
+}
+
+#[derive(Debug)]
+pub struct UpstreamSubmitShare {
+    pub share: SubmitSharesExtended<'static>,
+    pub result_tx: SubmitShareResultSender,
 }
 
 /// message for notifying the bridge that a downstream target has updated

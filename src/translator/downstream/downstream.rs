@@ -24,7 +24,8 @@ use tokio::sync::{
 use super::{
     accept_connection::start_accept_connection, notify::start_notify,
     receive_from_downstream::start_receive_downstream,
-    send_to_downstream::start_send_to_downstream, DownstreamMessages, SubmitShareWithChannelId,
+    send_to_downstream::start_send_to_downstream, DownstreamMessages, SubmitShareResultReceiver,
+    SubmitShareWithChannelId,
 };
 
 use roles_logic_sv2::{
@@ -377,6 +378,39 @@ impl Downstream {
         self_: Arc<Mutex<Self>>,
         message_sv1: json_rpc::Message,
     ) -> Result<(), super::super::error::Error<'static>> {
+        if let json_rpc::Message::StandardRequest(request) = &message_sv1 {
+            if request.method == "mining.submit" {
+                let submit = match client_to_server::Submit::try_from(request.clone()) {
+                    Ok(submit) => submit,
+                    Err(_) => {
+                        Self::reject_invalid_submit(self_, &message_sv1).await?;
+                        return Ok(());
+                    }
+                };
+
+                let is_valid_submission = self_.safe_lock(|s| {
+                    let has_valid_version_bits = match &submit.version_bits {
+                        Some(version_bits) => s
+                            .version_rolling_mask()
+                            .map(|mask| mask.check_mask(version_bits))
+                            .unwrap_or(false),
+                        None => s.version_rolling_mask().is_none(),
+                    };
+
+                    s.is_authorized(&submit.user_name)
+                        && s.extranonce2_size() == submit.extra_nonce2.len()
+                        && has_valid_version_bits
+                })?;
+
+                if !is_valid_submission {
+                    Self::reject_invalid_submit(self_, &message_sv1).await?;
+                    return Ok(());
+                }
+
+                return Self::handle_submit_request(self_, submit).await;
+            }
+        }
+
         // `handle_message` in `IsServer` trait + calls `handle_request`
         // TODO: Map err from V1Error to Error::V1Error
 
@@ -399,18 +433,8 @@ impl Downstream {
             }
             Err(e) => {
                 if matches!(e, sv1_api::error::Error::InvalidSubmission) {
-                    if let Some(response) = Self::invalid_submit_rejection(&message_sv1) {
-                        let (connection_id, reason) = self_.safe_lock(|s| {
-                            s.stats_sender.update_rejected_shares(s.connection_id);
-                            (s.connection_id, s.invalid_submit_reason(&message_sv1))
-                        })?;
-                        error!(
-                            "Downstream {}: rejected invalid mining.submit without disconnecting downstream: {}",
-                            connection_id, reason
-                        );
-                        Self::send_message_downstream(self_, response).await;
-                        return Ok(());
-                    }
+                    Self::reject_invalid_submit(self_, &message_sv1).await?;
+                    return Ok(());
                 }
                 error!("{e}");
                 Err(Error::V1Protocol(Box::new(e)))
@@ -489,6 +513,212 @@ impl Downstream {
         }
     }
 
+    pub(super) fn current_difficulty(&self) -> f32 {
+        self.difficulty_mgmt
+            .current_difficulties
+            .back()
+            .copied()
+            .unwrap_or(self.difficulty_mgmt.initial_difficulty)
+    }
+
+    async fn reject_invalid_submit(
+        self_: Arc<Mutex<Self>>,
+        message_sv1: &json_rpc::Message,
+    ) -> Result<(), Error<'static>> {
+        if let Some(response) = Self::invalid_submit_rejection(message_sv1) {
+            let (connection_id, reason) = self_.safe_lock(|s| {
+                s.stats_sender.update_rejected_shares(s.connection_id);
+                (s.connection_id, s.invalid_submit_reason(message_sv1))
+            })?;
+            error!(
+                "Downstream {}: rejected invalid mining.submit without disconnecting downstream: {}",
+                connection_id, reason
+            );
+            Self::send_message_downstream(self_, response).await;
+        }
+        Ok(())
+    }
+
+    fn spawn_submit_accounting(
+        self_: Arc<Mutex<Self>>,
+        response_rx: SubmitShareResultReceiver,
+        worker_name: String,
+        difficulty: f32,
+        job_id: i64,
+        nonce: i64,
+        request_job_id: String,
+    ) {
+        tokio::spawn(async move {
+            let submit_result = match response_rx.await {
+                Ok(result) => result,
+                Err(_) => Err(RejectionReason::UpstreamRejected),
+            };
+
+            let accounting_result = self_.safe_lock(|s| match submit_result {
+                Ok(()) => {
+                    let share =
+                        ShareInfo::new(worker_name.clone(), Some(difficulty), job_id, nonce, None);
+                    s.share_monitor.insert_share(share);
+                    s.stats_sender.update_accepted_shares(s.connection_id);
+                    if share_log_enabled() {
+                        info!(
+                            "Share for Job {} and difficulty {} is accepted upstream",
+                            request_job_id, difficulty
+                        );
+                    }
+                }
+                Err(reason) => {
+                    let share =
+                        ShareInfo::new(worker_name.clone(), None, job_id, nonce, Some(reason));
+                    s.share_monitor.insert_share(share);
+                    s.stats_sender.update_rejected_shares(s.connection_id);
+                    if share_log_enabled() {
+                        info!(
+                            "Share for Job {} and difficulty {} was rejected with {:?}",
+                            request_job_id, difficulty, reason
+                        );
+                    }
+                }
+            });
+
+            if let Err(e) = accounting_result {
+                error!("Failed to finalize submit accounting: {e}");
+                ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+            }
+        });
+    }
+
+    async fn handle_submit_request(
+        self_: Arc<Mutex<Self>>,
+        request: client_to_server::Submit<'static>,
+    ) -> Result<(), Error<'static>> {
+        if share_log_enabled() {
+            info!(
+                "Handling mining.submit request {} from {} with job_id {}, nonce: {:?}",
+                request.id, request.user_name, request.job_id, request.nonce
+            );
+        }
+
+        let job_id_as_number = match request.job_id.parse::<u32>() {
+            Ok(job_id) => job_id,
+            Err(_) => {
+                error!(
+                    "Share rejected: can not convert v1 job id to number. v1 id: {}",
+                    request.job_id
+                );
+                let nonce = request.nonce.0 as i64;
+                let share = ShareInfo::new(
+                    request.user_name.clone(),
+                    None,
+                    0,
+                    nonce,
+                    Some(RejectionReason::InvalidJobIdFormat),
+                );
+                self_.safe_lock(|s| {
+                    s.share_monitor.insert_share(share);
+                    s.stats_sender.update_rejected_shares(s.connection_id);
+                })?;
+                Self::send_message_downstream(self_, request.respond(false).into()).await;
+                return Ok(());
+            }
+        };
+
+        let job_id = job_id_as_number as i64;
+        let nonce = request.nonce.0 as i64;
+        let connection_id = self_.safe_lock(|s| s.connection_id)?;
+        crate::translator::utils::update_share_count(connection_id);
+
+        let (job, extranonce1, version_rolling_mask) = self_.safe_lock(|s| {
+            (
+                s.recent_jobs.get_matching_job(job_id_as_number),
+                s.extranonce1.clone(),
+                s.version_rolling_mask.clone(),
+            )
+        })?;
+
+        let job = match job {
+            Some(job) => job,
+            None => {
+                let share = ShareInfo::new(
+                    request.user_name.clone(),
+                    None,
+                    job_id,
+                    nonce,
+                    Some(RejectionReason::JobIdNotFound),
+                );
+                self_.safe_lock(|s| {
+                    s.share_monitor.insert_share(share);
+                    s.stats_sender.update_rejected_shares(s.connection_id);
+                })?;
+                error!(
+                    "Share rejected: can not find job with id {}",
+                    request.job_id
+                );
+                Self::send_message_downstream(self_, request.respond(false).into()).await;
+                return Ok(());
+            }
+        };
+
+        let mut upstream_request = request.clone();
+        upstream_request.job_id = job.notify.job_id.clone();
+
+        if !validate_share(
+            &upstream_request,
+            &job.notify,
+            job.difficulty,
+            extranonce1,
+            version_rolling_mask,
+        ) {
+            let share = ShareInfo::new(
+                request.user_name.clone(),
+                None,
+                job_id,
+                nonce,
+                Some(RejectionReason::InvalidShare),
+            );
+            self_.safe_lock(|s| {
+                s.share_monitor.insert_share(share);
+                s.stats_sender.update_rejected_shares(s.connection_id);
+            })?;
+            error!("Share rejected: Invalid share for stored job");
+            Self::send_message_downstream(self_, request.respond(false).into()).await;
+            return Ok(());
+        }
+
+        match Self::forward_submit_share(&self_, upstream_request).await {
+            Ok(response_rx) => {
+                Self::spawn_submit_accounting(
+                    self_.clone(),
+                    response_rx,
+                    request.user_name.clone(),
+                    job.difficulty,
+                    job_id,
+                    nonce,
+                    request.job_id.clone(),
+                );
+                self_.safe_lock(|s| s.submit_counts_for_diff.set(true))?;
+                Self::send_message_downstream(self_, request.respond(true).into()).await;
+            }
+            Err(e) => {
+                error!("Failed to forward downstream submit: {e}");
+                let share = ShareInfo::new(
+                    request.user_name.clone(),
+                    None,
+                    job_id,
+                    nonce,
+                    Some(RejectionReason::UpstreamRejected),
+                );
+                self_.safe_lock(|s| {
+                    s.share_monitor.insert_share(share);
+                    s.stats_sender.update_rejected_shares(s.connection_id);
+                })?;
+                Self::send_message_downstream(self_, request.respond(false).into()).await;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Send SV1 response message that is generated by `Downstream` (as opposed to being received
     /// by `Bridge`) to be written to the SV1 Downstream role.
     pub(super) async fn send_message_downstream(
@@ -525,25 +755,36 @@ impl Downstream {
         }
     }
 
-    fn forward_submit_share(&self, request: client_to_server::Submit<'static>) -> bool {
+    async fn forward_submit_share(
+        self_: &Arc<Mutex<Self>>,
+        request: client_to_server::Submit<'static>,
+    ) -> Result<SubmitShareResultReceiver, Error<'static>> {
+        let (channel_id, extranonce, extranonce2_len, version_rolling_mask, sender) = self_
+            .safe_lock(|s| {
+                (
+                    s.connection_id,
+                    s.extranonce1.clone(),
+                    s.extranonce2_len,
+                    s.version_rolling_mask.clone(),
+                    s.tx_sv1_bridge.clone(),
+                )
+            })?;
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let to_send = SubmitShareWithChannelId {
-            channel_id: self.connection_id,
+            channel_id,
             share: request,
-            extranonce: self.extranonce1.clone(),
-            extranonce2_len: self.extranonce2_len,
-            version_rolling_mask: self.version_rolling_mask.clone(),
+            extranonce,
+            extranonce2_len,
+            version_rolling_mask,
+            result_tx,
         };
 
-        if let Err(e) = self
-            .tx_sv1_bridge
-            .try_send(DownstreamMessages::SubmitShares(to_send))
-        {
-            error!("Failed to forward downstream submit: {e:?}");
-            self.stats_sender.update_rejected_shares(self.connection_id);
-            return false;
-        }
+        sender
+            .send(DownstreamMessages::SubmitShares(to_send))
+            .await
+            .map_err(|_| Error::AsyncChannelError)?;
 
-        true
+        Ok(result_rx)
     }
 
     #[cfg(test)]
@@ -634,8 +875,11 @@ impl IsServer<'static> for Downstream {
         self.version_rolling_mask = Some(version_rolling_mask.clone());
         self.version_rolling_min_bit = Some(version_rolling_min_bit_count.clone());
         let mut first_job = self.first_job.clone();
-        self.recent_jobs
-            .add_job(&mut first_job, self.version_rolling_mask.clone());
+        self.recent_jobs.add_job(
+            &mut first_job,
+            self.version_rolling_mask.clone(),
+            self.current_difficulty(),
+        );
         self.first_job = first_job;
 
         (
@@ -722,124 +966,9 @@ impl IsServer<'static> for Downstream {
 
     /// When miner find the job which meets requested difficulty, it can submit share to the server.
     /// Only [Submit](client_to_server::Submit) requests for authorized user names can be submitted.
-    fn handle_submit(&self, request: &client_to_server::Submit<'static>) -> bool {
-        if share_log_enabled() {
-            info!(
-                "Handling mining.submit request {} from {} with job_id {}, nonce: {:?}",
-                request.id, request.user_name, request.job_id, request.nonce
-            );
-        }
-
-        let mut request = request.clone();
-        let job_id_as_number = request.job_id.parse::<u32>();
-        let nonce = request.nonce.0 as i64;
-        if job_id_as_number.is_err() {
-            error!(
-                "Share rejected: can not convert v1 job id to number. v1 id: {}",
-                request.job_id
-            );
-
-            let share = ShareInfo::new(
-                request.user_name.clone(),
-                None,
-                0,
-                nonce,
-                // We can use this here beacuse we are inside the error branch
-                //
-                // TODO: Think about a better way to handle job id when it can not be parsed to
-                // number
-                // job_id_as_number.expect("checked above") as i64,
-                Some(RejectionReason::InvalidJobIdFormat),
-            );
-            self.share_monitor.insert_share(share);
-
-            self.stats_sender.update_rejected_shares(self.connection_id);
-            return false;
-        }
-        let job_id = job_id_as_number.clone().expect("checked above") as i64;
-        crate::translator::utils::update_share_count(self.connection_id); // update share count
-        if let Some(job) = self
-            .recent_jobs
-            .get_matching_job(job_id_as_number.expect("checked above"))
-        {
-            request.job_id = job.job_id.clone();
-
-            // Shares must always be validated locally. Disabling difficulty updates only
-            // disables downstream/internal retargeting, not share validation itself.
-            if let Some(met_difficulty) = validate_share(
-                &request,
-                &job,
-                &self.difficulty_mgmt.current_difficulties,
-                self.extranonce1.clone(),
-                self.version_rolling_mask.clone(),
-            ) {
-                // Only forward upstream if the share meets the latest difficulty
-                if let Some(latest_difficulty) = self.difficulty_mgmt.current_difficulties.back() {
-                    if met_difficulty == *latest_difficulty {
-                        if !self.forward_submit_share(request.clone()) {
-                            return false;
-                        }
-
-                        // Share is accepted here
-                        let share = ShareInfo::new(
-                            request.user_name.clone(),
-                            Some(met_difficulty),
-                            job_id,
-                            nonce,
-                            None,
-                        );
-                        self.share_monitor.insert_share(share);
-                        self.submit_counts_for_diff.set(true);
-                        self.stats_sender.update_accepted_shares(self.connection_id);
-                    } else {
-                        // met_difficulty is not latest difficulty, so we mark it as rejected
-                        let share = ShareInfo::new(
-                            request.user_name.clone(),
-                            None,
-                            job_id, // rejected because it was not sent upstream
-                            nonce,
-                            Some(RejectionReason::DifficultyMismatch),
-                        );
-                        self.share_monitor.insert_share(share);
-                        self.stats_sender.update_rejected_shares(self.connection_id);
-                    }
-                }
-                if share_log_enabled() {
-                    info!(
-                        "Share for Job {} and difficulty {} is accepted",
-                        request.job_id, met_difficulty
-                    );
-                }
-                true
-            } else {
-                let share = ShareInfo::new(
-                    request.user_name.clone(),
-                    None,
-                    job_id,
-                    nonce,
-                    Some(RejectionReason::InvalidShare),
-                );
-                self.share_monitor.insert_share(share);
-                error!("Share rejected: Invalid share");
-                self.stats_sender.update_rejected_shares(self.connection_id);
-                false
-            }
-        } else {
-            let event = ShareInfo::new(
-                request.user_name.clone(),
-                None,
-                job_id,
-                nonce,
-                Some(RejectionReason::JobIdNotFound),
-            );
-            self.share_monitor.insert_share(event);
-            error!(
-                "Share rejected: can not find job with id {}",
-                request.job_id
-            );
-            self.stats_sender.update_rejected_shares(self.connection_id);
-            false
-        }
+    fn handle_submit(&self, _request: &client_to_server::Submit<'static>) -> bool {
+        error!("Downstream::handle_submit should not be called directly");
+        false
     }
 
     /// Indicates to the server that the client supports the mining.set_extranonce method.
@@ -912,10 +1041,17 @@ impl IsDownstream for Downstream {
 
 const TRACKED_RECENT_JOBS: usize = 3;
 
+#[derive(Debug, Clone)]
+pub(crate) struct IssuedJob {
+    pub notify: Notify<'static>,
+    pub difficulty: f32,
+}
+
 #[derive(Debug)]
 pub struct RecentJobs {
     v1_to_v2: HashMap<u32, u32>,
     v2_to_v1: HashMap<u32, Vec<u32>>,
+    issued_jobs: HashMap<u32, IssuedJob>,
     jobs: VecDeque<Notify<'static>>,
     last_v2s: CircularBuffer<u32, TRACKED_RECENT_JOBS>,
     tracked_jobs: usize,
@@ -926,11 +1062,20 @@ fn apply_mask(mask: Option<HexU32Be>, message: &mut server_to_client::Notify<'st
     }
 }
 impl RecentJobs {
-    pub fn add_job(&mut self, notify: &mut Notify<'static>, mask: Option<HexU32Be>) {
+    pub(crate) fn add_job(
+        &mut self,
+        notify: &mut Notify<'static>,
+        mask: Option<HexU32Be>,
+        difficulty: f32,
+    ) {
         apply_mask(mask, notify);
         // save it with the v2 id
         self.jobs.push_back(notify.clone());
-        let new_id = self.new_v1(notify.job_id.parse::<u32>().unwrap());
+        let new_id = self.new_v1(
+            notify.job_id.parse::<u32>().unwrap(),
+            notify.clone(),
+            difficulty,
+        );
         // send it with the v1 id
         notify.job_id = new_id.to_string();
         if self.jobs.len() > self.tracked_jobs {
@@ -938,10 +1083,10 @@ impl RecentJobs {
         };
     }
 
-    pub fn clone_last(&mut self) -> Option<Notify<'static>> {
+    pub(crate) fn clone_last(&mut self, difficulty: f32) -> Option<Notify<'static>> {
         if let Some(job) = self.jobs.back() {
             let mut job = job.clone();
-            let new_id = self.new_v1(job.job_id.parse::<u32>().unwrap());
+            let new_id = self.new_v1(job.job_id.parse::<u32>().unwrap(), job.clone(), difficulty);
             job.job_id = new_id.to_string();
             Some(job.clone())
         } else {
@@ -949,19 +1094,15 @@ impl RecentJobs {
         }
     }
 
-    pub fn current_jobs(&self) -> VecDeque<Notify<'static>> {
+    pub(crate) fn current_jobs(&self) -> VecDeque<Notify<'static>> {
         self.jobs.clone()
     }
 
-    pub fn get_matching_job(&self, v1_id: u32) -> Option<Notify<'static>> {
-        let v2_id = self.get_v2(v1_id)?;
-        self.current_jobs()
-            .iter()
-            .find(|notify| notify.job_id == v2_id)
-            .cloned()
+    pub(crate) fn get_matching_job(&self, v1_id: u32) -> Option<IssuedJob> {
+        self.issued_jobs.get(&v1_id).cloned()
     }
 
-    fn new_v1(&mut self, v2_id: u32) -> u32 {
+    fn new_v1(&mut self, v2_id: u32, notify: Notify<'static>, difficulty: f32) -> u32 {
         let mut v1_id = rand::thread_rng().gen();
         while self.v1_to_v2.contains_key(&v1_id) {
             v1_id = rand::thread_rng().gen();
@@ -978,22 +1119,23 @@ impl RecentJobs {
             }
         }
         self.v1_to_v2.insert(v1_id, v2_id);
+        self.issued_jobs
+            .insert(v1_id, IssuedJob { notify, difficulty });
         v1_id
     }
     fn remove_v2(&mut self, v2_id: u32) {
         if let Some(v1_ids) = self.v2_to_v1.remove(&v2_id) {
             for v1_id in v1_ids {
                 self.v1_to_v2.remove(&v1_id);
+                self.issued_jobs.remove(&v1_id);
             }
         }
-    }
-    fn get_v2(&self, v1_id: u32) -> Option<String> {
-        self.v1_to_v2.get(&v1_id).cloned().map(|v| v.to_string())
     }
     pub fn new() -> Self {
         Self {
             v1_to_v2: HashMap::new(),
             v2_to_v1: HashMap::new(),
+            issued_jobs: HashMap::new(),
             last_v2s: CircularBuffer::new(),
             jobs: VecDeque::new(),
             tracked_jobs: TRACKED_RECENT_JOBS,
@@ -1325,5 +1467,56 @@ mod tests {
             reason,
             "invalid version_bits `00000002` for version-rolling mask `00000001`"
         );
+    }
+
+    #[test]
+    fn recent_jobs_bind_difficulty_to_each_issued_v1_job() {
+        let mut recent_jobs = RecentJobs::new();
+        let mut job = first_job("42");
+
+        recent_jobs.add_job(&mut job, None, 1.0);
+        let first_v1_id = job.job_id.parse::<u32>().unwrap();
+        let first_snapshot = recent_jobs.get_matching_job(first_v1_id).unwrap();
+        assert_eq!(first_snapshot.notify.job_id, "42");
+        assert_eq!(first_snapshot.difficulty, 1.0);
+
+        let reissued_job = recent_jobs.clone_last(2.0).unwrap();
+        let reissued_v1_id = reissued_job.job_id.parse::<u32>().unwrap();
+        let reissued_snapshot = recent_jobs.get_matching_job(reissued_v1_id).unwrap();
+        let original_snapshot = recent_jobs.get_matching_job(first_v1_id).unwrap();
+
+        assert_eq!(reissued_snapshot.notify.job_id, "42");
+        assert_eq!(reissued_snapshot.difficulty, 2.0);
+        assert_eq!(original_snapshot.difficulty, 1.0);
+    }
+
+    #[test]
+    fn recent_jobs_preserve_three_v2_job_retention() {
+        let mut recent_jobs = RecentJobs::new();
+
+        let mut job_1 = first_job("1");
+        recent_jobs.add_job(&mut job_1, None, 1.0);
+        let job_1_v1 = job_1.job_id.parse::<u32>().unwrap();
+        let job_1_reissued = recent_jobs.clone_last(2.0).unwrap();
+        let job_1_reissued_v1 = job_1_reissued.job_id.parse::<u32>().unwrap();
+
+        let mut job_2 = first_job("2");
+        recent_jobs.add_job(&mut job_2, None, 2.0);
+        let job_2_v1 = job_2.job_id.parse::<u32>().unwrap();
+
+        let mut job_3 = first_job("3");
+        recent_jobs.add_job(&mut job_3, None, 3.0);
+        let job_3_v1 = job_3.job_id.parse::<u32>().unwrap();
+
+        let mut job_4 = first_job("4");
+        recent_jobs.add_job(&mut job_4, None, 4.0);
+        let job_4_v1 = job_4.job_id.parse::<u32>().unwrap();
+
+        assert_eq!(recent_jobs.current_jobs().len(), 3);
+        assert!(recent_jobs.get_matching_job(job_1_v1).is_none());
+        assert!(recent_jobs.get_matching_job(job_1_reissued_v1).is_none());
+        assert!(recent_jobs.get_matching_job(job_2_v1).is_some());
+        assert!(recent_jobs.get_matching_job(job_3_v1).is_some());
+        assert!(recent_jobs.get_matching_job(job_4_v1).is_some());
     }
 }

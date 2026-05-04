@@ -13,14 +13,17 @@ use tokio::task;
 use tracing::{debug, error, warn};
 
 fn current_or_initial_job(downstream: &mut Downstream) -> server_to_client::Notify<'static> {
-    if let Some(job) = downstream.recent_jobs.clone_last() {
+    let difficulty = downstream.current_difficulty();
+    if let Some(job) = downstream.recent_jobs.clone_last(difficulty) {
         return job;
     }
 
     let mut first_job = downstream.first_job.clone();
-    downstream
-        .recent_jobs
-        .add_job(&mut first_job, downstream.version_rolling_mask.clone());
+    downstream.recent_jobs.add_job(
+        &mut first_job,
+        downstream.version_rolling_mask.clone(),
+        difficulty,
+    );
     first_job
 }
 
@@ -138,7 +141,9 @@ pub async fn start_notify(
                         .safe_lock(|d| {
                             d.first_job = sv1_mining_notify_msg.clone();
                             let mask = d.version_rolling_mask.clone();
-                            d.recent_jobs.add_job(&mut sv1_mining_notify_msg, mask);
+                            let difficulty = d.current_difficulty();
+                            d.recent_jobs
+                                .add_job(&mut sv1_mining_notify_msg, mask, difficulty);
                             debug!(
                                 "Downstream {}: Added job_id {} to recent_notifies. Current jobs: {:?}",
                                 connection_id,

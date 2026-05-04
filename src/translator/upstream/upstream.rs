@@ -1,5 +1,5 @@
 use super::super::{
-    downstream::Downstream,
+    downstream::{Downstream, SubmitShareResult, SubmitShareResultSender, UpstreamSubmitShare},
     error::{Error, ProxyResult},
     upstream::diff_management::UpstreamDifficultyConfig,
 };
@@ -22,6 +22,7 @@ use roles_logic_sv2::{
     Error as RolesLogicError,
 };
 use std::{
+    collections::BTreeMap,
     sync::{atomic::AtomicBool, Arc},
     time::Duration,
 };
@@ -35,6 +36,7 @@ use super::task_manager::TaskManager;
 use crate::{
     proxy_state::{ProxyState, UpstreamType},
     shared::utils::AbortOnDrop,
+    translator::utils::submit_error_to_rejection_reason,
 };
 use bitcoin::BlockHash;
 
@@ -90,6 +92,8 @@ pub struct Upstream {
     sent_up: u32,
     rejected: u32,
     toa: Vec<std::time::Instant>,
+    next_submit_sequence: u32,
+    pending_submits: BTreeMap<u32, SubmitShareResultSender>,
 }
 
 impl PartialEq for Upstream {
@@ -132,13 +136,15 @@ impl Upstream {
             sent_up: 0,
             rejected: 0,
             toa: Vec::new(),
+            next_submit_sequence: 0,
+            pending_submits: BTreeMap::new(),
         })))
     }
 
     pub async fn start(
         self_: Arc<Mutex<Self>>,
         incoming_receiver: TReceiver<Mining<'static>>,
-        rx_sv2_submit_shares_ext: TReceiver<SubmitSharesExtended<'static>>,
+        rx_sv2_submit_shares_ext: TReceiver<UpstreamSubmitShare>,
         rx_update_token: TReceiver<String>,
     ) -> Result<AbortOnDrop, Error<'static>> {
         let task_manager = TaskManager::initialize();
@@ -449,9 +455,55 @@ impl Upstream {
         Ok((diff_manager_handle.into(), main_loop_handle.into()))
     }
 
+    fn register_pending_submit(&mut self, result_tx: SubmitShareResultSender) -> u32 {
+        let sequence_number = self.next_submit_sequence;
+        self.next_submit_sequence = self.next_submit_sequence.wrapping_add(1);
+        self.pending_submits.insert(sequence_number, result_tx);
+        sequence_number
+    }
+
+    fn resolve_submit_success(&mut self, last_sequence_number: u32, accepted_count: u32) {
+        if accepted_count == 0 {
+            return;
+        }
+
+        let acknowledged_sequences: Vec<u32> = self
+            .pending_submits
+            .range(..=last_sequence_number)
+            .map(|(sequence_number, _)| *sequence_number)
+            .take(accepted_count as usize)
+            .collect();
+
+        if acknowledged_sequences.len() < accepted_count as usize {
+            warn!(
+                "SubmitSharesSuccess acknowledged {} shares up to sequence {}, but only {} pending submits were available",
+                accepted_count,
+                last_sequence_number,
+                acknowledged_sequences.len()
+            );
+        }
+
+        for sequence_number in acknowledged_sequences {
+            if let Some(result_tx) = self.pending_submits.remove(&sequence_number) {
+                let _ = result_tx.send(Ok(()));
+            }
+        }
+    }
+
+    fn resolve_submit_error(&mut self, sequence_number: u32, result: SubmitShareResult) {
+        if let Some(result_tx) = self.pending_submits.remove(&sequence_number) {
+            let _ = result_tx.send(result);
+        } else {
+            warn!(
+                "Received submit error for unknown pending sequence {}",
+                sequence_number
+            );
+        }
+    }
+
     fn handle_submit(
         self_: Arc<Mutex<Self>>,
-        mut rx_submit: TReceiver<SubmitSharesExtended<'static>>,
+        mut rx_submit: TReceiver<UpstreamSubmitShare>,
     ) -> ProxyResult<'static, AbortOnDrop> {
         let tx_frame = self_
             .safe_lock(|s| s.sender.clone())
@@ -461,7 +513,10 @@ impl Upstream {
             let self_ = self_.clone();
             task::spawn(async move {
                 loop {
-                    let mut sv2_submit: SubmitSharesExtended = match rx_submit.recv().await {
+                    let UpstreamSubmitShare {
+                        mut share,
+                        result_tx,
+                    } = match rx_submit.recv().await {
                         Some(msg) => msg,
                         None => {
                             error!("Failed to receive SubmitShare message");
@@ -469,37 +524,64 @@ impl Upstream {
                         }
                     };
 
-                    let channel_id = match self_.safe_lock(|s| s.channel_id) {
-                        Ok(Some(channel_id)) => channel_id,
-                        Ok(None) => {
-                            error!(
-                                "{}",
-                                Error::RolesSv2Logic(RolesLogicError::NotFoundChannelId)
-                            );
+                    let (channel_id, signature) = match self_.safe_lock(|s| {
+                        s.channel_id
+                            .ok_or(RolesLogicError::NotFoundChannelId)
+                            .map(|channel_id| (channel_id, s.signature.clone()))
+                    }) {
+                        Ok(Ok(values)) => values,
+                        Ok(Err(e)) => {
+                            error!("{}", Error::RolesSv2Logic(e));
+                            let _ = result_tx.send(Err(
+                                crate::monitor::shares::RejectionReason::UpstreamRejected,
+                            ));
                             return;
                         }
                         Err(e) => {
                             error!("Translator upstream mutex corrupted: {e}");
-                            return;
-                        }
-                    };
-                    let signature = match self_.safe_lock(|s| s.signature.clone()) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            error!("Translator upstream mutex corrupted: {e}");
+                            let _ = result_tx.send(Err(
+                                crate::monitor::shares::RejectionReason::UpstreamRejected,
+                            ));
                             return;
                         }
                     };
 
-                    sv2_submit.channel_id = channel_id;
+                    let mut pending_result_tx = Some(result_tx);
+                    let sequence_number = match self_.safe_lock(|s| {
+                        s.register_pending_submit(
+                            pending_result_tx
+                                .take()
+                                .expect("pending submit result sender must be available"),
+                        )
+                    }) {
+                        Ok(sequence_number) => sequence_number,
+                        Err(e) => {
+                            error!("Translator upstream mutex corrupted: {e}");
+                            if let Some(result_tx) = pending_result_tx {
+                                let _ = result_tx.send(Err(
+                                    crate::monitor::shares::RejectionReason::UpstreamRejected,
+                                ));
+                            }
+                            return;
+                        }
+                    };
+
+                    share.channel_id = channel_id;
+                    share.sequence_number = sequence_number;
                     let mut extranonce = signature.as_bytes().to_vec();
-                    extranonce.extend_from_slice(&sv2_submit.extranonce.to_vec());
-                    sv2_submit.extranonce = extranonce.try_into().unwrap();
+                    extranonce.extend_from_slice(&share.extranonce.to_vec());
+                    share.extranonce = extranonce.try_into().unwrap();
 
-                    let message =
-                        roles_logic_sv2::parsers::Mining::SubmitSharesExtended(sv2_submit);
+                    let message = roles_logic_sv2::parsers::Mining::SubmitSharesExtended(share);
 
                     if tx_frame.send(message).await.is_err() {
+                        if let Ok(Some(result_tx)) =
+                            self_.safe_lock(|s| s.pending_submits.remove(&sequence_number))
+                        {
+                            let _ = result_tx.send(Err(
+                                crate::monitor::shares::RejectionReason::UpstreamRejected,
+                            ));
+                        }
                         error!("Unable to send SubmitSharesExtended msg upstream");
                         return;
                     };
@@ -706,18 +788,26 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
     /// Handles the SV2 `SubmitSharesSuccess` message.
     fn handle_submit_shares_success(
         &mut self,
-        _m: roles_logic_sv2::mining_sv2::SubmitSharesSuccess,
+        m: roles_logic_sv2::mining_sv2::SubmitSharesSuccess,
     ) -> Result<roles_logic_sv2::handlers::mining::SendTo<Downstream>, RolesLogicError> {
+        self.resolve_submit_success(m.last_sequence_number, m.new_submits_accepted_count);
         Ok(SendTo::None(None))
     }
 
     /// Handles the SV2 `SubmitSharesError` message.
     fn handle_submit_shares_error(
         &mut self,
-        _m: roles_logic_sv2::mining_sv2::SubmitSharesError,
+        m: roles_logic_sv2::mining_sv2::SubmitSharesError,
     ) -> Result<roles_logic_sv2::handlers::mining::SendTo<Downstream>, RolesLogicError> {
         self.rejected += 1;
-        error!("Ops rejected share");
+        let error_code = std::str::from_utf8(&m.error_code.to_vec())
+            .unwrap_or("unparsable error code")
+            .to_string();
+        self.resolve_submit_error(
+            m.sequence_number,
+            Err(submit_error_to_rejection_reason(&error_code)),
+        );
+        error!("Pool rejected share with error code {}", error_code);
         Ok(SendTo::None(None))
     }
 
@@ -836,4 +926,100 @@ fn avg_seconds_between(instants: &[std::time::Instant]) -> f64 {
         .sum();
 
     total_secs / (instants.len() - 1) as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::monitor::shares::RejectionReason;
+    use tokio::sync::{mpsc, oneshot};
+
+    async fn test_upstream() -> Arc<Mutex<Upstream>> {
+        let (tx_sv2_set_new_prev_hash, _rx_sv2_set_new_prev_hash) = mpsc::channel(1);
+        let (tx_sv2_new_ext_mining_job, _rx_sv2_new_ext_mining_job) = mpsc::channel(1);
+        let (tx_sv2_extranonce, _rx_sv2_extranonce) = mpsc::channel(1);
+        let (sender, _receiver) = mpsc::channel(1);
+
+        Upstream::new(
+            tx_sv2_set_new_prev_hash,
+            tx_sv2_new_ext_mining_job,
+            crate::MIN_EXTRANONCE_SIZE - 1,
+            tx_sv2_extranonce,
+            Arc::new(Mutex::new(vec![0; 32])),
+            Arc::new(Mutex::new(UpstreamDifficultyConfig {
+                channel_diff_update_interval: crate::CHANNEL_DIFF_UPDTATE_INTERVAL,
+                channel_nominal_hashrate: 0.0,
+            })),
+            sender,
+            "sig".to_string(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn submit_success_resolves_pending_submit() {
+        let upstream = test_upstream().await;
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let sequence_number = upstream
+            .safe_lock(|u| u.register_pending_submit(result_tx))
+            .unwrap();
+        assert_eq!(sequence_number, 0);
+
+        upstream
+            .safe_lock(|u| u.resolve_submit_success(sequence_number, 1))
+            .unwrap();
+
+        assert_eq!(result_rx.await.unwrap(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn submit_error_resolves_pending_submit() {
+        let upstream = test_upstream().await;
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let sequence_number = upstream
+            .safe_lock(|u| u.register_pending_submit(result_tx))
+            .unwrap();
+        upstream
+            .safe_lock(|u| {
+                u.resolve_submit_error(sequence_number, Err(RejectionReason::JobIdNotFound))
+            })
+            .unwrap();
+
+        assert_eq!(
+            result_rx.await.unwrap(),
+            Err(RejectionReason::JobIdNotFound)
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_success_skips_already_rejected_sequence() {
+        let upstream = test_upstream().await;
+        let (first_result_tx, first_result_rx) = oneshot::channel();
+        let (second_result_tx, second_result_rx) = oneshot::channel();
+
+        let (first_sequence, second_sequence) = upstream
+            .safe_lock(|u| {
+                (
+                    u.register_pending_submit(first_result_tx),
+                    u.register_pending_submit(second_result_tx),
+                )
+            })
+            .unwrap();
+
+        upstream
+            .safe_lock(|u| {
+                u.resolve_submit_error(first_sequence, Err(RejectionReason::JobIdNotFound));
+                u.resolve_submit_success(second_sequence, 1);
+            })
+            .unwrap();
+
+        assert_eq!(
+            first_result_rx.await.unwrap(),
+            Err(RejectionReason::JobIdNotFound)
+        );
+        assert_eq!(second_result_rx.await.unwrap(), Ok(()));
+    }
 }
