@@ -170,9 +170,9 @@ pub struct Configuration {
     auto_update: bool,
     signature: String,
     miner_name: Option<String>,
-    rpc_url: Option<String>,
-    rpc_user: Option<String>,
-    rpc_pwd: Option<String>,
+    rpc_url: String,
+    rpc_user: String,
+    rpc_pwd: String,
     rpc_fee_delta: Option<i64>,
 }
 impl Configuration {
@@ -221,9 +221,9 @@ and make that test pass."
         auto_update: bool,
         signature: String,
         miner_name: Option<String>,
-        rpc_url: Option<String>,
-        rpc_user: Option<String>,
-        rpc_pwd: Option<String>,
+        rpc_url: String,
+        rpc_user: String,
+        rpc_pwd: String,
         rpc_fee_delta: Option<i64>,
     ) -> Self {
         if let Err(error) = Self::validate_supported_delay(delay) {
@@ -295,9 +295,9 @@ and make that test pass."
             false,
             "DDxDD".to_string(),
             None,
-            None,
-            None,
-            None,
+            "http://127.0.0.1:8332".to_string(),
+            "user".to_string(),
+            "password".to_string(),
             None,
         )
     }
@@ -462,15 +462,15 @@ and make that test pass."
         Self::cfg().miner_name.clone()
     }
 
-    pub fn rpc_url() -> Option<String> {
+    pub fn rpc_url() -> String {
         Self::cfg().rpc_url.clone()
     }
 
-    pub fn rpc_user() -> Option<String> {
+    pub fn rpc_user() -> String {
         Self::cfg().rpc_user.clone()
     }
 
-    pub fn rpc_pwd() -> Option<String> {
+    pub fn rpc_pwd() -> String {
         Self::cfg().rpc_pwd.clone()
     }
 
@@ -529,15 +529,18 @@ and make that test pass."
         let rpc_url = args
             .rpc_url
             .or(config.rpc_url)
-            .or_else(|| std::env::var("RPC_URL").ok());
+            .or_else(|| std::env::var("RPC_URL").ok())
+            .expect("RPC_URL is not set");
         let rpc_user = args
             .rpc_user
             .or(config.rpc_user)
-            .or_else(|| std::env::var("RPC_USER").ok());
+            .or_else(|| std::env::var("RPC_USER").ok())
+            .expect("RPC_USER is not set");
         let rpc_pwd = args
             .rpc_pwd
             .or(config.rpc_pwd)
-            .or_else(|| std::env::var("RPC_PWD").ok());
+            .or_else(|| std::env::var("RPC_PWD").ok())
+            .expect("RPC_PWD is not set");
         let rpc_fee_delta = args.rpc_fee_delta.or(config.rpc_fee_delta).or_else(|| {
             std::env::var("RPC_FEE_DELTA")
                 .ok()

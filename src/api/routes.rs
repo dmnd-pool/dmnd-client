@@ -233,7 +233,10 @@ async fn health_check_reports_full_translator_handoff() {
         stats_sender: crate::api::stats::StatsSender::new(),
         downstream_handoff: handoff_tx,
         rpc: std::sync::Arc::new(crate::api::bitcoin_rpc::BitcoindRpc::new(
-            None, None, None, None,
+            "http://127.0.0.1:8332".to_string(),
+            "user".to_string(),
+            "password".to_string(),
+            None,
         )),
     };
 
