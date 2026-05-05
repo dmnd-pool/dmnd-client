@@ -12,7 +12,10 @@ use roles_logic_sv2::{
     template_distribution_sv2::SetNewPrevHash,
     utils::Mutex,
 };
-use std::{collections::HashMap, convert::TryInto};
+use std::{
+    collections::{HashMap, HashSet},
+    convert::TryInto,
+};
 use task_manager::TaskManager;
 use tokio::sync::mpsc::{Receiver as TReceiver, Sender as TSender};
 use tracing::{error, info};
@@ -242,13 +245,17 @@ impl JobDeclarator {
             .safe_lock(|s| (s.req_ids.next(), s.min_extranonce_size, s.sender.clone()))
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
 
+        let template_transactions = tx_list_.to_vec();
+        let prioritized_txids = crate::prioritized_transactions::snapshot();
+        let mut template_txids = HashSet::with_capacity(template_transactions.len());
         let mut tx_list: Vec<Transaction> = Vec::new();
         let mut tx_ids = vec![];
-        for tx in tx_list_.to_vec() {
+        for tx in template_transactions {
             let transaction: Result<Transaction, bitcoin::consensus::encode::Error> =
                 bitcoin::consensus::deserialize(&tx);
             match transaction {
                 Ok(tx) => {
+                    template_txids.insert(tx.compute_txid().to_string());
                     let w_tx_id: U256 = tx.compute_wtxid().to_raw_hash().to_byte_array().into();
                     tx_list.push(tx);
                     tx_ids.push(w_tx_id);
@@ -258,6 +265,13 @@ impl JobDeclarator {
                     return Err(Error::Unrecoverable);
                 }
             }
+        }
+        for txid in missing_prioritized_txids(&prioritized_txids, &template_txids) {
+            error!(
+                txid,
+                template_id = template.template_id,
+                "prioritized transaction is missing from template transaction list"
+            );
         }
         let tx_ids: Seq064K<'static, U256> = Seq064K::from(tx_ids);
 
@@ -579,5 +593,41 @@ impl JobDeclarator {
             error!("JDC Sub solution receiver unavailable");
             Error::Unrecoverable
         })
+    }
+}
+
+fn missing_prioritized_txids(
+    prioritized_txids: &[String],
+    template_txids: &HashSet<String>,
+) -> Vec<String> {
+    prioritized_txids
+        .iter()
+        .filter(|txid| !template_txids.contains(*txid))
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::missing_prioritized_txids;
+    use std::collections::HashSet;
+
+    #[test]
+    fn no_missing_prioritized_txids_when_all_are_in_template() {
+        let prioritized = vec!["a".to_string(), "b".to_string()];
+        let template = HashSet::from(["a".to_string(), "b".to_string(), "c".to_string()]);
+
+        assert!(missing_prioritized_txids(&prioritized, &template).is_empty());
+    }
+
+    #[test]
+    fn returns_only_prioritized_txids_missing_from_template() {
+        let prioritized = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let template = HashSet::from(["a".to_string(), "c".to_string()]);
+
+        assert_eq!(
+            missing_prioritized_txids(&prioritized, &template),
+            vec!["b".to_string()]
+        );
     }
 }

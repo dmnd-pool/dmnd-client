@@ -1,8 +1,14 @@
+mod bitcoin_rpc;
 mod routes;
 pub mod stats;
 mod utils;
-use crate::router::Router;
-use axum::{routing::get, Router as AxumRouter};
+use std::sync::Arc;
+
+use crate::{api::bitcoin_rpc::BitcoindRpc, router::Router, Configuration};
+use axum::{
+    routing::{get, post},
+    Router as AxumRouter,
+};
 use routes::Api;
 use stats::StatsSender;
 
@@ -12,6 +18,7 @@ pub struct AppState {
     router: Router,
     stats_sender: StatsSender,
     downstream_handoff: crate::DownstreamHandoffSender,
+    rpc: Arc<BitcoindRpc>,
 }
 
 pub(crate) async fn start(
@@ -19,13 +26,24 @@ pub(crate) async fn start(
     stats_sender: StatsSender,
     downstream_handoff: crate::DownstreamHandoffSender,
 ) {
+    let rpc_url = Configuration::rpc_url();
+    let rpc_user = Configuration::rpc_user();
+    let rpc_pwd = Configuration::rpc_pwd();
+
     let state = AppState {
         router,
         stats_sender,
         downstream_handoff,
+        rpc: Arc::new(BitcoindRpc::new(
+            rpc_url,
+            rpc_user,
+            rpc_pwd,
+            Configuration::rpc_fee_delta(),
+        )),
     };
     let app = AxumRouter::new()
         .route("/api/health", get(Api::health_check))
+        .route("/api/tx/{tx}", post(Api::send_tx_to_bitcoind))
         .route("/api/pool/info", get(Api::get_pool_info))
         .route("/api/stats/miners", get(Api::get_downstream_stats))
         .route("/api/stats/aggregate", get(Api::get_aggregate_stats))

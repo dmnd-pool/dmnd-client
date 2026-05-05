@@ -71,6 +71,14 @@ struct Args {
     signature: Option<String>,
     #[clap(long)]
     miner_name: Option<String>,
+    #[clap(long)]
+    rpc_url: Option<String>,
+    #[clap(long)]
+    rpc_user: Option<String>,
+    #[clap(long)]
+    rpc_pwd: Option<String>,
+    #[clap(long)]
+    rpc_fee_delta: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -97,6 +105,10 @@ struct ConfigFile {
     monitor: Option<bool>,
     auto_update: Option<bool>,
     miner_name: Option<String>,
+    rpc_url: Option<String>,
+    rpc_user: Option<String>,
+    rpc_pwd: Option<String>,
+    rpc_fee_delta: Option<i64>,
 }
 
 impl ConfigFile {
@@ -124,6 +136,10 @@ impl ConfigFile {
             monitor: None,
             auto_update: None,
             miner_name: None,
+            rpc_url: None,
+            rpc_user: None,
+            rpc_pwd: None,
+            rpc_fee_delta: None,
         }
     }
 }
@@ -154,6 +170,10 @@ pub struct Configuration {
     auto_update: bool,
     signature: String,
     miner_name: Option<String>,
+    rpc_url: String,
+    rpc_user: String,
+    rpc_pwd: String,
+    rpc_fee_delta: Option<i64>,
 }
 impl Configuration {
     fn validate_supported_delay(delay: u64) -> Result<(), String> {
@@ -201,6 +221,10 @@ and make that test pass."
         auto_update: bool,
         signature: String,
         miner_name: Option<String>,
+        rpc_url: String,
+        rpc_user: String,
+        rpc_pwd: String,
+        rpc_fee_delta: Option<i64>,
     ) -> Self {
         if let Err(error) = Self::validate_supported_delay(delay) {
             panic!("{error}");
@@ -231,6 +255,10 @@ and make that test pass."
             auto_update,
             signature,
             miner_name,
+            rpc_url,
+            rpc_user,
+            rpc_pwd,
+            rpc_fee_delta,
         }
     }
 
@@ -266,6 +294,10 @@ and make that test pass."
             false,
             false,
             "DDxDD".to_string(),
+            None,
+            "http://127.0.0.1:8332".to_string(),
+            "user".to_string(),
+            "password".to_string(),
             None,
         )
     }
@@ -430,6 +462,22 @@ and make that test pass."
         Self::cfg().miner_name.clone()
     }
 
+    pub fn rpc_url() -> String {
+        Self::cfg().rpc_url.clone()
+    }
+
+    pub fn rpc_user() -> String {
+        Self::cfg().rpc_user.clone()
+    }
+
+    pub fn rpc_pwd() -> String {
+        Self::cfg().rpc_pwd.clone()
+    }
+
+    pub fn rpc_fee_delta() -> Option<i64> {
+        Self::cfg().rpc_fee_delta
+    }
+
     // Loads config from CLI args, config file, and env vars with precedence: CLI > file > env.
     pub fn from_cli() -> Self {
         let args = Args::parse();
@@ -477,6 +525,27 @@ and make that test pass."
             .miner_name
             .or(config.miner_name)
             .or_else(|| std::env::var("MINER_NAME").ok());
+
+        let rpc_url = args
+            .rpc_url
+            .or(config.rpc_url)
+            .or_else(|| std::env::var("RPC_URL").ok())
+            .expect("RPC_URL is not set");
+        let rpc_user = args
+            .rpc_user
+            .or(config.rpc_user)
+            .or_else(|| std::env::var("RPC_USER").ok())
+            .expect("RPC_USER is not set");
+        let rpc_pwd = args
+            .rpc_pwd
+            .or(config.rpc_pwd)
+            .or_else(|| std::env::var("RPC_PWD").ok())
+            .expect("RPC_PWD is not set");
+        let rpc_fee_delta = args.rpc_fee_delta.or(config.rpc_fee_delta).or_else(|| {
+            std::env::var("RPC_FEE_DELTA")
+                .ok()
+                .and_then(|s| s.parse().ok())
+        });
         if let Some(ref miner_name) = miner_name {
             validate_miner_name(miner_name).unwrap_or_else(|e| panic!("{e}"));
         }
@@ -646,6 +715,10 @@ and make that test pass."
             auto_update,
             signature,
             miner_name,
+            rpc_url,
+            rpc_user,
+            rpc_pwd,
+            rpc_fee_delta,
         )
     }
 }
