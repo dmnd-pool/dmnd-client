@@ -212,12 +212,10 @@ impl Downstream {
             .expect("time went backwards")
             .as_millis();
 
-        let (mut difficulty_mgmt, _last_call) =
-            self_.safe_lock(|d| (d.difficulty_mgmt.clone(), d.last_call_to_update_hr))?;
-
-        self_.safe_lock(|d| d.last_call_to_update_hr = timestamp_millis)?;
-
-        let realized_share_per_min = match difficulty_mgmt.share_count() {
+        let realized_share_per_min = match self_.safe_lock(|d| {
+            d.last_call_to_update_hr = timestamp_millis;
+            d.difficulty_mgmt.share_count()
+        })? {
             Some(value) => value,
             // we need at least 2 seconds of data
             None => return Ok(None),
@@ -527,7 +525,14 @@ mod test {
 
     fn target_rate_submits() -> VecDeque<Instant> {
         let oldest = Instant::now() - Duration::from_secs(30);
-        std::iter::repeat_n(oldest,5).collect()
+        std::iter::repeat_n(oldest, 5).collect()
+    }
+
+    fn submits_with_stale_history(stale_count: usize) -> VecDeque<Instant> {
+        let now = Instant::now();
+        let mut submits = VecDeque::from(vec![now - Duration::from_secs(61); stale_count]);
+        submits.push_back(now - Duration::from_secs(30));
+        submits
     }
 
     fn assert_hashrate_close(actual: f32, expected: f32) {
@@ -594,6 +599,77 @@ mod test {
         )
     }
 
+    fn seeded_downstream_with_channels(
+        estimated_downstream_hash_rate: f32,
+        latest_difficulty: f32,
+        pid_controller: Pid<f32>,
+        submits: VecDeque<Instant>,
+        channel_nominal_hashrate: f32,
+    ) -> (
+        Arc<Mutex<Downstream>>,
+        Arc<Mutex<UpstreamDifficultyConfig>>,
+        tokio::sync::mpsc::Receiver<sv1_api::json_rpc::Message>,
+    ) {
+        let mut current_difficulties = VecDeque::new();
+        current_difficulties.push_back(latest_difficulty);
+        let difficulty_mgmt = DownstreamDifficultyConfig {
+            estimated_downstream_hash_rate,
+            submits,
+            pid_controller,
+            current_difficulties,
+            initial_difficulty: latest_difficulty,
+            hard_minimum_difficulty: None,
+        };
+        let upstream_config = Arc::new(Mutex::new(UpstreamDifficultyConfig {
+            channel_diff_update_interval: 60,
+            channel_nominal_hashrate,
+        }));
+        let (tx_sv1_submit, _rx_sv1_submit) = tokio::sync::mpsc::channel(10);
+        let (tx_outgoing, rx_outgoing) = channel(10);
+        let (tx_update_token, _rx_update_token) = channel(10);
+        let first_job = Notify {
+            job_id: "seed".to_string(),
+            prev_hash: PrevHash::try_from("0".repeat(64).as_str()).unwrap(),
+            coin_base1: "ffff".try_into().unwrap(),
+            coin_base2: "ffff".try_into().unwrap(),
+            merkle_branch: vec![MerkleNode::try_from(vec![7_u8; 32]).unwrap()],
+            version: HexU32Be(5667),
+            bits: HexU32Be(5678),
+            time: HexU32Be(5609),
+            clean_jobs: true,
+        };
+
+        (
+            Arc::new(Mutex::new(Downstream::new(
+                1,
+                vec![],
+                vec![],
+                None,
+                None,
+                tx_sv1_submit,
+                tx_outgoing,
+                0,
+                difficulty_mgmt,
+                upstream_config.clone(),
+                StatsSender::new(),
+                first_job,
+                tx_update_token,
+            ))),
+            upstream_config,
+            rx_outgoing,
+        )
+    }
+
+    fn extract_set_difficulty(message: &sv1_api::json_rpc::Message) -> Option<f64> {
+        let json = serde_json::to_value(message).unwrap();
+        if json["method"].as_str() != Some("mining.set_difficulty") {
+            return None;
+        }
+        json["params"][0]
+            .as_f64()
+            .or_else(|| json["params"][0].as_u64().map(|value| value as f64))
+    }
+
     #[tokio::test]
     async fn initial_seed_is_not_reconciled_when_quantized_difficulty_is_unchanged() {
         let quantized_difficulty = get_diff(RAW_BOOTSTRAP_HASHRATE);
@@ -619,6 +695,91 @@ mod test {
 
         assert_hashrate_close(estimated_downstream_hash_rate, quantized_hashrate);
         assert_hashrate_close(channel_nominal_hashrate, quantized_hashrate);
+    }
+
+    #[tokio::test]
+    #[ignore = "non-zero delay is blocked until the stale bootstrap difficulty replay bug is fixed"]
+    async fn positive_delay_does_not_replay_stale_bootstrap_difficulty_after_retarget() {
+        let initial_difficulty = get_diff(RAW_BOOTSTRAP_HASHRATE);
+        let expected_retarget_difficulty = initial_difficulty / 2.0;
+        let mut pid = Pid::new(*crate::SHARE_PER_MIN, initial_difficulty * 10.0);
+        pid.p(-(initial_difficulty * 0.05), f32::MAX)
+            .i(0.0, f32::MAX)
+            .d(0.0, f32::MAX);
+
+        let (downstream, _upstream_config, mut rx_outgoing) = seeded_downstream_with_channels(
+            RAW_BOOTSTRAP_HASHRATE,
+            initial_difficulty,
+            pid,
+            VecDeque::new(),
+            RAW_BOOTSTRAP_HASHRATE,
+        );
+
+        let (bootstrap_message, _) = diff_to_sv1_message(initial_difficulty as f64).unwrap();
+        Downstream::send_message_downstream(downstream.clone(), bootstrap_message.clone()).await;
+
+        let initial_bootstrap_message =
+            tokio::time::timeout(Duration::from_secs(1), rx_outgoing.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        let bootstrap_difficulty = extract_set_difficulty(&initial_bootstrap_message).unwrap();
+        assert_eq!(bootstrap_difficulty as f32, initial_difficulty);
+
+        let resend_downstream = downstream.clone();
+        let resend_handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Downstream::send_message_downstream(resend_downstream, bootstrap_message).await;
+        });
+
+        Downstream::try_update_difficulty_settings(&downstream)
+            .await
+            .unwrap();
+
+        let retarget_message = tokio::time::timeout(Duration::from_secs(1), rx_outgoing.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let retarget_difficulty = extract_set_difficulty(&retarget_message).unwrap();
+        assert_eq!(retarget_difficulty as f32, expected_retarget_difficulty);
+
+        let maybe_stale_bootstrap =
+            tokio::time::timeout(Duration::from_millis(100), rx_outgoing.recv()).await;
+        resend_handle.await.unwrap();
+
+        match maybe_stale_bootstrap {
+            Err(_) => {}
+            Ok(Some(message)) => {
+                let replayed_difficulty = extract_set_difficulty(&message).unwrap();
+                panic!(
+                    "stale bootstrap mining.set_difficulty replayed after retarget: expected no further difficulty update, got {replayed_difficulty}"
+                );
+            }
+            Ok(None) => panic!("downstream message channel closed unexpectedly"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_submit_history_is_pruned_when_retarget_is_skipped() {
+        let latest_difficulty = 1024.0;
+        let mut pid = Pid::new(*crate::SHARE_PER_MIN, latest_difficulty * 10.0);
+        pid.p(0.0, f32::MAX).i(0.0, f32::MAX).d(0.0, f32::MAX);
+
+        let (downstream, _upstream_config) = seeded_downstream(
+            hashrate_for_diff(latest_difficulty),
+            latest_difficulty,
+            pid,
+            submits_with_stale_history(4_096),
+            hashrate_for_diff(latest_difficulty),
+        );
+
+        let updated = Downstream::update_difficulty_and_hashrate(&downstream).unwrap();
+        assert_eq!(updated, None);
+
+        let retained_submits = downstream
+            .safe_lock(|d| d.difficulty_mgmt.submits.len())
+            .unwrap();
+        assert_eq!(retained_submits, 1);
     }
 
     #[test]

@@ -60,20 +60,19 @@ pub struct DownstreamDifficultyConfig {
 impl DownstreamDifficultyConfig {
     pub fn share_count(&mut self) -> Option<f32> {
         let now = std::time::Instant::now();
-        if self.submits.is_empty() {
-            return Some(0.0);
-        }
-        let oldest = self.submits[0];
-        if now - oldest < std::time::Duration::from_secs(20) {
-            return None;
-        }
-        if now - oldest < std::time::Duration::from_secs(60) {
-            let elapsed = now - oldest;
-            Some(self.submits.len() as f32 / (elapsed.as_millis() as f32 / (60.0 * 1000.0)))
-        } else {
+        while let Some(&oldest) = self.submits.front() {
+            let elapsed = now.duration_since(oldest);
+            if elapsed < std::time::Duration::from_secs(20) {
+                return None;
+            }
+            if elapsed < std::time::Duration::from_secs(60) {
+                return Some(
+                    self.submits.len() as f32 / (elapsed.as_millis() as f32 / (60.0 * 1000.0)),
+                );
+            }
             self.submits.pop_front();
-            self.share_count()
         }
+        Some(0.0)
     }
     pub fn on_new_valid_share(&mut self) {
         self.submits.push_back(std::time::Instant::now());
