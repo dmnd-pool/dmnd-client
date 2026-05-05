@@ -156,6 +156,25 @@ pub struct Configuration {
     miner_name: Option<String>,
 }
 impl Configuration {
+    fn validate_supported_delay(delay: u64) -> Result<(), String> {
+        if delay == 0 {
+            return Ok(());
+        }
+
+        Err(format!(
+            "Non-zero `delay` is currently unsupported.\n\n\
+Known issue:\n\
+When `delay > 0`, the translator keeps a scheduled bootstrap `mining.set_difficulty` replay alive during the delay window. \
+If a downstream retarget happens before that replay fires, the stale bootstrap difficulty can be resent after the newer retarget. \
+That leaves the miner's downstream difficulty out of sync with the bridge/upstream target that was already advanced.\n\n\
+Configured `delay`: {delay}\n\n\
+Do not use `--delay`, `DELAY`, or config `delay` until this is fixed.\n\
+Before enabling non-zero delay again, remove `#[ignore]` from \
+`translator::downstream::diff_management::test::positive_delay_does_not_replay_stale_bootstrap_difficulty_after_retarget` \
+and make that test pass."
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         token: Option<String>,
@@ -183,6 +202,10 @@ impl Configuration {
         signature: String,
         miner_name: Option<String>,
     ) -> Self {
+        if let Err(error) = Self::validate_supported_delay(delay) {
+            panic!("{error}");
+        }
+
         Configuration {
             token,
             tp_address,
@@ -598,7 +621,7 @@ impl Configuration {
             || config.auto_update.unwrap_or(true)
             || std::env::var("AUTO_UPDATE").is_ok();
 
-        Configuration {
+        Self::new(
             token,
             tp_address,
             interval,
@@ -623,7 +646,7 @@ impl Configuration {
             auto_update,
             signature,
             miner_name,
-        }
+        )
     }
 }
 
@@ -781,5 +804,26 @@ impl HashUnit {
         } else {
             format!("{hashrate:.2}")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Configuration;
+
+    #[test]
+    fn zero_delay_remains_supported() {
+        assert!(Configuration::validate_supported_delay(0).is_ok());
+    }
+
+    #[test]
+    fn non_zero_delay_message_describes_bug_and_fix_path() {
+        let error = Configuration::validate_supported_delay(1).unwrap_err();
+
+        assert!(error.contains("Non-zero `delay` is currently unsupported"));
+        assert!(error.contains("bootstrap `mining.set_difficulty`"));
+        assert!(error
+            .contains("positive_delay_does_not_replay_stale_bootstrap_difficulty_after_retarget"));
+        assert!(error.contains("Do not use `--delay`, `DELAY`, or config `delay`"));
     }
 }
