@@ -212,12 +212,10 @@ impl Downstream {
             .expect("time went backwards")
             .as_millis();
 
-        let (mut difficulty_mgmt, _last_call) =
-            self_.safe_lock(|d| (d.difficulty_mgmt.clone(), d.last_call_to_update_hr))?;
-
-        self_.safe_lock(|d| d.last_call_to_update_hr = timestamp_millis)?;
-
-        let realized_share_per_min = match difficulty_mgmt.share_count() {
+        let realized_share_per_min = match self_.safe_lock(|d| {
+            d.last_call_to_update_hr = timestamp_millis;
+            d.difficulty_mgmt.share_count()
+        })? {
             Some(value) => value,
             // we need at least 2 seconds of data
             None => return Ok(None),
@@ -527,7 +525,14 @@ mod test {
 
     fn target_rate_submits() -> VecDeque<Instant> {
         let oldest = Instant::now() - Duration::from_secs(30);
-        std::iter::repeat_n(oldest,5).collect()
+        std::iter::repeat_n(oldest, 5).collect()
+    }
+
+    fn submits_with_stale_history(stale_count: usize) -> VecDeque<Instant> {
+        let now = Instant::now();
+        let mut submits = VecDeque::from(vec![now - Duration::from_secs(61); stale_count]);
+        submits.push_back(now - Duration::from_secs(30));
+        submits
     }
 
     fn assert_hashrate_close(actual: f32, expected: f32) {
@@ -619,6 +624,29 @@ mod test {
 
         assert_hashrate_close(estimated_downstream_hash_rate, quantized_hashrate);
         assert_hashrate_close(channel_nominal_hashrate, quantized_hashrate);
+    }
+
+    #[tokio::test]
+    async fn stale_submit_history_is_pruned_when_retarget_is_skipped() {
+        let latest_difficulty = 1024.0;
+        let mut pid = Pid::new(*crate::SHARE_PER_MIN, latest_difficulty * 10.0);
+        pid.p(0.0, f32::MAX).i(0.0, f32::MAX).d(0.0, f32::MAX);
+
+        let (downstream, _upstream_config) = seeded_downstream(
+            hashrate_for_diff(latest_difficulty),
+            latest_difficulty,
+            pid,
+            submits_with_stale_history(4_096),
+            hashrate_for_diff(latest_difficulty),
+        );
+
+        let updated = Downstream::update_difficulty_and_hashrate(&downstream).unwrap();
+        assert_eq!(updated, None);
+
+        let retained_submits = downstream
+            .safe_lock(|d| d.difficulty_mgmt.submits.len())
+            .unwrap();
+        assert_eq!(retained_submits, 1);
     }
 
     #[test]
