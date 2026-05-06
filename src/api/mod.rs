@@ -18,7 +18,7 @@ pub struct AppState {
     router: Router,
     stats_sender: StatsSender,
     downstream_handoff: crate::DownstreamHandoffSender,
-    rpc: Arc<BitcoindRpc>,
+    rpc: Option<Arc<BitcoindRpc>>,
 }
 
 pub(crate) async fn start(
@@ -26,20 +26,20 @@ pub(crate) async fn start(
     stats_sender: StatsSender,
     downstream_handoff: crate::DownstreamHandoffSender,
 ) {
-    let rpc_url = Configuration::rpc_url();
-    let rpc_user = Configuration::rpc_user();
-    let rpc_pwd = Configuration::rpc_pwd();
+    let rpc = Configuration::bitcoind_rpc_config().map(|config| {
+        Arc::new(BitcoindRpc::new(
+            config.url,
+            config.user,
+            config.pwd,
+            config.fee_delta,
+        ))
+    });
 
     let state = AppState {
         router,
         stats_sender,
         downstream_handoff,
-        rpc: Arc::new(BitcoindRpc::new(
-            rpc_url,
-            rpc_user,
-            rpc_pwd,
-            Configuration::rpc_fee_delta(),
-        )),
+        rpc,
     };
     let app = AxumRouter::new()
         .route("/api/health", get(Api::health_check))

@@ -149,7 +149,7 @@ async fn library_init_sv2_setup_connection() {
         "http://127.0.0.1:8332".to_string(),
         "user".to_string(),
         "password".to_string(),
-        None,
+        "100000000".to_string(),
     );
 
     let proxy = tokio::spawn(dmnd_client::start(config));

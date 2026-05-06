@@ -8,7 +8,7 @@ use axum::{
     Json,
 };
 use serde::Serialize;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub struct Api {}
 
@@ -156,7 +156,17 @@ impl Api {
         State(state): State<AppState>,
         Path(tx): Path<String>,
     ) -> impl IntoResponse {
-        match state.rpc.submit_transaction(&tx).await {
+        let Some(rpc) = state.rpc.as_ref() else {
+            warn!("PRIORITIZING TXS NOT ENABLED");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(APIResponse::error(Some(
+                    "PRIORITIZING TXS NOT ENABLED".to_string(),
+                ))),
+            );
+        };
+
+        match rpc.submit_transaction(&tx).await {
             Ok(txid) => {
                 info!("transaction sent to bitcoind: {txid}");
                 (StatusCode::OK, Json(APIResponse::success(Some(txid))))
@@ -232,15 +242,41 @@ async fn health_check_reports_full_translator_handoff() {
         router,
         stats_sender: crate::api::stats::StatsSender::new(),
         downstream_handoff: handoff_tx,
-        rpc: std::sync::Arc::new(crate::api::bitcoin_rpc::BitcoindRpc::new(
-            "http://127.0.0.1:8332".to_string(),
-            "user".to_string(),
-            "password".to_string(),
-            None,
+        rpc: Some(std::sync::Arc::new(
+            crate::api::bitcoin_rpc::BitcoindRpc::new(
+                "http://127.0.0.1:8332".to_string(),
+                "user".to_string(),
+                "password".to_string(),
+                100_000_000,
+            ),
         )),
     };
 
     let response = Api::health_check(State(state)).await.into_response();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn send_tx_reports_unavailable_when_rpc_is_disabled() {
+    use axum::extract::{Path, State};
+    use axum::response::IntoResponse;
+    use tokio::sync::mpsc;
+
+    let auth_pub_k = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
+    let router = crate::router::Router::new(vec![], auth_pub_k, None, None);
+
+    let (handoff_tx, _handoff_rx) = mpsc::channel(1);
+    let state = AppState {
+        router,
+        stats_sender: crate::api::stats::StatsSender::new(),
+        downstream_handoff: handoff_tx,
+        rpc: None,
+    };
+
+    let response = Api::send_tx_to_bitcoind(State(state), Path("00".to_string()))
+        .await
+        .into_response();
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
