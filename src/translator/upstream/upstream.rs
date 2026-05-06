@@ -24,10 +24,12 @@ use roles_logic_sv2::{
 use std::{
     collections::BTreeMap,
     sync::{atomic::AtomicBool, Arc},
-    time::Duration,
 };
 use tokio::{
-    sync::mpsc::{Receiver as TReceiver, Sender as TSender},
+    sync::{
+        mpsc::{Receiver as TReceiver, Sender as TSender},
+        watch,
+    },
     task,
 };
 use tracing::{error, info, warn};
@@ -146,6 +148,7 @@ impl Upstream {
         incoming_receiver: TReceiver<Mining<'static>>,
         rx_sv2_submit_shares_ext: TReceiver<UpstreamSubmitShare>,
         rx_update_token: TReceiver<String>,
+        diff_update_rx: watch::Receiver<u64>,
     ) -> Result<AbortOnDrop, Error<'static>> {
         let task_manager = TaskManager::initialize();
         let abortable = task_manager
@@ -156,7 +159,7 @@ impl Upstream {
         Self::connect(self_.clone()).await?; // Propagate error, it will be handled in the caller
 
         let (diff_manager_abortable, main_loop_abortable) =
-            Self::parse_incoming(self_.clone(), incoming_receiver)?;
+            Self::parse_incoming(self_.clone(), incoming_receiver, diff_update_rx)?;
 
         let handle_submit_abortable = Self::handle_submit(self_.clone(), rx_sv2_submit_shares_ext)?;
         let handle_token_update_abortable =
@@ -278,6 +281,7 @@ impl Upstream {
     pub fn parse_incoming(
         self_: Arc<Mutex<Self>>,
         mut receiver: TReceiver<Mining<'static>>,
+        diff_update_rx: watch::Receiver<u64>,
     ) -> ProxyResult<'static, (AbortOnDrop, AbortOnDrop)> {
         let clone = self_.clone();
         let (tx_frame, tx_sv2_extranonce, tx_sv2_new_ext_mining_job, tx_sv2_set_new_prev_hash) =
@@ -293,16 +297,7 @@ impl Upstream {
                 .map_err(|_| Error::TranslatorUpstreamMutexPoisoned)?;
         let diff_manager_handle = {
             let self_ = self_.clone();
-            task::spawn(async move {
-                // No need to start diff management immediatly
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                loop {
-                    if let Err(e) = Self::try_update_hashrate(self_.clone()).await {
-                        error!("Failed to update hashrate: {e:?}");
-                        return;
-                    };
-                }
-            })
+            task::spawn(async move { Self::run_diff_management(self_, diff_update_rx).await })
         };
 
         let main_loop_handle = {
@@ -933,6 +928,7 @@ mod tests {
     use super::*;
     use crate::monitor::shares::RejectionReason;
     use tokio::sync::{mpsc, oneshot};
+    use tokio::time::{timeout, Duration};
 
     async fn test_upstream() -> Arc<Mutex<Upstream>> {
         let (tx_sv2_set_new_prev_hash, _rx_sv2_set_new_prev_hash) = mpsc::channel(1);
@@ -946,10 +942,9 @@ mod tests {
             crate::MIN_EXTRANONCE_SIZE - 1,
             tx_sv2_extranonce,
             Arc::new(Mutex::new(vec![0; 32])),
-            Arc::new(Mutex::new(UpstreamDifficultyConfig {
-                channel_diff_update_interval: crate::CHANNEL_DIFF_UPDTATE_INTERVAL,
-                channel_nominal_hashrate: 0.0,
-            })),
+            Arc::new(Mutex::new(
+                UpstreamDifficultyConfig::new(crate::CHANNEL_DIFF_UPDTATE_INTERVAL, 0.0).0,
+            )),
             sender,
             "sig".to_string(),
         )
@@ -1021,5 +1016,55 @@ mod tests {
             Err(RejectionReason::JobIdNotFound)
         );
         assert_eq!(second_result_rx.await.unwrap(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn immediate_signal_emits_update_channel_before_periodic_interval() {
+        let (tx_sv2_set_new_prev_hash, _rx_sv2_set_new_prev_hash) = mpsc::channel(1);
+        let (tx_sv2_new_ext_mining_job, _rx_sv2_new_ext_mining_job) = mpsc::channel(1);
+        let (tx_sv2_extranonce, _rx_sv2_extranonce) = mpsc::channel(1);
+        let (sender, mut receiver) = mpsc::channel(4);
+        let (difficulty_config, diff_update_rx) =
+            UpstreamDifficultyConfig::new(crate::CHANNEL_DIFF_UPDTATE_INTERVAL, 0.0);
+        let difficulty_config = Arc::new(Mutex::new(difficulty_config));
+        let upstream = Upstream::new(
+            tx_sv2_set_new_prev_hash,
+            tx_sv2_new_ext_mining_job,
+            crate::MIN_EXTRANONCE_SIZE - 1,
+            tx_sv2_extranonce,
+            Arc::new(Mutex::new(vec![0; 32])),
+            difficulty_config.clone(),
+            sender,
+            "sig".to_string(),
+        )
+        .await
+        .unwrap();
+        upstream.safe_lock(|u| u.channel_id = Some(42)).unwrap();
+
+        let (_incoming_tx, incoming_rx) = mpsc::channel(1);
+        let (diff_manager_abortable, main_loop_abortable) =
+            Upstream::parse_incoming(upstream.clone(), incoming_rx, diff_update_rx).unwrap();
+
+        difficulty_config
+            .safe_lock(|c| {
+                c.channel_nominal_hashrate = 12_345.0;
+                c.request_immediate_update();
+            })
+            .unwrap();
+
+        let message = timeout(Duration::from_millis(250), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match message {
+            Mining::UpdateChannel(update) => {
+                assert_eq!(update.channel_id, 42);
+                assert_eq!(update.nominal_hash_rate, 12_345.0);
+            }
+            other => panic!("expected UpdateChannel, got {other:?}"),
+        }
+
+        drop(diff_manager_abortable);
+        drop(main_loop_abortable);
     }
 }
