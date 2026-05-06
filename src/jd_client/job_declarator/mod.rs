@@ -18,7 +18,7 @@ use std::{
 };
 use task_manager::TaskManager;
 use tokio::sync::mpsc::{Receiver as TReceiver, Sender as TSender};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use async_recursion::async_recursion;
 use nohash_hasher::BuildNoHashHasher;
@@ -266,12 +266,12 @@ impl JobDeclarator {
                 }
             }
         }
-        for txid in missing_prioritized_txids(&prioritized_txids, &template_txids) {
-            error!(
-                txid,
-                template_id = template.template_id,
-                "prioritized transaction is missing from template transaction list"
-            );
+        let missing_txids = missing_prioritized_txids(&prioritized_txids, &template_txids);
+        if !missing_txids.is_empty() {
+            tokio::task::spawn(check_missing_prioritized_txids(
+                missing_txids,
+                template.template_id,
+            ));
         }
         let tx_ids: Seq064K<'static, U256> = Seq064K::from(tx_ids);
 
@@ -605,6 +605,46 @@ fn missing_prioritized_txids(
         .filter(|txid| !template_txids.contains(*txid))
         .cloned()
         .collect()
+}
+
+// Prioritized transactions are submitted to bitcoind with a large virtual fee delta so they
+// should remain attractive for block templates while they are in the mempool. If such a
+// transaction is missing from a template, check getmempoolentry before logging an error: when
+// bitcoind no longer has it in the mempool, the most likely explanation is that it was mined.
+async fn check_missing_prioritized_txids(missing_txids: Vec<String>, template_id: u64) {
+    let Some(config) = crate::Configuration::bitcoind_rpc_config() else {
+        return;
+    };
+
+    let rpc = crate::api::bitcoin_rpc::BitcoindRpc::new(
+        config.url,
+        config.user,
+        config.pwd,
+        config.fee_delta,
+    );
+
+    for txid in missing_txids {
+        match rpc.transaction_in_mempool(&txid).await {
+            Ok(true) => {
+                error!(
+                    txid,
+                    template_id,
+                    "prioritized transaction is in mempool but missing from template transaction list"
+                );
+            }
+            Ok(false) => {
+                crate::prioritized_transactions::remove(&txid);
+            }
+            Err(e) => {
+                warn!(
+                    txid,
+                    template_id,
+                    error = %e,
+                    "failed to check prioritized transaction mempool state"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

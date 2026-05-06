@@ -79,6 +79,8 @@ struct Args {
     rpc_pwd: Option<String>,
     #[clap(long)]
     rpc_fee_delta: Option<i64>,
+    #[clap(long)]
+    api_tx_token: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -109,6 +111,7 @@ struct ConfigFile {
     rpc_user: Option<String>,
     rpc_pwd: Option<String>,
     rpc_fee_delta: Option<i64>,
+    api_tx_token: Option<String>,
 }
 
 impl ConfigFile {
@@ -140,6 +143,7 @@ impl ConfigFile {
             rpc_user: None,
             rpc_pwd: None,
             rpc_fee_delta: None,
+            api_tx_token: None,
         }
     }
 }
@@ -180,6 +184,7 @@ pub(crate) struct BitcoindRpcConfig {
     pub user: String,
     pub pwd: String,
     pub fee_delta: i64,
+    pub api_tx_token: String,
 }
 
 impl Configuration {
@@ -232,13 +237,20 @@ and make that test pass."
         rpc_user: String,
         rpc_pwd: String,
         rpc_fee_delta: String,
+        api_tx_token: String,
     ) -> Self {
         if let Err(error) = Self::validate_supported_delay(delay) {
             panic!("{error}");
         }
 
         let (prioritizing_txs_config, missing_prioritizing_txs_variables) =
-            Self::build_prioritizing_txs_config(rpc_url, rpc_user, rpc_pwd, rpc_fee_delta);
+            Self::build_prioritizing_txs_config(
+                rpc_url,
+                rpc_user,
+                rpc_pwd,
+                rpc_fee_delta,
+                api_tx_token,
+            );
 
         Configuration {
             token,
@@ -275,6 +287,7 @@ and make that test pass."
         user: String,
         pwd: String,
         fee_delta: String,
+        api_tx_token: String,
     ) -> (Option<BitcoindRpcConfig>, Vec<&'static str>) {
         let mut missing = Vec::new();
         if url.trim().is_empty() {
@@ -288,6 +301,9 @@ and make that test pass."
         }
         if fee_delta.trim().is_empty() {
             missing.push("RPC_FEE_DELTA");
+        }
+        if api_tx_token.trim().is_empty() {
+            missing.push("API_TX_TOKEN");
         }
 
         if !missing.is_empty() {
@@ -305,6 +321,7 @@ and make that test pass."
                 user,
                 pwd,
                 fee_delta,
+                api_tx_token,
             }),
             missing,
         )
@@ -347,6 +364,7 @@ and make that test pass."
             "user".to_string(),
             "password".to_string(),
             "100000000".to_string(),
+            "api-token".to_string(),
         )
     }
 
@@ -528,7 +546,7 @@ and make that test pass."
             return;
         }
 
-        if missing.len() == 4 {
+        if missing.len() == 5 {
             warn!("PRIORITIZING TXS NOT ENABLED");
         } else {
             error!(
@@ -606,6 +624,11 @@ and make that test pass."
             .map(|value| value.to_string())
             .or_else(|| config.rpc_fee_delta.map(|value| value.to_string()))
             .or_else(|| std::env::var("RPC_FEE_DELTA").ok())
+            .unwrap_or_default();
+        let api_tx_token = args
+            .api_tx_token
+            .or(config.api_tx_token)
+            .or_else(|| std::env::var("API_TX_TOKEN").ok())
             .unwrap_or_default();
         if let Some(ref miner_name) = miner_name {
             validate_miner_name(miner_name).unwrap_or_else(|e| panic!("{e}"));
@@ -780,6 +803,7 @@ and make that test pass."
             rpc_user,
             rpc_pwd,
             rpc_fee_delta,
+            api_tx_token,
         )
     }
 }
@@ -968,6 +992,7 @@ mod tests {
             "user".to_string(),
             "password".to_string(),
             "42".to_string(),
+            "api-token".to_string(),
         );
 
         assert!(missing.is_empty());
@@ -978,10 +1003,22 @@ mod tests {
             "".to_string(),
             "password".to_string(),
             "42".to_string(),
+            "api-token".to_string(),
         );
 
         assert!(config.is_none());
         assert_eq!(missing, vec!["RPC_USER"]);
+
+        let (config, missing) = Configuration::build_prioritizing_txs_config(
+            "http://127.0.0.1:8332".to_string(),
+            "user".to_string(),
+            "password".to_string(),
+            "42".to_string(),
+            "".to_string(),
+        );
+
+        assert!(config.is_none());
+        assert_eq!(missing, vec!["API_TX_TOKEN"]);
     }
 
     #[test]
@@ -991,12 +1028,19 @@ mod tests {
             "".to_string(),
             "".to_string(),
             "".to_string(),
+            "".to_string(),
         );
 
         assert!(config.is_none());
         assert_eq!(
             missing,
-            vec!["RPC_URL", "RPC_USER", "RPC_PWD", "RPC_FEE_DELTA"]
+            vec![
+                "RPC_URL",
+                "RPC_USER",
+                "RPC_PWD",
+                "RPC_FEE_DELTA",
+                "API_TX_TOKEN"
+            ]
         );
     }
 }

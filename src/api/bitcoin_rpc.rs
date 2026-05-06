@@ -63,6 +63,38 @@ impl BitcoindRpc {
         }
     }
 
+    pub(crate) async fn transaction_in_mempool(
+        &self,
+        txid: &str,
+    ) -> Result<bool, BitcoindRpcError> {
+        let txid = validate_transaction_hex(txid)?;
+        let (status, text) = self.send_request("getmempoolentry", json!([txid])).await?;
+        let resp = RpcResponse::decode(status, &text)?;
+
+        if let Some(error) = resp.error {
+            if is_not_in_mempool_error(&error) {
+                return Ok(false);
+            }
+
+            return Err(BitcoindRpcError::Other(format!(
+                "bitcoind RPC error while checking mempool entry: {error}"
+            )));
+        }
+
+        if !status.is_success() {
+            return Err(BitcoindRpcError::Other(format!(
+                "bitcoind HTTP {status}: {text}"
+            )));
+        }
+
+        match resp.result {
+            Some(Value::Object(_)) => Ok(true),
+            _ => Err(BitcoindRpcError::InvalidResponse(format!(
+                "invalid getmempoolentry response from bitcoind: {text}"
+            ))),
+        }
+    }
+
     async fn send_request(
         &self,
         method: &str,
@@ -111,19 +143,7 @@ struct RpcResponse {
 
 impl RpcResponse {
     fn from_response(status: StatusCode, text: &str) -> Result<Option<Value>, BitcoindRpcError> {
-        let resp: Self = match serde_json::from_str(text) {
-            Ok(r) => r,
-            Err(e) if status.is_success() => {
-                return Err(BitcoindRpcError::InvalidResponse(format!(
-                    "failed to decode bitcoind response ({e}): {text}"
-                )));
-            }
-            Err(_) => {
-                return Err(BitcoindRpcError::Other(format!(
-                    "bitcoind HTTP {status}: {text}"
-                )));
-            }
-        };
+        let resp = Self::decode(status, text)?;
         if !status.is_success() {
             return Err(BitcoindRpcError::Other(format!(
                 "bitcoind HTTP {status}: {text}"
@@ -135,6 +155,18 @@ impl RpcResponse {
             )));
         }
         Ok(resp.result)
+    }
+
+    fn decode(status: StatusCode, text: &str) -> Result<Self, BitcoindRpcError> {
+        match serde_json::from_str(text) {
+            Ok(r) => Ok(r),
+            Err(e) if status.is_success() => Err(BitcoindRpcError::InvalidResponse(format!(
+                "failed to decode bitcoind response ({e}): {text}"
+            ))),
+            Err(_) => Err(BitcoindRpcError::Other(format!(
+                "bitcoind HTTP {status}: {text}"
+            ))),
+        }
     }
 }
 
@@ -158,6 +190,42 @@ fn validate_transaction_hex(tx: &str) -> Result<&str, BitcoindRpcError> {
         ));
     }
     Ok(tx)
+}
+
+fn is_not_in_mempool_error(error: &Value) -> bool {
+    let code_is_not_found = error.get("code").and_then(Value::as_i64) == Some(-5);
+    let message_says_not_in_mempool = error
+        .get("message")
+        .and_then(Value::as_str)
+        .is_some_and(|message| message.to_ascii_lowercase().contains("not in mempool"));
+
+    code_is_not_found || message_says_not_in_mempool
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_not_in_mempool_error;
+    use serde_json::json;
+
+    #[test]
+    fn detects_bitcoind_not_in_mempool_error() {
+        let error = json!({
+            "code": -5,
+            "message": "Transaction not in mempool"
+        });
+
+        assert!(is_not_in_mempool_error(&error));
+    }
+
+    #[test]
+    fn ignores_unrelated_bitcoind_errors() {
+        let error = json!({
+            "code": -26,
+            "message": "mandatory-script-verify-flag-failed"
+        });
+
+        assert!(!is_not_in_mempool_error(&error));
+    }
 }
 
 #[derive(Clone, Debug)]

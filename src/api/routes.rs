@@ -3,7 +3,7 @@ use crate::config::Configuration;
 use crate::proxy_state::ProxyState;
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -154,9 +154,10 @@ impl Api {
 
     pub async fn send_tx_to_bitcoind(
         State(state): State<AppState>,
+        headers: HeaderMap,
         Path(tx): Path<String>,
     ) -> impl IntoResponse {
-        let Some(rpc) = state.rpc.as_ref() else {
+        let Some(prioritizing_txs) = state.prioritizing_txs.as_ref() else {
             warn!("PRIORITIZING TXS NOT ENABLED");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -166,7 +167,15 @@ impl Api {
             );
         };
 
-        match rpc.submit_transaction(&tx).await {
+        if !is_authorized_for_tx_prioritization(&headers, &prioritizing_txs.api_tx_token) {
+            warn!("unauthorized tx prioritization request");
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(APIResponse::error(Some("Unauthorized".to_string()))),
+            );
+        }
+
+        match prioritizing_txs.rpc.submit_transaction(&tx).await {
             Ok(txid) => {
                 info!("transaction sent to bitcoind: {txid}");
                 (StatusCode::OK, Json(APIResponse::success(Some(txid))))
@@ -180,6 +189,14 @@ impl Api {
             }
         }
     }
+}
+
+fn is_authorized_for_tx_prioritization(headers: &HeaderMap, expected_token: &str) -> bool {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|token| token == expected_token)
 }
 
 #[derive(Serialize)]
@@ -242,14 +259,15 @@ async fn health_check_reports_full_translator_handoff() {
         router,
         stats_sender: crate::api::stats::StatsSender::new(),
         downstream_handoff: handoff_tx,
-        rpc: Some(std::sync::Arc::new(
-            crate::api::bitcoin_rpc::BitcoindRpc::new(
+        prioritizing_txs: Some(super::PrioritizingTxs {
+            rpc: std::sync::Arc::new(crate::api::bitcoin_rpc::BitcoindRpc::new(
                 "http://127.0.0.1:8332".to_string(),
                 "user".to_string(),
                 "password".to_string(),
                 100_000_000,
-            ),
-        )),
+            )),
+            api_tx_token: "api-token".to_string(),
+        }),
     };
 
     let response = Api::health_check(State(state)).await.into_response();
@@ -271,12 +289,60 @@ async fn send_tx_reports_unavailable_when_rpc_is_disabled() {
         router,
         stats_sender: crate::api::stats::StatsSender::new(),
         downstream_handoff: handoff_tx,
-        rpc: None,
+        prioritizing_txs: None,
     };
 
-    let response = Api::send_tx_to_bitcoind(State(state), Path("00".to_string()))
-        .await
-        .into_response();
+    let response = Api::send_tx_to_bitcoind(
+        State(state),
+        axum::http::HeaderMap::new(),
+        Path("00".to_string()),
+    )
+    .await
+    .into_response();
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn send_tx_rejects_missing_api_tx_token_header() {
+    use axum::extract::{Path, State};
+    use axum::response::IntoResponse;
+    use tokio::sync::mpsc;
+
+    let auth_pub_k = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
+    let router = crate::router::Router::new(vec![], auth_pub_k, None, None);
+
+    let (handoff_tx, _handoff_rx) = mpsc::channel(1);
+    let state = AppState {
+        router,
+        stats_sender: crate::api::stats::StatsSender::new(),
+        downstream_handoff: handoff_tx,
+        prioritizing_txs: Some(super::PrioritizingTxs {
+            rpc: std::sync::Arc::new(crate::api::bitcoin_rpc::BitcoindRpc::new(
+                "http://127.0.0.1:8332".to_string(),
+                "user".to_string(),
+                "password".to_string(),
+                100_000_000,
+            )),
+            api_tx_token: "api-token".to_string(),
+        }),
+    };
+
+    let response = Api::send_tx_to_bitcoind(
+        State(state),
+        axum::http::HeaderMap::new(),
+        Path("00".to_string()),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[test]
+fn tx_prioritization_auth_accepts_matching_bearer_token() {
+    let mut headers = HeaderMap::new();
+    headers.insert(AUTHORIZATION, "Bearer api-token".parse().unwrap());
+
+    assert!(is_authorized_for_tx_prioritization(&headers, "api-token"));
 }
