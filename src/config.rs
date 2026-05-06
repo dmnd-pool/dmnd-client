@@ -7,7 +7,7 @@ use std::{
     sync::OnceLock,
     time::Duration,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     shared::{
@@ -170,11 +170,18 @@ pub struct Configuration {
     auto_update: bool,
     signature: String,
     miner_name: Option<String>,
-    rpc_url: String,
-    rpc_user: String,
-    rpc_pwd: String,
-    rpc_fee_delta: Option<i64>,
+    prioritizing_txs_config: Option<BitcoindRpcConfig>,
+    missing_prioritizing_txs_variables: Vec<&'static str>,
 }
+
+#[derive(Clone, Debug)]
+pub(crate) struct BitcoindRpcConfig {
+    pub url: String,
+    pub user: String,
+    pub pwd: String,
+    pub fee_delta: i64,
+}
+
 impl Configuration {
     fn validate_supported_delay(delay: u64) -> Result<(), String> {
         if delay == 0 {
@@ -224,11 +231,14 @@ and make that test pass."
         rpc_url: String,
         rpc_user: String,
         rpc_pwd: String,
-        rpc_fee_delta: Option<i64>,
+        rpc_fee_delta: String,
     ) -> Self {
         if let Err(error) = Self::validate_supported_delay(delay) {
             panic!("{error}");
         }
+
+        let (prioritizing_txs_config, missing_prioritizing_txs_variables) =
+            Self::build_prioritizing_txs_config(rpc_url, rpc_user, rpc_pwd, rpc_fee_delta);
 
         Configuration {
             token,
@@ -255,11 +265,49 @@ and make that test pass."
             auto_update,
             signature,
             miner_name,
-            rpc_url,
-            rpc_user,
-            rpc_pwd,
-            rpc_fee_delta,
+            prioritizing_txs_config,
+            missing_prioritizing_txs_variables,
         }
+    }
+
+    fn build_prioritizing_txs_config(
+        url: String,
+        user: String,
+        pwd: String,
+        fee_delta: String,
+    ) -> (Option<BitcoindRpcConfig>, Vec<&'static str>) {
+        let mut missing = Vec::new();
+        if url.trim().is_empty() {
+            missing.push("RPC_URL");
+        }
+        if user.trim().is_empty() {
+            missing.push("RPC_USER");
+        }
+        if pwd.trim().is_empty() {
+            missing.push("RPC_PWD");
+        }
+        if fee_delta.trim().is_empty() {
+            missing.push("RPC_FEE_DELTA");
+        }
+
+        if !missing.is_empty() {
+            return (None, missing);
+        }
+
+        let fee_delta = match fee_delta.trim().parse() {
+            Ok(fee_delta) => fee_delta,
+            Err(_) => return (None, vec!["RPC_FEE_DELTA"]),
+        };
+
+        (
+            Some(BitcoindRpcConfig {
+                url,
+                user,
+                pwd,
+                fee_delta,
+            }),
+            missing,
+        )
     }
 
     pub(crate) fn init(config: Configuration) {
@@ -298,7 +346,7 @@ and make that test pass."
             "http://127.0.0.1:8332".to_string(),
             "user".to_string(),
             "password".to_string(),
-            None,
+            "100000000".to_string(),
         )
     }
 
@@ -462,20 +510,32 @@ and make that test pass."
         Self::cfg().miner_name.clone()
     }
 
-    pub fn rpc_url() -> String {
-        Self::cfg().rpc_url.clone()
+    pub(crate) fn prioritizing_txs_enabled() -> bool {
+        Self::cfg().prioritizing_txs_config.is_some()
     }
 
-    pub fn rpc_user() -> String {
-        Self::cfg().rpc_user.clone()
+    pub(crate) fn bitcoind_rpc_config() -> Option<BitcoindRpcConfig> {
+        if !Self::prioritizing_txs_enabled() {
+            return None;
+        }
+
+        Self::cfg().prioritizing_txs_config.clone()
     }
 
-    pub fn rpc_pwd() -> String {
-        Self::cfg().rpc_pwd.clone()
-    }
+    pub(crate) fn log_prioritizing_txs_status() {
+        let missing = &Self::cfg().missing_prioritizing_txs_variables;
+        if missing.is_empty() {
+            return;
+        }
 
-    pub fn rpc_fee_delta() -> Option<i64> {
-        Self::cfg().rpc_fee_delta
+        if missing.len() == 4 {
+            warn!("PRIORITIZING TXS NOT ENABLED");
+        } else {
+            error!(
+                missing_env_variables = %missing.join(", "),
+                "PRIORITIZING TXS NOT ENABLED, missing env variable"
+            );
+        }
     }
 
     // Loads config from CLI args, config file, and env vars with precedence: CLI > file > env.
@@ -530,22 +590,23 @@ and make that test pass."
             .rpc_url
             .or(config.rpc_url)
             .or_else(|| std::env::var("RPC_URL").ok())
-            .expect("RPC_URL is not set");
+            .unwrap_or_default();
         let rpc_user = args
             .rpc_user
             .or(config.rpc_user)
             .or_else(|| std::env::var("RPC_USER").ok())
-            .expect("RPC_USER is not set");
+            .unwrap_or_default();
         let rpc_pwd = args
             .rpc_pwd
             .or(config.rpc_pwd)
             .or_else(|| std::env::var("RPC_PWD").ok())
-            .expect("RPC_PWD is not set");
-        let rpc_fee_delta = args.rpc_fee_delta.or(config.rpc_fee_delta).or_else(|| {
-            std::env::var("RPC_FEE_DELTA")
-                .ok()
-                .and_then(|s| s.parse().ok())
-        });
+            .unwrap_or_default();
+        let rpc_fee_delta = args
+            .rpc_fee_delta
+            .map(|value| value.to_string())
+            .or_else(|| config.rpc_fee_delta.map(|value| value.to_string()))
+            .or_else(|| std::env::var("RPC_FEE_DELTA").ok())
+            .unwrap_or_default();
         if let Some(ref miner_name) = miner_name {
             validate_miner_name(miner_name).unwrap_or_else(|e| panic!("{e}"));
         }
@@ -898,5 +959,44 @@ mod tests {
         assert!(error
             .contains("positive_delay_does_not_replay_stale_bootstrap_difficulty_after_retarget"));
         assert!(error.contains("Do not use `--delay`, `DELAY`, or config `delay`"));
+    }
+
+    #[test]
+    fn prioritizing_txs_requires_all_rpc_values() {
+        let (config, missing) = Configuration::build_prioritizing_txs_config(
+            "http://127.0.0.1:8332".to_string(),
+            "user".to_string(),
+            "password".to_string(),
+            "42".to_string(),
+        );
+
+        assert!(missing.is_empty());
+        assert_eq!(config.expect("config should be enabled").fee_delta, 42);
+
+        let (config, missing) = Configuration::build_prioritizing_txs_config(
+            "http://127.0.0.1:8332".to_string(),
+            "".to_string(),
+            "password".to_string(),
+            "42".to_string(),
+        );
+
+        assert!(config.is_none());
+        assert_eq!(missing, vec!["RPC_USER"]);
+    }
+
+    #[test]
+    fn prioritizing_txs_reports_all_missing_rpc_values() {
+        let (config, missing) = Configuration::build_prioritizing_txs_config(
+            "".to_string(),
+            "".to_string(),
+            "".to_string(),
+            "".to_string(),
+        );
+
+        assert!(config.is_none());
+        assert_eq!(
+            missing,
+            vec!["RPC_URL", "RPC_USER", "RPC_PWD", "RPC_FEE_DELTA"]
+        );
     }
 }

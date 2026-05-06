@@ -6,7 +6,6 @@ use tracing::{debug, info};
 
 const RPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-const DEFAULT_RPC_FEE_DELTA: i64 = 100_000_000;
 
 pub(crate) struct BitcoindRpc {
     url: String,
@@ -16,9 +15,7 @@ pub(crate) struct BitcoindRpc {
 }
 
 impl BitcoindRpc {
-    pub(crate) fn new(url: String, user: String, pwd: String, fee_delta: Option<i64>) -> Self {
-        let fee_delta = fee_delta.unwrap_or(DEFAULT_RPC_FEE_DELTA);
-
+    pub(crate) fn new(url: String, user: String, pwd: String, fee_delta: i64) -> Self {
         Self {
             url,
             user,

@@ -145,6 +145,7 @@ async fn start_internal() {
     if let Err(e) = tracing_init_result {
         eprintln!("Tracing subscriber already set, skipping: {e}");
     }
+    Configuration::log_prioritizing_txs_status();
 
     Configuration::token().expect("TOKEN is not set");
 
