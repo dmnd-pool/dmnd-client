@@ -147,7 +147,7 @@ impl ConfigFile {
 #[derive(Debug)]
 pub struct Configuration {
     token: Option<String>,
-    tp_address: Option<String>,
+    tp_address: Option<SocketAddr>,
     interval: u64,
     delay: u64,
     downstream_hashrate: f32,
@@ -198,7 +198,7 @@ and make that test pass."
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         token: Option<String>,
-        tp_address: Option<String>,
+        tp_address: Option<SocketAddr>,
         interval: u64,
         delay: u64,
         downstream_hashrate: f32,
@@ -320,8 +320,8 @@ and make that test pass."
         Self::cfg().token.clone()
     }
 
-    pub fn tp_address() -> Option<String> {
-        Self::cfg().tp_address.clone()
+    pub fn tp_address() -> Option<SocketAddr> {
+        Self::cfg().tp_address
     }
 
     pub async fn pool_address() -> Option<Vec<SocketAddr>> {
@@ -520,6 +520,17 @@ and make that test pass."
             .tp_address
             .or(config.tp_address)
             .or_else(|| std::env::var("TP_ADDRESS").ok());
+        let tp_address = tp_address.map(|tp| {
+            let addr = tp.parse::<std::net::SocketAddr>().unwrap_or_else(|e| {
+                error!("Invalid TP address '{tp}': {e}. Expected format: 'ip:port' (e.g., '127.0.0.1:8442')");
+                std::process::exit(1);
+            });
+            if let Err(e) = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)) {
+                error!("Error: TP address '{addr}' is not reachable: {e}");
+                std::process::exit(1);
+            }
+            addr
+        });
 
         let miner_name = args
             .miner_name
