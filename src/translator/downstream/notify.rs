@@ -49,8 +49,10 @@ pub async fn start_notify(
                     d.difficulty_mgmt.estimated_downstream_hash_rate,
                 )
             })?;
-        upstream_difficulty_config
-            .safe_lock(|c| c.channel_nominal_hashrate += registered_hashrate)?;
+        upstream_difficulty_config.safe_lock(|c| {
+            c.channel_nominal_hashrate += registered_hashrate;
+            c.request_immediate_update();
+        })?;
         downstream.safe_lock(|d| d.mark_channel_hashrate_registered())?;
         if let Err(e) = stats_sender.setup_stats_reliable(connection_id).await {
             error!("Failed to register downstream stats {connection_id}: {e}");
@@ -66,6 +68,7 @@ pub async fn start_notify(
                 upstream_difficulty_config.safe_lock(|u| {
                     u.channel_nominal_hashrate -=
                         f32::min(registered_hashrate, u.channel_nominal_hashrate);
+                    u.request_immediate_update();
                 })?;
             }
             return Ok(());
@@ -275,10 +278,8 @@ mod tests {
             initial_difficulty: 1.0,
             hard_minimum_difficulty: None,
         };
-        let upstream_config = UpstreamDifficultyConfig {
-            channel_diff_update_interval: crate::CHANNEL_DIFF_UPDTATE_INTERVAL,
-            channel_nominal_hashrate: 0.0,
-        };
+        let (upstream_config, _rx) =
+            UpstreamDifficultyConfig::new(crate::CHANNEL_DIFF_UPDTATE_INTERVAL, 0.0);
         let (tx_sv1_submit, _rx_sv1_submit) = channel::<DownstreamMessages>(8);
         let (tx_outgoing, rx_outgoing) = channel(8);
         let (tx_update_token, _rx_update_token) = channel(8);
@@ -342,10 +343,11 @@ mod tests {
             initial_difficulty: latest_difficulty,
             hard_minimum_difficulty: None,
         };
-        let upstream_config = Arc::new(Mutex::new(UpstreamDifficultyConfig {
-            channel_diff_update_interval: crate::CHANNEL_DIFF_UPDTATE_INTERVAL,
+        let (upstream_config, _rx) = UpstreamDifficultyConfig::new(
+            crate::CHANNEL_DIFF_UPDTATE_INTERVAL,
             channel_nominal_hashrate,
-        }));
+        );
+        let upstream_config = Arc::new(Mutex::new(upstream_config));
         let (tx_sv1_submit, _rx_sv1_submit) = channel::<DownstreamMessages>(8);
         let (tx_outgoing, _rx_outgoing) = channel(8);
         let (tx_update_token, _rx_update_token) = channel(8);
@@ -415,6 +417,51 @@ mod tests {
         let second = serde_json::to_string(&second).unwrap();
         assert!(first.contains("mining.set_difficulty"));
         assert!(second.contains("mining.notify"));
+
+        if let Some(aborter) = task_manager.safe_lock(|t| t.get_aborter()).unwrap() {
+            drop(aborter);
+        }
+    }
+
+    #[tokio::test]
+    async fn start_notify_requests_immediate_upstream_retarget_on_register() {
+        let first_job = first_job("91");
+        let (downstream, _rx_outgoing) =
+            downstream_with_first_job(first_job, vec!["worker".to_string()]);
+        let downstream = Arc::new(Mutex::new(downstream));
+        let mut update_rx = downstream
+            .safe_lock(|d| {
+                d.upstream_difficulty_config
+                    .safe_lock(|c| c.subscribe_updates())
+                    .unwrap()
+            })
+            .unwrap();
+        let task_manager = TaskManager::initialize();
+        let (_tx_notify, rx_notify) = broadcast::channel(8);
+
+        start_notify(
+            task_manager.clone(),
+            downstream.clone(),
+            rx_notify,
+            "127.0.0.1".to_string(),
+            1,
+        )
+        .await
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), update_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let channel_nominal_hashrate = downstream
+            .safe_lock(|d| {
+                d.upstream_difficulty_config
+                    .safe_lock(|c| c.channel_nominal_hashrate)
+                    .unwrap()
+            })
+            .unwrap();
+        assert_eq!(channel_nominal_hashrate, 1.0);
 
         if let Some(aborter) = task_manager.safe_lock(|t| t.get_aborter()).unwrap() {
             drop(aborter);

@@ -1236,10 +1236,8 @@ mod tests {
             initial_difficulty: 1.0,
             hard_minimum_difficulty: None,
         };
-        let upstream_config = UpstreamDifficultyConfig {
-            channel_diff_update_interval: crate::CHANNEL_DIFF_UPDTATE_INTERVAL,
-            channel_nominal_hashrate: 0.0,
-        };
+        let (upstream_config, _rx) =
+            UpstreamDifficultyConfig::new(crate::CHANNEL_DIFF_UPDTATE_INTERVAL, 0.0);
         let (tx_sv1_submit, _rx_sv1_submit) = channel::<DownstreamMessages>(8);
         let (tx_outgoing, rx_outgoing) = channel(8);
         let (tx_update_token, _rx_update_token) = channel(8);

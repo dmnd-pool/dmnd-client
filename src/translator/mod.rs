@@ -89,10 +89,10 @@ pub async fn start(
 
     let channel_nominal_hashrate = 0.0;
 
-    let upstream_diff = UpstreamDifficultyConfig {
-        channel_diff_update_interval: crate::CHANNEL_DIFF_UPDTATE_INTERVAL,
+    let (upstream_diff, diff_update_rx) = UpstreamDifficultyConfig::new(
+        crate::CHANNEL_DIFF_UPDTATE_INTERVAL,
         channel_nominal_hashrate,
-    };
+    );
     let diff_config = Arc::new(Mutex::new(upstream_diff));
 
     // Instantiate a new `Upstream` (SV2 Pool)
@@ -113,6 +113,7 @@ pub async fn start(
         recv_from_up,
         rx_sv2_submit_shares_ext,
         rx_update_token,
+        diff_update_rx,
     )
     .await?;
     TaskManager::add_upstream(task_manager.clone(), upstream_abortable)

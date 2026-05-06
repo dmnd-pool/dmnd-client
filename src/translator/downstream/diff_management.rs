@@ -90,6 +90,7 @@ impl Downstream {
             u.channel_nominal_hashrate -=
                 // Make sure that upstream channel hasrate never goes below 0
                 f32::min(estimated_downstream_hash_rate, u.channel_nominal_hashrate);
+            u.request_immediate_update();
         })?;
         Ok(())
     }
@@ -318,6 +319,7 @@ impl Downstream {
             } else {
                 c.channel_nominal_hashrate = 0.0;
             }
+            c.request_immediate_update();
         })?;
         Ok(())
     }
@@ -560,10 +562,8 @@ mod test {
             initial_difficulty: latest_difficulty,
             hard_minimum_difficulty: None,
         };
-        let upstream_config = Arc::new(Mutex::new(UpstreamDifficultyConfig {
-            channel_diff_update_interval: 60,
-            channel_nominal_hashrate,
-        }));
+        let (upstream_config, _rx) = UpstreamDifficultyConfig::new(60, channel_nominal_hashrate);
+        let upstream_config = Arc::new(Mutex::new(upstream_config));
         let (tx_sv1_submit, _rx_sv1_submit) = tokio::sync::mpsc::channel(10);
         let (tx_outgoing, _rx_outgoing) = channel(10);
         let (tx_update_token, _rx_update_token) = channel(10);
@@ -620,10 +620,8 @@ mod test {
             initial_difficulty: latest_difficulty,
             hard_minimum_difficulty: None,
         };
-        let upstream_config = Arc::new(Mutex::new(UpstreamDifficultyConfig {
-            channel_diff_update_interval: 60,
-            channel_nominal_hashrate,
-        }));
+        let (upstream_config, _rx) = UpstreamDifficultyConfig::new(60, channel_nominal_hashrate);
+        let upstream_config = Arc::new(Mutex::new(upstream_config));
         let (tx_sv1_submit, _rx_sv1_submit) = tokio::sync::mpsc::channel(10);
         let (tx_outgoing, rx_outgoing) = channel(10);
         let (tx_update_token, _rx_update_token) = channel(10);
@@ -683,8 +681,15 @@ mod test {
             target_rate_submits(),
             RAW_BOOTSTRAP_HASHRATE,
         );
+        let mut update_rx = upstream_config
+            .safe_lock(|u| u.subscribe_updates())
+            .unwrap();
 
         Downstream::update_difficulty_and_hashrate(&downstream).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), update_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
 
         let estimated_downstream_hash_rate = downstream
             .safe_lock(|d| d.difficulty_mgmt.estimated_downstream_hash_rate)
@@ -695,6 +700,37 @@ mod test {
 
         assert_hashrate_close(estimated_downstream_hash_rate, quantized_hashrate);
         assert_hashrate_close(channel_nominal_hashrate, quantized_hashrate);
+    }
+
+    #[tokio::test]
+    async fn removing_downstream_hashrate_requests_immediate_upstream_retarget() {
+        let latest_difficulty = 1_024.0;
+        let estimated_hashrate = hashrate_for_diff(latest_difficulty);
+        let pid = Pid::new(*crate::SHARE_PER_MIN, latest_difficulty * 10.0);
+        let (downstream, upstream_config) = seeded_downstream(
+            estimated_hashrate,
+            latest_difficulty,
+            pid,
+            VecDeque::new(),
+            estimated_hashrate,
+        );
+        let mut update_rx = upstream_config
+            .safe_lock(|u| u.subscribe_updates())
+            .unwrap();
+
+        downstream
+            .safe_lock(|d| d.mark_channel_hashrate_registered())
+            .unwrap();
+        Downstream::remove_downstream_hashrate_from_channel(&downstream).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), update_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let channel_nominal_hashrate = upstream_config
+            .safe_lock(|u| u.channel_nominal_hashrate)
+            .unwrap();
+        assert_eq!(channel_nominal_hashrate, 0.0);
     }
 
     #[tokio::test]
@@ -840,10 +876,7 @@ mod test {
             initial_difficulty: 10_000.0,
             hard_minimum_difficulty: Some(NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY),
         };
-        let upstream_config = UpstreamDifficultyConfig {
-            channel_diff_update_interval: 60,
-            channel_nominal_hashrate: 0.0,
-        };
+        let (upstream_config, _rx) = UpstreamDifficultyConfig::new(60, 0.0);
         let (tx_sv1_submit, _rx_sv1_submit) = tokio::sync::mpsc::channel(10);
         let (tx_outgoing, _rx_outgoing) = channel(10);
         let (tx_update_token, _rx_update_token) = channel(10);
@@ -902,10 +935,7 @@ mod test {
             initial_difficulty: 10_000_000_000.0,
             hard_minimum_difficulty: None,
         };
-        let upstream_config = UpstreamDifficultyConfig {
-            channel_diff_update_interval: 60,
-            channel_nominal_hashrate: 0.0,
-        };
+        let (upstream_config, _rx) = UpstreamDifficultyConfig::new(60, 0.0);
         let (tx_sv1_submit, _rx_sv1_submit) = tokio::sync::mpsc::channel(10);
         let (tx_outgoing, _rx_outgoing) = channel(10);
         let (tx_update_token, _rx_update_token) = channel(10);

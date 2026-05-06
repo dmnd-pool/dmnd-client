@@ -128,11 +128,6 @@ impl Bridge {
                     debug!("New extended channel opened with id {}", success.channel_id);
                     let extranonce = success.extranonce_prefix.to_vec();
                     let extranonce2_len = success.extranonce_size;
-                    self.target
-                        .safe_lock(|t| *t = success.target.to_vec())
-                        .map_err(|e| {
-                            Error::TargetError(roles_logic_sv2::Error::PoisonLock(e.to_string()))
-                        })?;
                     Ok(OpenSv1Downstream {
                         channel_id: success.channel_id,
                         last_notify: self.last_notify.clone(),
@@ -730,24 +725,38 @@ pub struct OpenSv1Downstream {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::translator::downstream::Downstream;
+    use bitcoin::{blockdata::witness::Witness, hashes::Hash};
     use tokio::sync::mpsc;
+
+    const TEST_JOB_ID: u32 = 0;
+    const TEST_NTIME: u32 = 1_700_000_000;
 
     pub mod test_utils {
         use super::*;
 
         pub fn create_bridge(extranonces: ExtendedExtranonce) -> Result<Arc<Mutex<Bridge>>, ()> {
+            create_bridge_with_upstream_target(
+                extranonces,
+                [
+                    0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                ],
+            )
+        }
+
+        pub fn create_bridge_with_upstream_target(
+            extranonces: ExtendedExtranonce,
+            upstream_target: [u8; 32],
+        ) -> Result<Arc<Mutex<Bridge>>, ()> {
             let (tx_sv2_submit_shares_ext, _rx_sv2_submit_shares_ext) = mpsc::channel(1);
             let (tx_sv1_notify, _rx_sv1_notify) = broadcast::channel(1);
-            let upstream_target = vec![
-                0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0,
-            ];
 
             let b = Bridge::new(
                 tx_sv2_submit_shares_ext.clone(),
                 tx_sv1_notify,
                 extranonces,
-                Arc::new(Mutex::new(upstream_target)),
+                Arc::new(Mutex::new(upstream_target.to_vec())),
                 1,
             )
             .map_err(|_| ())?;
@@ -765,12 +774,103 @@ mod test {
                 id: 0,
             }
         }
+
+        pub fn create_sv1_submit_with_fields(
+            job_id: u32,
+            extranonce2_len: usize,
+            ntime: u32,
+            nonce: u32,
+        ) -> Submit<'static> {
+            Submit {
+                user_name: "test_user".to_string(),
+                job_id: job_id.to_string(),
+                extra_nonce2: sv1_api::utils::Extranonce::try_from(vec![0; extranonce2_len])
+                    .unwrap(),
+                time: sv1_api::utils::HexU32Be(ntime),
+                nonce: sv1_api::utils::HexU32Be(nonce),
+                version_bits: None,
+                id: 0,
+            }
+        }
+    }
+
+    fn seed_bridge_job(bridge: &mut Bridge) {
+        let out_id = bitcoin::hashes::sha256d::Hash::from_slice(&[0_u8; 32]).unwrap();
+        let previous_output = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_raw_hash(out_id),
+            vout: 0xffff_ffff,
+        };
+        let input = bitcoin::TxIn {
+            previous_output,
+            script_sig: vec![89_u8; 16].into(),
+            sequence: bitcoin::Sequence(0),
+            witness: Witness::new(),
+        };
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(1),
+            lock_time: bitcoin::locktime::absolute::LockTime::from_time(TEST_NTIME).unwrap(),
+            input: vec![input],
+            output: vec![],
+        };
+        let tx = bitcoin::consensus::serialize(&tx);
+        let prev_hash = SetNewPrevHash {
+            channel_id: 1,
+            job_id: TEST_JOB_ID,
+            prev_hash: [3; 32].into(),
+            min_ntime: TEST_NTIME,
+            nbits: 0x1d00ffff,
+        };
+        bridge.channel_factory.on_new_prev_hash(prev_hash).unwrap();
+        let new_mining_job = NewExtendedMiningJob {
+            channel_id: 1,
+            job_id: TEST_JOB_ID,
+            min_ntime: binary_sv2::Sv2Option::new(Some(TEST_NTIME)),
+            version: 0,
+            version_rolling_allowed: false,
+            merkle_path: vec![].into(),
+            coinbase_tx_prefix: tx[0..42].to_vec().try_into().unwrap(),
+            coinbase_tx_suffix: tx[58..].to_vec().try_into().unwrap(),
+        };
+        bridge
+            .channel_factory
+            .on_new_extended_mining_job(new_mining_job)
+            .unwrap();
+    }
+
+    fn classify_submit(
+        bridge: &mut Bridge,
+        channel_id: u32,
+        extranonce2_len: usize,
+        nonce: u32,
+    ) -> OnNewShare {
+        let upstream_target: [u8; 32] = bridge
+            .target
+            .safe_lock(|t| t.clone())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let mut upstream_target: Target = upstream_target.into();
+        bridge.channel_factory.set_target(&mut upstream_target);
+        let translated = bridge
+            .translate_submit(
+                channel_id,
+                test_utils::create_sv1_submit_with_fields(
+                    TEST_JOB_ID,
+                    extranonce2_len,
+                    TEST_NTIME,
+                    nonce,
+                ),
+                None,
+            )
+            .unwrap();
+        bridge
+            .channel_factory
+            .on_submit_shares_extended(translated)
+            .unwrap()
     }
 
     #[test]
     fn test_version_bits_insert() {
-        use bitcoin::{blockdata::witness::Witness, hashes::Hash};
-
         let extranonces = ExtendedExtranonce::new(0..6, 6..8, 8..16);
         let bridge = match test_utils::create_bridge(extranonces) {
             Ok(bridge) => bridge,
@@ -853,5 +953,114 @@ mod test {
                 );
             })
             .unwrap();
+    }
+
+    #[test]
+    fn opening_second_downstream_does_not_clobber_shared_upstream_target() {
+        let extranonces = ExtendedExtranonce::new(0..6, 6..8, 8..16);
+        let upstream_target = Downstream::difficulty_to_target(1_024.0);
+        let bridge =
+            test_utils::create_bridge_with_upstream_target(extranonces, upstream_target).unwrap();
+
+        bridge
+            .safe_lock(|bridge| {
+                bridge.on_new_sv1_connection(1_000_000_000_000.0).unwrap();
+                bridge.on_new_sv1_connection(10_000_000_000_000.0).unwrap();
+            })
+            .unwrap();
+
+        let shared_target = bridge
+            .safe_lock(|bridge| bridge.target.safe_lock(|t| t.clone()).unwrap())
+            .unwrap();
+        assert_eq!(shared_target, upstream_target.to_vec());
+    }
+
+    #[test]
+    fn repeated_downstream_opens_leave_shared_upstream_target_unchanged() {
+        let extranonces = ExtendedExtranonce::new(0..6, 6..8, 8..16);
+        let upstream_target = Downstream::difficulty_to_target(2_048.0);
+        let bridge =
+            test_utils::create_bridge_with_upstream_target(extranonces, upstream_target).unwrap();
+
+        bridge
+            .safe_lock(|bridge| {
+                for index in 0..32 {
+                    let hash_rate = 1_000_000_000_000.0 + (index as f32 * 250_000_000_000.0);
+                    bridge.on_new_sv1_connection(hash_rate).unwrap();
+                }
+            })
+            .unwrap();
+
+        let shared_target = bridge
+            .safe_lock(|bridge| bridge.target.safe_lock(|t| t.clone()).unwrap())
+            .unwrap();
+        assert_eq!(shared_target, upstream_target.to_vec());
+    }
+
+    #[test]
+    fn share_that_only_meets_downstream_target_stays_local_with_two_channels() {
+        let extranonces = ExtendedExtranonce::new(0..6, 6..8, 8..16);
+        let upstream_target = [0; 32];
+        let bridge =
+            test_utils::create_bridge_with_upstream_target(extranonces, upstream_target).unwrap();
+
+        let (channel_two_id, channel_two_extranonce2_len) = bridge
+            .safe_lock(|bridge| {
+                seed_bridge_job(bridge);
+                let channel_one = bridge.on_new_sv1_connection(1_000_000_000_000.0).unwrap();
+                let channel_two = bridge.on_new_sv1_connection(2_000_000_000_000.0).unwrap();
+                bridge.channel_factory.update_target_for_channel(
+                    channel_one.channel_id,
+                    Downstream::difficulty_to_target(16_384.0).into(),
+                );
+                bridge
+                    .channel_factory
+                    .update_target_for_channel(channel_two.channel_id, [255; 32].into());
+                (channel_two.channel_id, channel_two.extranonce2_len as usize)
+            })
+            .unwrap();
+
+        let (found_local_only_share, downstream_hits, upstream_hits, bitcoin_hits, errors) = bridge
+            .safe_lock(|bridge| {
+                let mut downstream_hits = 0;
+                let mut upstream_hits = 0;
+                let mut bitcoin_hits = 0;
+                let mut errors = 0;
+
+                let found = (0..4_096).any(|nonce| {
+                    match classify_submit(
+                        bridge,
+                        channel_two_id,
+                        channel_two_extranonce2_len,
+                        nonce,
+                    ) {
+                        OnNewShare::ShareMeetDownstreamTarget => {
+                            downstream_hits += 1;
+                            true
+                        }
+                        OnNewShare::SendSubmitShareUpstream(_) => {
+                            upstream_hits += 1;
+                            false
+                        }
+                        OnNewShare::ShareMeetBitcoinTarget(_) => {
+                            bitcoin_hits += 1;
+                            false
+                        }
+                        OnNewShare::SendErrorDownstream(_) => {
+                            errors += 1;
+                            false
+                        }
+                        OnNewShare::RelaySubmitShareUpstream => false,
+                    }
+                });
+
+                (found, downstream_hits, upstream_hits, bitcoin_hits, errors)
+            })
+            .unwrap();
+
+        assert!(
+            found_local_only_share,
+            "expected at least one share to stay local; downstream={downstream_hits}, upstream={upstream_hits}, bitcoin={bitcoin_hits}, errors={errors}"
+        );
     }
 }
