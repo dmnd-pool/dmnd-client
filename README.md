@@ -137,7 +137,7 @@ Example using `config.toml`:
 
 When the client is running, submit a raw transaction hex to:
 
-    POST http://<dmnd-client-host>:<api-server-port>/api/tx/<raw-transaction-hex>
+    POST http://<dmnd-client-host>:<api-server-port>/api/tx/submit/<raw-transaction-hex>
 
 The API server port defaults to `3001` and can be changed with `--api-server-port`,
 `api_server_port`, or `API_SERVER_PORT`.
@@ -146,7 +146,7 @@ Example:
 
     curl -X POST \
       -H "Authorization: Bearer <api-token>" \
-      "http://127.0.0.1:3001/api/tx/<raw-transaction-hex>"
+      "http://127.0.0.1:3001/api/tx/submit/<raw-transaction-hex>"
 
 If the prioritization configuration is incomplete, this endpoint is disabled. In that case the
 client logs that transaction prioritization is not enabled and the endpoint returns `503 Service
