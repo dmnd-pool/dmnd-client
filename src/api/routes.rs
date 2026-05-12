@@ -161,7 +161,7 @@ impl Api {
             warn!("PRIORITIZING TXS NOT ENABLED");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(APIResponse::error(Some(
+                Json(APIResponse::<String>::error(Some(
                     "PRIORITIZING TXS NOT ENABLED".to_string(),
                 ))),
             );
@@ -171,7 +171,9 @@ impl Api {
             warn!("unauthorized tx prioritization request");
             return (
                 StatusCode::UNAUTHORIZED,
-                Json(APIResponse::error(Some("Unauthorized".to_string()))),
+                Json(APIResponse::<String>::error(Some(
+                    "Unauthorized".to_string(),
+                ))),
             );
         }
 
@@ -188,6 +190,40 @@ impl Api {
                 )
             }
         }
+    }
+
+    pub async fn get_prioritized_transactions(
+        State(state): State<AppState>,
+        headers: HeaderMap,
+    ) -> impl IntoResponse {
+        let Some(prioritizing_txs) = state.prioritizing_txs.as_ref() else {
+            warn!("PRIORITIZING TXS NOT ENABLED");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(APIResponse::<PrioritizedTransactions>::error(Some(
+                    "PRIORITIZING TXS NOT ENABLED".to_string(),
+                ))),
+            );
+        };
+
+        if !is_authorized_for_tx_prioritization(&headers, &prioritizing_txs.api_tx_token) {
+            warn!("unauthorized prioritized txs request");
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(APIResponse::<PrioritizedTransactions>::error(Some(
+                    "Unauthorized".to_string(),
+                ))),
+            );
+        }
+
+        let mut txids = crate::prioritized_transactions::snapshot();
+        txids.sort();
+        let response = PrioritizedTransactions {
+            count: txids.len(),
+            txids,
+        };
+
+        (StatusCode::OK, Json(APIResponse::success(Some(response))))
     }
 }
 
@@ -206,6 +242,12 @@ struct AggregateStates {
     aggregate_accepted_shares: u64,
     aggregate_rejected_shares: u64,
     aggregate_diff: f64,
+}
+
+#[derive(Serialize)]
+struct PrioritizedTransactions {
+    count: usize,
+    txids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -337,6 +379,57 @@ async fn send_tx_rejects_missing_api_tx_token_header() {
     .into_response();
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn get_prioritized_transactions_returns_snapshot() {
+    use axum::body::to_bytes;
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use tokio::sync::mpsc;
+
+    crate::prioritized_transactions::record("routes-test-prioritized-a");
+    crate::prioritized_transactions::record("routes-test-prioritized-b");
+
+    let auth_pub_k = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
+    let router = crate::router::Router::new(vec![], auth_pub_k, None, None);
+
+    let (handoff_tx, _handoff_rx) = mpsc::channel(1);
+    let state = AppState {
+        router,
+        stats_sender: crate::api::stats::StatsSender::new(),
+        downstream_handoff: handoff_tx,
+        prioritizing_txs: Some(super::PrioritizingTxs {
+            rpc: std::sync::Arc::new(crate::api::bitcoin_rpc::BitcoindRpc::new(
+                "http://127.0.0.1:8332".to_string(),
+                "user".to_string(),
+                "password".to_string(),
+                100_000_000,
+            )),
+            api_tx_token: "api-token".to_string(),
+        }),
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(AUTHORIZATION, "Bearer api-token".parse().unwrap());
+
+    let response = Api::get_prioritized_transactions(State(state), headers)
+        .await
+        .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let txids = body["data"]["txids"].as_array().unwrap();
+
+    assert_eq!(body["success"], true);
+    assert!(txids
+        .iter()
+        .any(|txid| txid.as_str() == Some("routes-test-prioritized-a")));
+    assert!(txids
+        .iter()
+        .any(|txid| txid.as_str() == Some("routes-test-prioritized-b")));
 }
 
 #[test]
