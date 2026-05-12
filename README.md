@@ -139,6 +139,10 @@ When the client is running, submit a raw transaction hex to:
 
     POST http://<dmnd-client-host>:<api-server-port>/api/tx/submit/<raw-transaction-hex>
 
+Check the currently tracked prioritized transactions with:
+
+    GET http://<dmnd-client-host>:<api-server-port>/api/tx/prioritized
+
 The API server port defaults to `3001` and can be changed with `--api-server-port`,
 `api_server_port`, or `API_SERVER_PORT`.
 
@@ -148,8 +152,12 @@ Example:
       -H "Authorization: Bearer <api-token>" \
       "http://127.0.0.1:3001/api/tx/submit/<raw-transaction-hex>"
 
-If the prioritization configuration is incomplete, this endpoint is disabled. In that case the
-client logs that transaction prioritization is not enabled and the endpoint returns `503 Service
+    curl \
+      -H "Authorization: Bearer <api-token>" \
+      "http://127.0.0.1:3001/api/tx/prioritized"
+
+If the prioritization configuration is incomplete, these endpoints are disabled. In that case the
+client logs that transaction prioritization is not enabled and the endpoints return `503 Service
 Unavailable`.
 
 

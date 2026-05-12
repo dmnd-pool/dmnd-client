@@ -54,6 +54,10 @@ pub(crate) async fn start(
     let app = AxumRouter::new()
         .route("/api/health", get(Api::health_check))
         .route("/api/tx/submit/{tx}", post(Api::send_tx_to_bitcoind))
+        .route(
+            "/api/tx/prioritized",
+            get(Api::get_prioritized_transactions),
+        )
         .route("/api/pool/info", get(Api::get_pool_info))
         .route("/api/stats/miners", get(Api::get_downstream_stats))
         .route("/api/stats/aggregate", get(Api::get_aggregate_stats))
