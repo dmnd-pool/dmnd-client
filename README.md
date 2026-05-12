@@ -156,6 +156,28 @@ Example:
       -H "Authorization: Bearer <api-token>" \
       "http://127.0.0.1:3001/api/tx/prioritized"
 
+The prioritized transactions response includes the tracked transaction count, transaction hex,
+and live mempool fees from Bitcoin Core. `tx_fee.real` is `getmempoolentry`'s `fees.base`;
+`tx_fee.modified` is `getmempoolentry`'s boosted `fees.modified`.
+
+    {
+      "success": true,
+      "message": null,
+      "data": {
+        "count": 1,
+        "txs": [
+          {
+            "txid": "<txid>",
+            "tx_hex": "<raw-transaction-hex>",
+            "tx_fee": {
+              "real": 0.00001000,
+              "modified": 1.00001000
+            }
+          }
+        ]
+      }
+    }
+
 If the prioritization configuration is incomplete, these endpoints are disabled. In that case the
 client logs that transaction prioritization is not enabled and the endpoints return `503 Service
 Unavailable`.
