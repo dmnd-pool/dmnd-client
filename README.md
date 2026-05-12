@@ -100,5 +100,57 @@ You can track your hashrate and earnings on the DMND pool dashboard:
 
 Login with the same credentials you used during registration.
 
+# 7. Prioritize Transactions
+--------------------------------------
+The DMND Stratum V2 Client can expose an API endpoint that sends a raw transaction to Bitcoin Core
+and asks Bitcoin Core to prioritize that transaction for block template selection.
+
+This feature is enabled only when all of the following values are configured:
+
+- `RPC_URL`: Bitcoin Core RPC URL, for example `http://127.0.0.1:8332`.
+- `RPC_USER`: Bitcoin Core RPC username.
+- `RPC_PWD`: Bitcoin Core RPC password.
+- `RPC_FEE_DELTA`: fee delta, in satoshis, passed to Bitcoin Core's `prioritisetransaction` RPC.
+- `API_TX_TOKEN`: bearer token required by the DMND Client transaction API.
+
+You can set these values with CLI flags (`--rpc-url`, `--rpc-user`, `--rpc-pwd`,
+`--rpc-fee-delta`, `--api-tx-token`), in `config.toml`, or with environment variables. CLI flags
+take precedence over `config.toml`, and `config.toml` takes precedence over environment variables.
+
+Example using environment variables:
+
+    TOKEN=<DMND-token> \
+    RPC_URL=http://127.0.0.1:8332 \
+    RPC_USER=<bitcoin-rpc-user> \
+    RPC_PWD=<bitcoin-rpc-password> \
+    RPC_FEE_DELTA=100000000 \
+    API_TX_TOKEN=<api-token> \
+    cargo run -- -l info -d <avg-hashrate>T --tp-address="127.0.0.1:8336"
+
+Example using `config.toml`:
+
+    rpc_url = "http://127.0.0.1:8332"
+    rpc_user = "<bitcoin-rpc-user>"
+    rpc_pwd = "<bitcoin-rpc-password>"
+    rpc_fee_delta = 100000000
+    api_tx_token = "<api-token>"
+
+When the client is running, submit a raw transaction hex to:
+
+    POST http://<dmnd-client-host>:<api-server-port>/api/tx/submit/<raw-transaction-hex>
+
+The API server port defaults to `3001` and can be changed with `--api-server-port`,
+`api_server_port`, or `API_SERVER_PORT`.
+
+Example:
+
+    curl -X POST \
+      -H "Authorization: Bearer <api-token>" \
+      "http://127.0.0.1:3001/api/tx/submit/<raw-transaction-hex>"
+
+If the prioritization configuration is incomplete, this endpoint is disabled. In that case the
+client logs that transaction prioritization is not enabled and the endpoint returns `503 Service
+Unavailable`.
+
 
 Happy Mining!

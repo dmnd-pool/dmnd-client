@@ -24,3 +24,10 @@ pub(crate) fn snapshot() -> Vec<String> {
         .cloned()
         .collect()
 }
+
+pub(crate) fn remove(txid: &str) {
+    txids()
+        .lock()
+        .expect("prioritized transactions mutex poisoned")
+        .remove(txid);
+}
