@@ -416,6 +416,7 @@ impl PoolLatency {
                         authority_public_key.into_bytes(),
                         upstream,
                         false,
+                        crate::valid_job_tracker::ValidJobTracker::default(),
                     )
                     .await
                     {

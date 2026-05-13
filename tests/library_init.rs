@@ -151,6 +151,7 @@ async fn library_init_sv2_setup_connection() {
         "password".to_string(),
         "100000000".to_string(),
         "api-token".to_string(),
+        None,
     );
 
     let proxy = tokio::spawn(dmnd_client::start(config));

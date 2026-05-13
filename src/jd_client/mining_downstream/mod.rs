@@ -2,6 +2,7 @@ mod task_manager;
 use crate::{
     proxy_state::{DownstreamType, JdState, ProxyState},
     shared::utils::AbortOnDrop,
+    valid_job_tracker::{BitcoinBlockCandidateValidation, ValidJobTracker},
 };
 use tokio::time::{timeout, Duration};
 
@@ -25,6 +26,8 @@ use tokio::{
 };
 use tracing::{debug, error, warn};
 
+use std::{collections::HashMap, sync::Arc};
+
 use codec_sv2::{StandardEitherFrame, StandardSv2Frame};
 
 use bitcoin::{consensus::Decodable, TxOut};
@@ -47,6 +50,8 @@ pub struct DownstreamMiningNode {
     miner_coinbase_output: Vec<TxOut>,
     // used to retreive the job id of the share that we send upstream
     last_template_id: u64,
+    valid_job_tracker: ValidJobTracker,
+    job_template_ids: HashMap<u32, u64>,
     pub jd: Option<Arc<Mutex<JobDeclarator>>>,
 }
 
@@ -111,7 +116,6 @@ impl DownstreamMiningNodeStatus {
 }
 
 use core::convert::TryInto;
-use std::sync::Arc;
 
 impl DownstreamMiningNode {
     #[allow(clippy::too_many_arguments)]
@@ -121,6 +125,7 @@ impl DownstreamMiningNode {
         solution_sender: TSender<SubmitSolution<'static>>,
         withhold: bool,
         miner_coinbase_output: Vec<TxOut>,
+        valid_job_tracker: ValidJobTracker,
         jd: Option<Arc<Mutex<JobDeclarator>>>,
     ) -> Self {
         let status = match upstream {
@@ -138,6 +143,8 @@ impl DownstreamMiningNode {
             // Is used before sending the share to upstream in the main loop when we have a share.
             // Is upated in the message handler that si called earlier in the main loop.
             last_template_id: 0,
+            valid_job_tracker,
+            job_template_ids: HashMap::new(),
             jd,
         }
     }
@@ -348,6 +355,7 @@ impl DownstreamMiningNode {
         mut new_template: NewTemplate<'static>,
         pool_output: &[u8],
     ) -> Result<(), JdClientError> {
+        let template_id = new_template.template_id;
         // Make sure to set the template handled to true since we do not have a channel opened yet
         // and template can not be handled without it we will lock template handling forever.
         if !self_mutex
@@ -387,6 +395,11 @@ impl DownstreamMiningNode {
         let to_send = to_send.into_values();
         for message in to_send {
             let message = if let Mining::NewExtendedMiningJob(job) = message {
+                self_mutex
+                    .safe_lock(|s| {
+                        remember_template_job(&mut s.job_template_ids, job.job_id, template_id);
+                    })
+                    .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?;
                 let jd = self_mutex
                     .safe_lock(|s| s.jd.clone())
                     .map_err(|_| JdClientError::JobDeclaratorMutexCorrupted)?
@@ -394,10 +407,13 @@ impl DownstreamMiningNode {
                         // Propagate error. The caller will restart proxy
                         JdClientError::JdMissing
                     })?;
-                jd.safe_lock(|jd| jd.coinbase_tx_prefix = job.coinbase_tx_prefix.clone())
-                    .map_err(|_| JdClientError::JobDeclaratorMutexCorrupted)?;
-                jd.safe_lock(|jd| jd.coinbase_tx_suffix = job.coinbase_tx_suffix.clone())
-                    .map_err(|_| JdClientError::JobDeclaratorMutexCorrupted)?;
+                JobDeclarator::remember_template_coinbase_parts(
+                    &jd,
+                    template_id,
+                    job.coinbase_tx_prefix.clone(),
+                    job.coinbase_tx_suffix.clone(),
+                )
+                .map_err(|_| JdClientError::JobDeclaratorMutexCorrupted)?;
 
                 Mining::NewExtendedMiningJob(job)
             } else {
@@ -429,6 +445,41 @@ impl DownstreamMiningNode {
                 channel.on_new_prev_hash_from_tp(&new_prev_hash)
             })
             .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)??;
+        self_mutex
+            .safe_lock(|s| {
+                s.prev_job_id = Some(job_id);
+                s.job_template_ids.clear();
+                s.job_template_ids.insert(job_id, new_prev_hash.template_id);
+            })
+            .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?;
+        let valid_job_tracker = self_mutex
+            .safe_lock(|s| s.valid_job_tracker.clone())
+            .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?;
+
+        let tracked_prev_hash: [u8; 32] = new_prev_hash
+            .prev_hash
+            .to_vec()
+            .try_into()
+            .expect("SetNewPrevHash prev_hash should always be 32 bytes");
+        match valid_job_tracker.refresh_template_chain_state(
+            new_prev_hash.template_id,
+            tracked_prev_hash,
+            new_prev_hash.n_bits,
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                debug!(
+                    template_id = new_prev_hash.template_id,
+                    "No cached merge-mining template context was available to refresh on SetNewPrevHash",
+                );
+            }
+            Err(error) => {
+                warn!(
+                    template_id = new_prev_hash.template_id,
+                    "Failed to refresh merge-mining template context on SetNewPrevHash: {}", error
+                );
+            }
+        }
 
         let channel_ids = self_mutex
             .safe_lock(|s| {
@@ -584,6 +635,30 @@ impl
         &mut self,
         m: SubmitSharesExtended,
     ) -> Result<SendTo<UpstreamMiningNode>, Error> {
+        let is_solo_miner = self.status.is_solo_miner();
+        if share_uses_stale_job(
+            self.prev_job_id,
+            &self.job_template_ids,
+            is_solo_miner,
+            m.job_id,
+        ) {
+            warn!(
+                submitted_job_id = m.job_id,
+                current_job_id = self.prev_job_id,
+                tracked_job_count = self.job_template_ids.len(),
+                "Rejecting JD share because it references a job outside the current clean-job family"
+            );
+            let error = SubmitSharesError {
+                channel_id: m.channel_id,
+                sequence_number: m.sequence_number,
+                error_code: SubmitSharesError::stale_share_error_code()
+                    .to_string()
+                    .try_into()
+                    .expect("static stale-share error code should fit in Str0255"),
+            };
+            return Ok(SendTo::Respond(Mining::SubmitSharesError(error)));
+        }
+
         match self
             .status
             .get_channel()
@@ -598,6 +673,40 @@ impl
                 if !self.status.is_solo_miner() {
                     match m {
                         Share::Extended(share) => {
+                            if let Ok(channel) = self.status.get_channel() {
+                                if let Some(full_extranonce) = channel
+                                    .extranonce_from_downstream_extranonce(
+                                        share.extranonce.clone().into(),
+                                    )
+                                {
+                                    match self.valid_job_tracker.record_rsk_target_share(
+                                        template_id,
+                                        share.version,
+                                        share.ntime,
+                                        share.nonce,
+                                        full_extranonce.as_ref(),
+                                    ) {
+                                        Ok(Some(_)) => {}
+                                        Ok(None) => {}
+                                        Err(error) => {
+                                            error!(
+                                                "Failed to record RSK-target valid job for polling API: {error}"
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    debug!(
+                                        template_id,
+                                        "Skipping RSK-target share because the full extranonce could not be reconstructed"
+                                    );
+                                }
+                            } else {
+                                debug!(
+                                    template_id,
+                                    "Skipping RSK-target share because the channel state was unavailable"
+                                );
+                            }
+
                             let for_upstream = Mining::SubmitSharesExtended(share);
                             self.last_template_id = template_id;
                             Ok(SendTo::RelayNewMessage(for_upstream))
@@ -618,36 +727,90 @@ impl
             )) => {
                 match share {
                     Share::Extended(share) => {
-                        let solution_sender = self.solution_sender.clone();
-                        let solution = SubmitSolution {
-                            template_id,
-                            version: share.version,
-                            header_timestamp: share.ntime,
-                            header_nonce: share.nonce,
-                            coinbase_tx: coinbase.try_into()?,
-                        };
-                        tokio::spawn(async move {
-                            if solution_sender.send(solution).await.is_err() {
-                                error!("Downstream channel closed, couldn't send solution");
-                            }
-                        });
-                        if !self.status.is_solo_miner() {
-                            {
-                                let jd = self.jd.clone();
-                                let mut share = share.clone();
-                                share.extranonce = extranonce.try_into()?;
-                                // This do not need to be put in a task manager it always return
-                                // fastly
-                                tokio::task::spawn(async move {
-                                    if let Some(jd) = jd {
-                                        if let Err(e) = JobDeclarator::on_solution(&jd, share).await
-                                        {
-                                            error!("Jd Error on solution: {e:?}");
-                                            // Set the proxy state to internal inconsistency
-                                            ProxyState::update_inconsistency(Some(1));
+                        let allow_local_block_submission = if self.status.is_solo_miner() {
+                            true
+                        } else {
+                            match self.valid_job_tracker.validate_bitcoin_block_candidate(
+                                template_id,
+                                share.version,
+                                share.ntime,
+                                share.nonce,
+                                coinbase.as_ref(),
+                            ) {
+                                Ok(BitcoinBlockCandidateValidation::Valid(_)) => {
+                                    match self.valid_job_tracker.record_found_job(
+                                        template_id,
+                                        share.version,
+                                        share.ntime,
+                                        share.nonce,
+                                        coinbase.as_ref(),
+                                    ) {
+                                        Ok(Some(_)) => {}
+                                        Ok(None) => {}
+                                        Err(error) => {
+                                            error!(
+                                                "Failed to record found valid job for polling API: {error}"
+                                            );
                                         }
                                     }
-                                });
+                                    true
+                                }
+                                Ok(BitcoinBlockCandidateValidation::InvalidPow(candidate)) => {
+                                    warn!(
+                                        template_id,
+                                        bitcoin_block_hash_hex = %candidate.block_hash_hex,
+                                        "Suppressing local Bitcoin-target solution because the reconstructed header does not satisfy its own nBits"
+                                    );
+                                    false
+                                }
+                                Ok(BitcoinBlockCandidateValidation::MissingTemplateContext) => {
+                                    warn!(
+                                        template_id,
+                                        "Suppressing local Bitcoin-target solution because exact template context was unavailable for consensus revalidation"
+                                    );
+                                    false
+                                }
+                                Err(error) => {
+                                    error!(
+                                        "Failed to revalidate Bitcoin-target block candidate before local submission: {error}"
+                                    );
+                                    false
+                                }
+                            }
+                        };
+                        if allow_local_block_submission {
+                            let solution_sender = self.solution_sender.clone();
+                            let solution = SubmitSolution {
+                                template_id,
+                                version: share.version,
+                                header_timestamp: share.ntime,
+                                header_nonce: share.nonce,
+                                coinbase_tx: coinbase.try_into()?,
+                            };
+                            tokio::spawn(async move {
+                                if solution_sender.send(solution).await.is_err() {
+                                    error!("Downstream channel closed, couldn't send solution");
+                                }
+                            });
+                            if !self.status.is_solo_miner() {
+                                {
+                                    let jd = self.jd.clone();
+                                    let mut share = share.clone();
+                                    share.extranonce = extranonce.try_into()?;
+                                    // This do not need to be put in a task manager it always return
+                                    // fastly
+                                    tokio::task::spawn(async move {
+                                        if let Some(jd) = jd {
+                                            if let Err(e) =
+                                                JobDeclarator::on_solution(&jd, share).await
+                                            {
+                                                error!("Jd Error on solution: {e:?}");
+                                                // Set the proxy state to internal inconsistency
+                                                ProxyState::update_inconsistency(Some(1));
+                                            }
+                                        }
+                                    });
+                                }
                             }
                         }
 
@@ -680,3 +843,78 @@ impl
     }
 }
 impl IsMiningDownstream for DownstreamMiningNode {}
+
+fn remember_template_job(job_template_ids: &mut HashMap<u32, u64>, job_id: u32, template_id: u64) {
+    job_template_ids.insert(job_id, template_id);
+}
+
+fn share_uses_stale_job(
+    current_job_id: Option<u32>,
+    job_template_ids: &HashMap<u32, u64>,
+    is_solo_miner: bool,
+    submitted_job_id: u32,
+) -> bool {
+    !is_solo_miner && current_job_id.is_some() && !job_template_ids.contains_key(&submitted_job_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{remember_template_job, share_uses_stale_job};
+    use std::collections::HashMap;
+
+    #[test]
+    fn remember_template_job_tracks_job_to_template_without_advancing_current_job() {
+        let mut job_template_ids = HashMap::new();
+        let current_job_id = Some(7);
+
+        remember_template_job(&mut job_template_ids, 8, 42);
+
+        assert_eq!(current_job_id, Some(7));
+        assert_eq!(job_template_ids.get(&8), Some(&42));
+    }
+
+    #[test]
+    fn remember_template_job_tracks_multiple_jobs_for_same_clean_family() {
+        let mut job_template_ids = HashMap::new();
+        remember_template_job(&mut job_template_ids, 7, 41);
+        remember_template_job(&mut job_template_ids, 8, 42);
+
+        assert_eq!(job_template_ids.get(&7), Some(&41));
+        assert_eq!(job_template_ids.get(&8), Some(&42));
+    }
+
+    #[test]
+    fn stale_job_guard_allows_any_tracked_job_within_current_clean_family() {
+        let mut job_template_ids = HashMap::new();
+        remember_template_job(&mut job_template_ids, 7, 41);
+        remember_template_job(&mut job_template_ids, 8, 42);
+
+        assert!(!share_uses_stale_job(Some(7), &job_template_ids, false, 7));
+        assert!(!share_uses_stale_job(Some(7), &job_template_ids, false, 8));
+    }
+
+    #[test]
+    fn stale_job_guard_rejects_unknown_job_once_current_clean_family_is_known() {
+        let mut job_template_ids = HashMap::new();
+        remember_template_job(&mut job_template_ids, 7, 41);
+
+        assert!(share_uses_stale_job(Some(7), &job_template_ids, false, 6));
+        assert!(share_uses_stale_job(Some(7), &job_template_ids, false, 8));
+    }
+
+    #[test]
+    fn stale_job_guard_is_disabled_until_a_clean_job_family_exists() {
+        let mut job_template_ids = HashMap::new();
+        remember_template_job(&mut job_template_ids, 8, 42);
+
+        assert!(!share_uses_stale_job(None, &job_template_ids, false, 7));
+    }
+
+    #[test]
+    fn stale_job_guard_is_disabled_for_solo_mode() {
+        let mut job_template_ids = HashMap::new();
+        remember_template_job(&mut job_template_ids, 7, 41);
+
+        assert!(!share_uses_stale_job(Some(7), &job_template_ids, true, 6));
+    }
+}

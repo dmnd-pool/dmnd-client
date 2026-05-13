@@ -1,13 +1,16 @@
 use super::{utils::get_cpu_and_memory_usage, AppState};
 use crate::config::Configuration;
 use crate::proxy_state::ProxyState;
+use crate::valid_job_tracker::FoundValidJob;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
-use serde::Serialize;
+#[cfg(test)]
+use bitcoin::hashes::Hash;
+use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
 pub struct Api {}
@@ -225,6 +228,106 @@ impl Api {
 
         (StatusCode::OK, Json(APIResponse::success(Some(response))))
     }
+
+    pub async fn queue_coinbase_op_return(
+        State(state): State<AppState>,
+        Json(request): Json<QueueCoinbaseOpReturnRequest>,
+    ) -> impl IntoResponse {
+        let Some(secret) = state.api_secret.as_deref() else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(APIResponse::<serde_json::Value>::error(Some(
+                    "OP_RETURN API is disabled: API_SECRET is not configured".to_string(),
+                ))),
+            )
+                .into_response();
+        };
+
+        if request.secret != secret {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(APIResponse::<serde_json::Value>::error(Some(
+                    "Invalid API secret".to_string(),
+                ))),
+            )
+                .into_response();
+        }
+
+        match state
+            .op_return_injector
+            .queue_from_hex_with_rsk_target(&request.data_hex, request.rsk_target_hex.as_deref())
+            .await
+        {
+            Ok(queued) => {
+                info!(
+                    "Set desired OP_RETURN for JD templates (payload={} bytes, txout={} bytes, replaced_pending={})",
+                    queued.payload_len_bytes,
+                    queued.tx_out_len_bytes,
+                    queued.replaced_pending
+                );
+                (
+                    StatusCode::ACCEPTED,
+                    Json(APIResponse::success(Some(QueueCoinbaseOpReturnResponse {
+                        payload_len_bytes: queued.payload_len_bytes,
+                        tx_out_len_bytes: queued.tx_out_len_bytes,
+                        replaced_pending: queued.replaced_pending,
+                    }))),
+                )
+                    .into_response()
+            }
+            Err(error) => (
+                StatusCode::BAD_REQUEST,
+                Json(APIResponse::<serde_json::Value>::error(Some(
+                    error.to_string(),
+                ))),
+            )
+                .into_response(),
+        }
+    }
+
+    pub async fn poll_found_valid_job(
+        State(state): State<AppState>,
+        Query(query): Query<PollFoundValidJobQuery>,
+    ) -> impl IntoResponse {
+        let Some(secret) = state.api_secret.as_deref() else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(APIResponse::<serde_json::Value>::error(Some(
+                    "Merge-mining polling API is disabled: API_SECRET is not configured"
+                        .to_string(),
+                ))),
+            )
+                .into_response();
+        };
+
+        if query.secret != secret {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(APIResponse::<serde_json::Value>::error(Some(
+                    "Invalid API secret".to_string(),
+                ))),
+            )
+                .into_response();
+        }
+
+        match state.valid_job_tracker.take_found_job() {
+            Ok(Some(found_job)) => {
+                (StatusCode::OK, Json(APIResponse::success(Some(found_job)))).into_response()
+            }
+            Ok(None) => (
+                StatusCode::OK,
+                Json(APIResponse::<FoundValidJob>::success(None)),
+            )
+                .into_response(),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(APIResponse::<serde_json::Value>::error(Some(
+                    error.to_string(),
+                ))),
+            )
+                .into_response(),
+        }
+    }
 }
 
 fn is_authorized_for_tx_prioritization(headers: &HeaderMap, expected_token: &str) -> bool {
@@ -255,6 +358,26 @@ struct APIResponse<T> {
     success: bool,
     message: Option<String>,
     data: Option<T>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct QueueCoinbaseOpReturnRequest {
+    secret: String,
+    data_hex: String,
+    #[serde(default)]
+    rsk_target_hex: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct PollFoundValidJobQuery {
+    secret: String,
+}
+
+#[derive(Debug, Serialize)]
+struct QueueCoinbaseOpReturnResponse {
+    payload_len_bytes: usize,
+    tx_out_len_bytes: usize,
+    replaced_pending: bool,
 }
 
 impl<T: Serialize> APIResponse<T> {
@@ -310,6 +433,9 @@ async fn health_check_reports_full_translator_handoff() {
             )),
             api_tx_token: "api-token".to_string(),
         }),
+        op_return_injector: crate::op_return_injector::OpReturnInjector::default(),
+        valid_job_tracker: crate::valid_job_tracker::ValidJobTracker::default(),
+        api_secret: None,
     };
 
     let response = Api::health_check(State(state)).await.into_response();
@@ -332,6 +458,9 @@ async fn send_tx_reports_unavailable_when_rpc_is_disabled() {
         stats_sender: crate::api::stats::StatsSender::new(),
         downstream_handoff: handoff_tx,
         prioritizing_txs: None,
+        op_return_injector: crate::op_return_injector::OpReturnInjector::default(),
+        valid_job_tracker: crate::valid_job_tracker::ValidJobTracker::default(),
+        api_secret: None,
     };
 
     let response = Api::send_tx_to_bitcoind(
@@ -368,6 +497,9 @@ async fn send_tx_rejects_missing_api_tx_token_header() {
             )),
             api_tx_token: "api-token".to_string(),
         }),
+        op_return_injector: crate::op_return_injector::OpReturnInjector::default(),
+        valid_job_tracker: crate::valid_job_tracker::ValidJobTracker::default(),
+        api_secret: None,
     };
 
     let response = Api::send_tx_to_bitcoind(
@@ -408,6 +540,9 @@ async fn get_prioritized_transactions_returns_snapshot() {
             )),
             api_tx_token: "api-token".to_string(),
         }),
+        op_return_injector: crate::op_return_injector::OpReturnInjector::default(),
+        valid_job_tracker: crate::valid_job_tracker::ValidJobTracker::default(),
+        api_secret: None,
     };
 
     let mut headers = HeaderMap::new();
@@ -438,4 +573,284 @@ fn tx_prioritization_auth_accepts_matching_bearer_token() {
     headers.insert(AUTHORIZATION, "Bearer api-token".parse().unwrap());
 
     assert!(is_authorized_for_tx_prioritization(&headers, "api-token"));
+}
+
+#[tokio::test]
+async fn queue_coinbase_op_return_rejects_invalid_secret() {
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use tokio::sync::mpsc;
+
+    let auth_pub_k = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
+    let router = crate::router::Router::new(vec![], auth_pub_k, None, None);
+
+    let (handoff_tx, _handoff_rx) = mpsc::channel(1);
+    let injector = crate::op_return_injector::OpReturnInjector::default();
+    let state = AppState {
+        router,
+        stats_sender: crate::api::stats::StatsSender::new(),
+        downstream_handoff: handoff_tx,
+        prioritizing_txs: None,
+        op_return_injector: injector.clone(),
+        valid_job_tracker: crate::valid_job_tracker::ValidJobTracker::default(),
+        api_secret: Some("topsecret".to_string()),
+    };
+
+    let response = Api::queue_coinbase_op_return(
+        State(state),
+        Json(QueueCoinbaseOpReturnRequest {
+            secret: "wrong".to_string(),
+            data_hex: "aa".to_string(),
+            rsk_target_hex: None,
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let mut template = make_empty_template_for_tests();
+    let applied = injector
+        .apply_pending_to_template(&mut template)
+        .await
+        .expect("apply should succeed");
+    assert!(applied.is_none(), "invalid secret must not queue payload");
+}
+
+#[tokio::test]
+async fn queue_coinbase_op_return_accepts_valid_secret() {
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use tokio::sync::mpsc;
+
+    let auth_pub_k = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
+    let router = crate::router::Router::new(vec![], auth_pub_k, None, None);
+
+    let (handoff_tx, _handoff_rx) = mpsc::channel(1);
+    let injector = crate::op_return_injector::OpReturnInjector::default();
+    let state = AppState {
+        router,
+        stats_sender: crate::api::stats::StatsSender::new(),
+        downstream_handoff: handoff_tx,
+        prioritizing_txs: None,
+        op_return_injector: injector.clone(),
+        valid_job_tracker: crate::valid_job_tracker::ValidJobTracker::default(),
+        api_secret: Some("topsecret".to_string()),
+    };
+
+    let response = Api::queue_coinbase_op_return(
+        State(state),
+        Json(QueueCoinbaseOpReturnRequest {
+            secret: "topsecret".to_string(),
+            data_hex: "deadbeef".to_string(),
+            rsk_target_hex: None,
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let mut template = make_empty_template_for_tests();
+    let applied = injector
+        .apply_pending_to_template(&mut template)
+        .await
+        .expect("apply should succeed");
+    assert!(applied.is_some(), "valid secret should queue payload");
+    assert_eq!(template.coinbase_tx_outputs_count, 1);
+}
+
+#[tokio::test]
+async fn poll_found_valid_job_returns_recorded_event() {
+    use axum::response::IntoResponse;
+    use axum::{
+        body::to_bytes,
+        extract::{Query, State},
+    };
+    use bitcoin::{consensus::serialize, hex::FromHex};
+    use tokio::sync::mpsc;
+
+    let auth_pub_k = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
+    let router = crate::router::Router::new(vec![], auth_pub_k, None, None);
+
+    let (handoff_tx, _handoff_rx) = mpsc::channel(1);
+    let op_return_injector = crate::op_return_injector::OpReturnInjector::default();
+    let valid_job_tracker =
+        crate::valid_job_tracker::ValidJobTracker::new(op_return_injector.clone());
+    let payload_hex = "52534b424c4f434b3adeadbeef";
+    let payload_bytes = Vec::from_hex(payload_hex).expect("payload should decode");
+    let mut template = make_empty_template_for_tests();
+    template.template_id = 7;
+    op_return_injector
+        .queue_from_hex(payload_hex)
+        .await
+        .expect("payload should queue");
+    op_return_injector
+        .apply_pending_to_template(&mut template)
+        .await
+        .expect("payload should apply")
+        .expect("template should receive payload");
+    let coinbase_tx = serialize(&make_coinbase_tx_for_found_job_tests(&payload_bytes));
+    let n_bits = 0x207f_ffff;
+    let header_nonce = find_pow_valid_nonce_for_found_job_tests(
+        [0x11; 32],
+        n_bits,
+        8,
+        9,
+        &bitcoin::consensus::deserialize::<bitcoin::Transaction>(&coinbase_tx)
+            .expect("coinbase bytes should decode"),
+    );
+    valid_job_tracker
+        .cache_template_context(7, [0x11; 32], n_bits, vec![], 1)
+        .expect("tracker should cache template context");
+    let found_job = valid_job_tracker
+        .record_found_job(7, 8, 9, header_nonce, &coinbase_tx)
+        .expect("tracker should record event")
+        .expect("template context should exist");
+    crate::valid_job_tracker::validate_found_job_against_rskj_contract_for_tests(&found_job, None)
+        .expect("single-tx found job should satisfy the bridge/RskJ contract");
+
+    let state = AppState {
+        router,
+        stats_sender: crate::api::stats::StatsSender::new(),
+        downstream_handoff: handoff_tx,
+        prioritizing_txs: None,
+        op_return_injector,
+        valid_job_tracker,
+        api_secret: Some("topsecret".to_string()),
+    };
+
+    let response = Api::poll_found_valid_job(
+        State(state),
+        Query(PollFoundValidJobQuery {
+            secret: "topsecret".to_string(),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body should be readable");
+    let json: serde_json::Value =
+        serde_json::from_slice(&body).expect("response body should be valid json");
+
+    assert_eq!(json["success"], true);
+    assert_eq!(json["data"]["template_id"], 7);
+    assert_eq!(json["data"]["version"], 8);
+    assert_eq!(json["data"]["header_timestamp"], 9);
+    assert_eq!(json["data"]["header_nonce"], header_nonce);
+    assert_eq!(
+        json["data"]["bitcoin_block_hash_hex"],
+        found_job.bitcoin_block_hash_hex
+    );
+    assert_eq!(json["data"]["block_header_hex"], found_job.block_header_hex);
+    assert_eq!(json["data"]["coinbase_tx_hex"], found_job.coinbase_tx_hex);
+    assert_eq!(json["data"]["merkle_hashes_hex"], serde_json::json!([]));
+    assert_eq!(json["data"]["block_tx_count"], 1);
+    assert_eq!(json["data"]["op_return_payload_hex"], payload_hex);
+    let returned_coinbase =
+        Vec::<u8>::from_hex(json["data"]["coinbase_tx_hex"].as_str().unwrap()).unwrap();
+    let returned_coinbase: bitcoin::Transaction =
+        bitcoin::consensus::deserialize(&returned_coinbase).unwrap();
+    assert!(
+        returned_coinbase.input[0].witness.is_empty(),
+        "API must return witness-stripped coinbase bytes for RskJ compatibility"
+    );
+    assert!(
+        crate::valid_job_tracker::coinbase_contains_expected_op_return_payload(
+            &returned_coinbase,
+            &payload_bytes
+        ),
+        "returned coinbase must contain the same payload reported by op_return_payload_hex"
+    );
+}
+
+#[cfg(test)]
+fn make_empty_template_for_tests(
+) -> roles_logic_sv2::template_distribution_sv2::NewTemplate<'static> {
+    use binary_sv2::{Seq0255, B0255, B064K, U256};
+    use std::convert::TryInto;
+
+    let coinbase_prefix: B0255<'static> = Vec::new()
+        .try_into()
+        .expect("coinbase prefix should fit in B0255");
+    let coinbase_tx_outputs: B064K<'static> = Vec::new()
+        .try_into()
+        .expect("coinbase outputs should fit in B064K");
+    let merkle_path: Seq0255<'static, U256<'static>> = Vec::new().into();
+
+    roles_logic_sv2::template_distribution_sv2::NewTemplate {
+        template_id: 1,
+        future_template: false,
+        version: 0,
+        coinbase_tx_version: 1,
+        coinbase_prefix,
+        coinbase_tx_input_sequence: 0,
+        coinbase_tx_value_remaining: 0,
+        coinbase_tx_outputs_count: 0,
+        coinbase_tx_outputs,
+        coinbase_tx_locktime: 0,
+        merkle_path,
+    }
+}
+
+#[cfg(test)]
+fn make_coinbase_tx_for_found_job_tests(payload: &[u8]) -> bitcoin::Transaction {
+    use bitcoin::{
+        absolute::LockTime, script::PushBytesBuf, Amount, OutPoint, ScriptBuf, Sequence, TxIn,
+        TxOut, Witness,
+    };
+
+    bitcoin::Transaction {
+        version: bitcoin::transaction::Version(2),
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: vec![0x03, 0x01, 0x51].into(),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[vec![0x42; 32]]),
+        }],
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(5_000_000_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            },
+            TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::new_op_return(
+                    PushBytesBuf::try_from(payload.to_vec()).unwrap(),
+                ),
+            },
+        ],
+    }
+}
+
+#[cfg(test)]
+fn find_pow_valid_nonce_for_found_job_tests(
+    prev_hash: [u8; 32],
+    n_bits: u32,
+    version: u32,
+    header_timestamp: u32,
+    coinbase_tx: &bitcoin::Transaction,
+) -> u32 {
+    let coinbase_txid = coinbase_tx.compute_txid();
+    for nonce in 0..=u32::MAX {
+        let header = bitcoin::block::Header {
+            version: bitcoin::block::Version::from_consensus(version as i32),
+            prev_blockhash: bitcoin::BlockHash::from_byte_array(prev_hash),
+            merkle_root: bitcoin::TxMerkleNode::from_byte_array(
+                coinbase_txid.to_raw_hash().to_byte_array(),
+            ),
+            time: header_timestamp,
+            bits: bitcoin::CompactTarget::from_consensus(n_bits),
+            nonce,
+        };
+        if header.target().is_met_by(header.block_hash()) {
+            return nonce;
+        }
+    }
+
+    panic!("failed to find a PoW-valid nonce for found-job API test");
 }

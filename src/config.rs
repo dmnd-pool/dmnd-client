@@ -81,6 +81,7 @@ struct Args {
     rpc_fee_delta: Option<i64>,
     #[clap(long)]
     api_tx_token: Option<String>,
+    api_secret: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -112,6 +113,7 @@ struct ConfigFile {
     rpc_pwd: Option<String>,
     rpc_fee_delta: Option<i64>,
     api_tx_token: Option<String>,
+    api_secret: Option<String>,
 }
 
 impl ConfigFile {
@@ -144,6 +146,7 @@ impl ConfigFile {
             rpc_pwd: None,
             rpc_fee_delta: None,
             api_tx_token: None,
+            api_secret: None,
         }
     }
 }
@@ -176,6 +179,7 @@ pub struct Configuration {
     miner_name: Option<String>,
     prioritizing_txs_config: Option<BitcoindRpcConfig>,
     missing_prioritizing_txs_variables: Vec<&'static str>,
+    api_secret: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -238,6 +242,7 @@ and make that test pass."
         rpc_pwd: String,
         rpc_fee_delta: String,
         api_tx_token: String,
+        api_secret: Option<String>,
     ) -> Self {
         if let Err(error) = Self::validate_supported_delay(delay) {
             panic!("{error}");
@@ -279,6 +284,7 @@ and make that test pass."
             miner_name,
             prioritizing_txs_config,
             missing_prioritizing_txs_variables,
+            api_secret,
         }
     }
 
@@ -365,6 +371,7 @@ and make that test pass."
             "password".to_string(),
             "100000000".to_string(),
             "api-token".to_string(),
+            None,
         )
     }
 
@@ -556,6 +563,13 @@ and make that test pass."
         }
     }
 
+    pub fn api_secret() -> Option<String> {
+        Self::cfg()
+            .api_secret
+            .clone()
+            .filter(|secret| !secret.trim().is_empty())
+    }
+
     // Loads config from CLI args, config file, and env vars with precedence: CLI > file > env.
     pub fn from_cli() -> Self {
         let args = Args::parse();
@@ -630,6 +644,10 @@ and make that test pass."
             .or(config.api_tx_token)
             .or_else(|| std::env::var("API_TX_TOKEN").ok())
             .unwrap_or_default();
+        let api_secret = args
+            .api_secret
+            .or(config.api_secret)
+            .or_else(|| std::env::var("API_SECRET").ok());
         if let Some(ref miner_name) = miner_name {
             validate_miner_name(miner_name).unwrap_or_else(|e| panic!("{e}"));
         }
@@ -804,6 +822,7 @@ and make that test pass."
             rpc_pwd,
             rpc_fee_delta,
             api_tx_token,
+            api_secret,
         )
     }
 }

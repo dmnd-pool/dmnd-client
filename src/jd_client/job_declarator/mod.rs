@@ -40,6 +40,7 @@ use setup_connection::SetupConnectionHandler;
 use crate::{
     proxy_state::{JdState, PoolState, ProxyState},
     shared::utils::AbortOnDrop,
+    valid_job_tracker::ValidJobTracker,
 };
 
 use super::{error::Error, mining_upstream::Upstream};
@@ -50,7 +51,12 @@ pub struct LastDeclareJob {
     template: NewTemplate<'static>,
     coinbase_pool_output: Vec<u8>,
     tx_list: Seq064K<'static, B016M<'static>>,
+    block_tx_count: u32,
 }
+
+type TemplateCoinbaseParts = (B064K<'static>, B064K<'static>);
+type TemplateCoinbasePartsMap = HashMap<u64, TemplateCoinbaseParts, BuildNoHashHasher<u64>>;
+const MAX_PENDING_TEMPLATE_COINBASE_PARTS: usize = 1000;
 
 #[derive(Debug)]
 pub struct JobDeclarator {
@@ -71,12 +77,13 @@ pub struct JobDeclarator {
             NewTemplate<'static>,
             // pool's outputs
             Vec<u8>,
+            u32,
         ),
         BuildNoHashHasher<u64>,
     >,
     up: Arc<Mutex<Upstream>>,
-    pub coinbase_tx_prefix: B064K<'static>,
-    pub coinbase_tx_suffix: B064K<'static>,
+    template_coinbase_parts: TemplateCoinbasePartsMap,
+    valid_job_tracker: ValidJobTracker,
     pub task_manager: Arc<Mutex<TaskManager>>,
 }
 
@@ -86,6 +93,7 @@ impl JobDeclarator {
         authority_public_key: [u8; 32],
         up: Arc<Mutex<Upstream>>,
         should_log_when_connected: bool,
+        valid_job_tracker: ValidJobTracker,
     ) -> Result<(Arc<Mutex<Self>>, AbortOnDrop), Error> {
         let stream = tokio::net::TcpStream::connect(address).await?;
         let initiator = Initiator::from_raw_k(authority_public_key)?;
@@ -116,8 +124,8 @@ impl JobDeclarator {
             last_set_new_prev_hash: None,
             future_jobs: HashMap::with_hasher(BuildNoHashHasher::default()),
             up,
-            coinbase_tx_prefix: vec![].try_into().expect("Internal error: this operation can not fail because Vec can always be converted into Inner"),
-            coinbase_tx_suffix: vec![].try_into().expect("Internal error: this operation can not fail because Vec can always be converted into Inner"),
+            template_coinbase_parts: HashMap::with_hasher(BuildNoHashHasher::default()),
+            valid_job_tracker,
             set_new_prev_hash_counter: 0,
             task_manager,
         }));
@@ -246,6 +254,8 @@ impl JobDeclarator {
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
 
         let template_transactions = tx_list_.to_vec();
+        let block_tx_count =
+            block_tx_count_from_request_transaction_list_len(template_transactions.len());
         let prioritized_txids = crate::prioritized_transactions::snapshot();
         let mut template_txids = HashSet::with_capacity(template_transactions.len());
         let mut tx_list: Vec<Transaction> = Vec::new();
@@ -275,13 +285,18 @@ impl JobDeclarator {
         }
         let tx_ids: Seq064K<'static, U256> = Seq064K::from(tx_ids);
 
-        let coinbase_prefix = self_mutex
-            .safe_lock(|s| s.coinbase_tx_prefix.clone())
-            .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
-
-        let coinbase_suffix = self_mutex
-            .safe_lock(|s| s.coinbase_tx_suffix.clone())
-            .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
+        let (coinbase_prefix, coinbase_suffix) = self_mutex
+            .safe_lock(|s| {
+                take_template_coinbase_parts(&mut s.template_coinbase_parts, template.template_id)
+            })
+            .map_err(|_| Error::JobDeclaratorMutexCorrupted)?
+            .ok_or_else(|| {
+                error!(
+                    "Missing per-template coinbase prefix/suffix for template {}",
+                    template.template_id
+                );
+                Error::Unrecoverable
+            })?;
 
         let declare_job = DeclareMiningJob {
             request_id: id,
@@ -297,6 +312,7 @@ impl JobDeclarator {
             template,
             coinbase_pool_output,
             tx_list: tx_list_.clone(),
+            block_tx_count,
         };
         Self::update_last_declare_job_sent(self_mutex, id, last_declare)?;
         let frame: StdFrame =
@@ -377,6 +393,7 @@ impl JobDeclarator {
                                         merkle_path,
                                         template,
                                         last_declare.coinbase_pool_output,
+                                        last_declare.block_tx_count,
                                     ),
                                 );
                             }) {
@@ -398,20 +415,47 @@ impl JobDeclarator {
                             let mut pool_outs = last_declare.coinbase_pool_output;
                             pool_outs.append(&mut template_outs);
                             match set_new_prev_hash {
-                                Some(p) => if let Err(e) =  Upstream::set_custom_jobs(
-                                    &up,
-                                    last_declare_mining_job_sent,
-                                    p,
-                                    merkle_path,
-                                    new_token,
-                                    template.coinbase_tx_version,
-                                    template.coinbase_prefix,
-                                    template.coinbase_tx_input_sequence,
-                                    template.coinbase_tx_value_remaining,
-                                    pool_outs,
-                                    template.coinbase_tx_locktime,
-                                    template.template_id
-                                    ).await {error!("Failed to set custom jobd: {e}"); ProxyState::update_jd_state(JdState::Down);break;},
+                                Some(p) => {
+                                    let valid_job_tracker = match self_mutex
+                                        .safe_lock(|s| s.valid_job_tracker.clone())
+                                    {
+                                        Ok(valid_job_tracker) => valid_job_tracker,
+                                        Err(e) => {
+                                            error!("{e}");
+                                            ProxyState::update_jd_state(JdState::Down);
+                                            break;
+                                        }
+                                    };
+                                    cache_ready_template_context(
+                                        &valid_job_tracker,
+                                        template.template_id,
+                                        &p,
+                                        &merkle_path,
+                                        last_declare.block_tx_count,
+                                        &last_declare_mining_job_sent.coinbase_prefix.to_vec(),
+                                        &last_declare_mining_job_sent.coinbase_suffix.to_vec(),
+                                    );
+                                    if let Err(e) = Upstream::set_custom_jobs(
+                                        &up,
+                                        last_declare_mining_job_sent,
+                                        p,
+                                        merkle_path,
+                                        new_token,
+                                        template.coinbase_tx_version,
+                                        template.coinbase_prefix,
+                                        template.coinbase_tx_input_sequence,
+                                        template.coinbase_tx_value_remaining,
+                                        pool_outs,
+                                        template.coinbase_tx_locktime,
+                                        template.template_id,
+                                    )
+                                    .await
+                                    {
+                                        error!("Failed to set custom jobd: {e}");
+                                        ProxyState::update_jd_state(JdState::Down);
+                                        break;
+                                    }
+                                }
                                 None => panic!("Invalid state we received a NewTemplate not future, without having received a set new prev hash")
                             }
                         }
@@ -471,7 +515,7 @@ impl JobDeclarator {
                 error!("{}", Error::JobDeclaratorMutexCorrupted);
                 return;
             };
-            let (job, up, merkle_path, template, mut pool_outs) = loop {
+            let (job, up, merkle_path, template, mut pool_outs, block_tx_count, valid_job_tracker) = loop {
                 match self_mutex.safe_lock(|s| {
                     if s.set_new_prev_hash_counter > 1
                         && s.last_set_new_prev_hash != Some(set_new_prev_hash.clone())
@@ -480,13 +524,21 @@ impl JobDeclarator {
                         s.set_new_prev_hash_counter -= 1;
                         Some(None)
                     } else {
-                        s.future_jobs
-                            .remove(&id)
-                            .map(|(job, merkle_path, template, pool_outs)| {
+                        s.future_jobs.remove(&id).map(
+                            |(job, merkle_path, template, pool_outs, block_tx_count)| {
                                 s.future_jobs = HashMap::with_hasher(BuildNoHashHasher::default());
                                 s.set_new_prev_hash_counter -= 1;
-                                Some((job, s.up.clone(), merkle_path, template, pool_outs))
-                            })
+                                Some((
+                                    job,
+                                    s.up.clone(),
+                                    merkle_path,
+                                    template,
+                                    pool_outs,
+                                    block_tx_count,
+                                    s.valid_job_tracker.clone(),
+                                ))
+                            },
+                        )
                     }
                 }) {
                     Ok(Some(Some(future_job_tuple))) => break future_job_tuple,
@@ -509,6 +561,15 @@ impl JobDeclarator {
             let signed_token = job.mining_job_token.clone();
             let mut template_outs = template.coinbase_tx_outputs.to_vec();
             pool_outs.append(&mut template_outs);
+            cache_ready_template_context(
+                &valid_job_tracker,
+                template.template_id,
+                &set_new_prev_hash,
+                &merkle_path,
+                block_tx_count,
+                &job.coinbase_prefix.to_vec(),
+                &job.coinbase_suffix.to_vec(),
+            );
             if let Err(e) = Upstream::set_custom_jobs(
                 &up,
                 job,
@@ -594,6 +655,24 @@ impl JobDeclarator {
             Error::Unrecoverable
         })
     }
+
+    pub fn remember_template_coinbase_parts(
+        self_mutex: &Arc<Mutex<Self>>,
+        template_id: u64,
+        coinbase_tx_prefix: B064K<'static>,
+        coinbase_tx_suffix: B064K<'static>,
+    ) -> Result<(), Error> {
+        self_mutex
+            .safe_lock(|s| {
+                remember_template_coinbase_parts(
+                    &mut s.template_coinbase_parts,
+                    template_id,
+                    coinbase_tx_prefix,
+                    coinbase_tx_suffix,
+                );
+            })
+            .map_err(|_| Error::JobDeclaratorMutexCorrupted)
+    }
 }
 
 fn missing_prioritized_txids(
@@ -647,10 +726,93 @@ async fn check_missing_prioritized_txids(missing_txids: Vec<String>, template_id
     }
 }
 
+// Template-distribution `RequestTransactionDataSuccess.transaction_list` explicitly excludes the
+// coinbase transaction, so the full block transaction count is always `len + 1`.
+fn block_tx_count_from_request_transaction_list_len(non_coinbase_tx_count: usize) -> u32 {
+    let non_coinbase_tx_count: u32 = non_coinbase_tx_count
+        .try_into()
+        .expect("request transaction list length should fit in u32");
+    non_coinbase_tx_count
+        .checked_add(1)
+        .expect("block transaction count overflowed")
+}
+
+fn remember_template_coinbase_parts(
+    template_coinbase_parts: &mut TemplateCoinbasePartsMap,
+    template_id: u64,
+    coinbase_tx_prefix: B064K<'static>,
+    coinbase_tx_suffix: B064K<'static>,
+) {
+    if template_coinbase_parts.len() >= MAX_PENDING_TEMPLATE_COINBASE_PARTS
+        && !template_coinbase_parts.contains_key(&template_id)
+    {
+        if let Some(oldest_template_id) = template_coinbase_parts.keys().min().copied() {
+            template_coinbase_parts.remove(&oldest_template_id);
+        }
+    }
+
+    template_coinbase_parts.insert(template_id, (coinbase_tx_prefix, coinbase_tx_suffix));
+}
+
+fn take_template_coinbase_parts(
+    template_coinbase_parts: &mut TemplateCoinbasePartsMap,
+    template_id: u64,
+) -> Option<TemplateCoinbaseParts> {
+    template_coinbase_parts.remove(&template_id)
+}
+
+fn cache_ready_template_context(
+    valid_job_tracker: &ValidJobTracker,
+    template_id: u64,
+    set_new_prev_hash: &SetNewPrevHash<'static>,
+    merkle_path: &Seq0255<'static, U256<'static>>,
+    block_tx_count: u32,
+    coinbase_tx_prefix: &[u8],
+    coinbase_tx_suffix: &[u8],
+) {
+    let prev_hash: [u8; 32] = set_new_prev_hash
+        .prev_hash
+        .to_vec()
+        .try_into()
+        .expect("SetNewPrevHash prev_hash should always be 32 bytes");
+    // `NewTemplate.merkle_path` is already the bottom-up sibling path in the exact raw byte order
+    // consumed by `merkle_root_from_path_`. Keep it unchanged in cached template context; only the
+    // RSK RPC serialization layer reverses bytes for wire hex.
+    let merkle_hashes = merkle_path
+        .to_vec()
+        .into_iter()
+        .map(|hash| {
+            hash.to_vec()
+                .try_into()
+                .expect("merkle path hashes should always be 32 bytes")
+        })
+        .collect();
+
+    if let Err(error) = valid_job_tracker.cache_template_context_with_coinbase_parts(
+        template_id,
+        prev_hash,
+        set_new_prev_hash.n_bits,
+        merkle_hashes,
+        block_tx_count,
+        coinbase_tx_prefix.to_vec(),
+        coinbase_tx_suffix.to_vec(),
+    ) {
+        error!(
+            "Failed to cache merge-mining template context for template {}: {}",
+            template_id, error
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::missing_prioritized_txids;
+    use super::{
+        block_tx_count_from_request_transaction_list_len, missing_prioritized_txids,
+        remember_template_coinbase_parts, take_template_coinbase_parts, TemplateCoinbasePartsMap,
+    };
+    use binary_sv2::B064K;
     use std::collections::HashSet;
+    use std::convert::TryInto;
 
     #[test]
     fn no_missing_prioritized_txids_when_all_are_in_template() {
@@ -668,6 +830,47 @@ mod tests {
         assert_eq!(
             missing_prioritized_txids(&prioritized, &template),
             vec!["b".to_string()]
+        );
+    }
+
+    #[test]
+    fn block_tx_count_adds_coinbase_to_request_transaction_data_len() {
+        assert_eq!(block_tx_count_from_request_transaction_list_len(0), 1);
+        assert_eq!(block_tx_count_from_request_transaction_list_len(3), 4);
+    }
+
+    #[test]
+    fn template_coinbase_parts_are_tracked_per_template_until_consumed() {
+        let mut template_coinbase_parts = TemplateCoinbasePartsMap::default();
+        let prefix_a: B064K<'static> = vec![0xaa].try_into().expect("prefix should fit");
+        let suffix_a: B064K<'static> = vec![0xab].try_into().expect("suffix should fit");
+        let prefix_b: B064K<'static> = vec![0xba].try_into().expect("prefix should fit");
+        let suffix_b: B064K<'static> = vec![0xbb].try_into().expect("suffix should fit");
+
+        remember_template_coinbase_parts(
+            &mut template_coinbase_parts,
+            11,
+            prefix_a.clone(),
+            suffix_a.clone(),
+        );
+        remember_template_coinbase_parts(
+            &mut template_coinbase_parts,
+            22,
+            prefix_b.clone(),
+            suffix_b.clone(),
+        );
+
+        assert_eq!(
+            take_template_coinbase_parts(&mut template_coinbase_parts, 11),
+            Some((prefix_a, suffix_a))
+        );
+        assert_eq!(
+            take_template_coinbase_parts(&mut template_coinbase_parts, 22),
+            Some((prefix_b, suffix_b))
+        );
+        assert!(
+            take_template_coinbase_parts(&mut template_coinbase_parts, 11).is_none(),
+            "consuming template A should not disturb template B, but it should remove A"
         );
     }
 }
