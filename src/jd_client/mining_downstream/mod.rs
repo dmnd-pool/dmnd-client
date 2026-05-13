@@ -356,7 +356,6 @@ impl DownstreamMiningNode {
         pool_output: &[u8],
     ) -> Result<(), JdClientError> {
         let template_id = new_template.template_id;
-        let template_is_future = new_template.future_template;
         // Make sure to set the template handled to true since we do not have a channel opened yet
         // and template can not be handled without it we will lock template handling forever.
         if !self_mutex
@@ -398,13 +397,7 @@ impl DownstreamMiningNode {
             let message = if let Mining::NewExtendedMiningJob(job) = message {
                 self_mutex
                     .safe_lock(|s| {
-                        remember_template_job(
-                            &mut s.job_template_ids,
-                            &mut s.prev_job_id,
-                            template_is_future,
-                            job.job_id,
-                            template_id,
-                        );
+                        remember_template_job(&mut s.job_template_ids, job.job_id, template_id);
                     })
                     .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?;
                 let jd = self_mutex
@@ -414,10 +407,13 @@ impl DownstreamMiningNode {
                         // Propagate error. The caller will restart proxy
                         JdClientError::JdMissing
                     })?;
-                jd.safe_lock(|jd| jd.coinbase_tx_prefix = job.coinbase_tx_prefix.clone())
-                    .map_err(|_| JdClientError::JobDeclaratorMutexCorrupted)?;
-                jd.safe_lock(|jd| jd.coinbase_tx_suffix = job.coinbase_tx_suffix.clone())
-                    .map_err(|_| JdClientError::JobDeclaratorMutexCorrupted)?;
+                JobDeclarator::remember_template_coinbase_parts(
+                    &jd,
+                    template_id,
+                    job.coinbase_tx_prefix.clone(),
+                    job.coinbase_tx_suffix.clone(),
+                )
+                .map_err(|_| JdClientError::JobDeclaratorMutexCorrupted)?;
 
                 Mining::NewExtendedMiningJob(job)
             } else {
@@ -640,50 +636,17 @@ impl
         m: SubmitSharesExtended,
     ) -> Result<SendTo<UpstreamMiningNode>, Error> {
         let is_solo_miner = self.status.is_solo_miner();
-        if share_uses_stale_job(self.prev_job_id, is_solo_miner, m.job_id) {
-            if !is_solo_miner && share_is_newer_than_current_job(self.prev_job_id, m.job_id) {
-                let full_extranonce = match self.status.get_channel() {
-                    Ok(channel) => channel
-                        .extranonce_from_downstream_extranonce(m.extranonce.clone().into())
-                        .map(|extranonce| extranonce.to_vec()),
-                    Err(_) => None,
-                };
-
-                if let Some(full_extranonce) = full_extranonce.as_deref() {
-                    if let Some(template_id) = self.job_template_ids.get(&m.job_id).copied() {
-                        match self.valid_job_tracker.record_rsk_target_share(
-                            template_id,
-                            m.version,
-                            m.ntime,
-                            m.nonce,
-                            full_extranonce,
-                        ) {
-                            Ok(Some(_)) => {}
-                            Ok(None) => {}
-                            Err(error) => {
-                                error!(
-                                    "Failed to record stale-response RSK-target valid job for polling API: {error}"
-                                );
-                            }
-                        }
-                    } else {
-                        debug!(
-                            submitted_job_id = m.job_id,
-                            "Skipping stale-response RSK-target share because no current-prevhash template_id was cached for the JD job"
-                        );
-                    }
-                } else {
-                    debug!(
-                        submitted_job_id = m.job_id,
-                        "Skipping stale-response RSK-target share because the full extranonce could not be reconstructed"
-                    );
-                }
-            }
-
+        if share_uses_stale_job(
+            self.prev_job_id,
+            &self.job_template_ids,
+            is_solo_miner,
+            m.job_id,
+        ) {
             warn!(
                 submitted_job_id = m.job_id,
                 current_job_id = self.prev_job_id,
-                "Rejecting JD share because it references a non-current clean job"
+                tracked_job_count = self.job_template_ids.len(),
+                "Rejecting JD share because it references a job outside the current clean-job family"
             );
             let error = SubmitSharesError {
                 channel_id: m.channel_id,
@@ -881,81 +844,77 @@ impl
 }
 impl IsMiningDownstream for DownstreamMiningNode {}
 
-fn remember_template_job(
-    job_template_ids: &mut HashMap<u32, u64>,
-    current_job_id: &mut Option<u32>,
-    template_is_future: bool,
-    job_id: u32,
-    template_id: u64,
-) {
+fn remember_template_job(job_template_ids: &mut HashMap<u32, u64>, job_id: u32, template_id: u64) {
     job_template_ids.insert(job_id, template_id);
-    if !template_is_future {
-        *current_job_id = Some(job_id);
-    }
 }
 
 fn share_uses_stale_job(
     current_job_id: Option<u32>,
+    job_template_ids: &HashMap<u32, u64>,
     is_solo_miner: bool,
     submitted_job_id: u32,
 ) -> bool {
-    !is_solo_miner && current_job_id.is_some_and(|current| current != submitted_job_id)
-}
-
-fn share_is_newer_than_current_job(current_job_id: Option<u32>, submitted_job_id: u32) -> bool {
-    current_job_id.is_some_and(|current| submitted_job_id > current)
+    !is_solo_miner && current_job_id.is_some() && !job_template_ids.contains_key(&submitted_job_id)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{remember_template_job, share_is_newer_than_current_job, share_uses_stale_job};
+    use super::{remember_template_job, share_uses_stale_job};
     use std::collections::HashMap;
 
     #[test]
-    fn remember_template_job_advances_current_job_for_non_future_templates() {
+    fn remember_template_job_tracks_job_to_template_without_advancing_current_job() {
         let mut job_template_ids = HashMap::new();
-        let mut current_job_id = Some(7);
+        let current_job_id = Some(7);
 
-        remember_template_job(&mut job_template_ids, &mut current_job_id, false, 8, 42);
-
-        assert_eq!(current_job_id, Some(8));
-        assert_eq!(job_template_ids.get(&8), Some(&42));
-    }
-
-    #[test]
-    fn remember_template_job_keeps_current_job_for_future_templates() {
-        let mut job_template_ids = HashMap::new();
-        let mut current_job_id = Some(7);
-
-        remember_template_job(&mut job_template_ids, &mut current_job_id, true, 8, 42);
+        remember_template_job(&mut job_template_ids, 8, 42);
 
         assert_eq!(current_job_id, Some(7));
         assert_eq!(job_template_ids.get(&8), Some(&42));
     }
 
     #[test]
-    fn newer_than_current_job_detects_false_stale_case() {
-        assert!(share_is_newer_than_current_job(Some(1), 7));
+    fn remember_template_job_tracks_multiple_jobs_for_same_clean_family() {
+        let mut job_template_ids = HashMap::new();
+        remember_template_job(&mut job_template_ids, 7, 41);
+        remember_template_job(&mut job_template_ids, 8, 42);
+
+        assert_eq!(job_template_ids.get(&7), Some(&41));
+        assert_eq!(job_template_ids.get(&8), Some(&42));
     }
 
     #[test]
-    fn newer_than_current_job_ignores_older_or_equal_jobs() {
-        assert!(!share_is_newer_than_current_job(Some(7), 7));
-        assert!(!share_is_newer_than_current_job(Some(7), 6));
+    fn stale_job_guard_allows_any_tracked_job_within_current_clean_family() {
+        let mut job_template_ids = HashMap::new();
+        remember_template_job(&mut job_template_ids, 7, 41);
+        remember_template_job(&mut job_template_ids, 8, 42);
+
+        assert!(!share_uses_stale_job(Some(7), &job_template_ids, false, 7));
+        assert!(!share_uses_stale_job(Some(7), &job_template_ids, false, 8));
     }
 
     #[test]
-    fn stale_job_guard_rejects_older_non_solo_job_ids() {
-        assert!(share_uses_stale_job(Some(7), false, 6));
+    fn stale_job_guard_rejects_unknown_job_once_current_clean_family_is_known() {
+        let mut job_template_ids = HashMap::new();
+        remember_template_job(&mut job_template_ids, 7, 41);
+
+        assert!(share_uses_stale_job(Some(7), &job_template_ids, false, 6));
+        assert!(share_uses_stale_job(Some(7), &job_template_ids, false, 8));
     }
 
     #[test]
-    fn stale_job_guard_allows_current_job_id() {
-        assert!(!share_uses_stale_job(Some(7), false, 7));
+    fn stale_job_guard_is_disabled_until_a_clean_job_family_exists() {
+        let mut job_template_ids = HashMap::new();
+        remember_template_job(&mut job_template_ids, 8, 42);
+
+        assert!(!share_uses_stale_job(None, &job_template_ids, false, 7));
     }
 
     #[test]
     fn stale_job_guard_is_disabled_for_solo_mode() {
-        assert!(!share_uses_stale_job(Some(7), true, 6));
+        let mut job_template_ids = HashMap::new();
+        remember_template_job(&mut job_template_ids, 7, 41);
+
+        assert!(!share_uses_stale_job(Some(7), &job_template_ids, true, 6));
     }
 }

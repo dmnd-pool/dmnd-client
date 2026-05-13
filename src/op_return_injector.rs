@@ -328,18 +328,30 @@ fn template_already_contains_payload(
 ) -> Result<bool, OpReturnInjectorError> {
     let bytes = template.coinbase_tx_outputs.to_vec();
     let mut cursor = bytes.as_slice();
+    let expect_last_rsk_payload = desired.payload_bytes.starts_with(RSK_MERGED_MINING_TAG);
+    let mut matching_payload_seen = false;
+    let mut last_rsk_payload = None;
 
     for _ in 0..template.coinbase_tx_outputs_count {
         let tx_out = TxOut::consensus_decode(&mut cursor)
             .map_err(|error| OpReturnInjectorError::Encoding(error.to_string()))?;
-        if extract_single_op_return_pushdata(&tx_out.script_pubkey)
-            .is_some_and(|payload| payload == desired.payload_bytes)
-        {
-            return Ok(true);
+        if let Some(payload) = extract_single_op_return_pushdata(&tx_out.script_pubkey) {
+            if payload == desired.payload_bytes {
+                matching_payload_seen = true;
+            }
+            if expect_last_rsk_payload && payload.starts_with(RSK_MERGED_MINING_TAG) {
+                last_rsk_payload = Some(payload);
+            }
         }
     }
 
-    Ok(false)
+    if expect_last_rsk_payload {
+        Ok(last_rsk_payload
+            .as_deref()
+            .is_some_and(|payload| payload == desired.payload_bytes.as_slice()))
+    } else {
+        Ok(matching_payload_seen)
+    }
 }
 
 fn extract_single_op_return_pushdata(script_pubkey: &ScriptBuf) -> Option<Vec<u8>> {
@@ -562,6 +574,57 @@ mod tests {
             .expect("payload should still be treated as applied");
 
         assert_eq!(template.coinbase_tx_outputs_count, 1);
+    }
+
+    #[tokio::test]
+    async fn appends_desired_rsk_payload_when_an_older_matching_tag_is_not_last() {
+        let injector = OpReturnInjector::default();
+        let desired_payload_hex = "52534b424c4f434b3adeadbeef";
+        let desired_payload =
+            Vec::from_hex(desired_payload_hex).expect("desired payload should decode");
+        let later_payload =
+            Vec::from_hex("52534b424c4f434b3acafebabe").expect("later payload should decode");
+        let mut template = make_new_template(51);
+        let mut outputs = Vec::new();
+
+        for payload in [&desired_payload, &later_payload] {
+            let tx_out = TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::new_op_return(
+                    PushBytesBuf::try_from(payload.clone()).expect("payload should fit"),
+                ),
+            };
+            tx_out
+                .consensus_encode(&mut outputs)
+                .expect("Vec<u8> should encode");
+        }
+        template.coinbase_tx_outputs_count = 2;
+        template.coinbase_tx_outputs = outputs
+            .try_into()
+            .expect("serialized outputs should fit in B064K");
+
+        injector
+            .queue_from_hex(desired_payload_hex)
+            .await
+            .expect("payload should queue");
+        injector
+            .apply_pending_to_template(&mut template)
+            .await
+            .expect("template apply should succeed")
+            .expect("payload should still be reported as applied");
+
+        assert_eq!(
+            template.coinbase_tx_outputs_count, 3,
+            "the desired payload must be appended again so it becomes the last RSKBLOCK tag",
+        );
+
+        let mut cursor = template.coinbase_tx_outputs.as_ref();
+        let mut last_payload = None;
+        for _ in 0..template.coinbase_tx_outputs_count {
+            let tx_out = TxOut::consensus_decode(&mut cursor).expect("valid tx out");
+            last_payload = extract_single_op_return_pushdata(&tx_out.script_pubkey);
+        }
+        assert_eq!(last_payload, Some(desired_payload));
     }
 
     #[tokio::test]

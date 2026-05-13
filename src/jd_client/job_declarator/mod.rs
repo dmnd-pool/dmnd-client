@@ -54,6 +54,10 @@ pub struct LastDeclareJob {
     block_tx_count: u32,
 }
 
+type TemplateCoinbaseParts = (B064K<'static>, B064K<'static>);
+type TemplateCoinbasePartsMap = HashMap<u64, TemplateCoinbaseParts, BuildNoHashHasher<u64>>;
+const MAX_PENDING_TEMPLATE_COINBASE_PARTS: usize = 1000;
+
 #[derive(Debug)]
 pub struct JobDeclarator {
     sender: TSender<StandardEitherFrame<PoolMessages<'static>>>,
@@ -78,8 +82,7 @@ pub struct JobDeclarator {
         BuildNoHashHasher<u64>,
     >,
     up: Arc<Mutex<Upstream>>,
-    pub coinbase_tx_prefix: B064K<'static>,
-    pub coinbase_tx_suffix: B064K<'static>,
+    template_coinbase_parts: TemplateCoinbasePartsMap,
     valid_job_tracker: ValidJobTracker,
     pub task_manager: Arc<Mutex<TaskManager>>,
 }
@@ -121,8 +124,7 @@ impl JobDeclarator {
             last_set_new_prev_hash: None,
             future_jobs: HashMap::with_hasher(BuildNoHashHasher::default()),
             up,
-            coinbase_tx_prefix: vec![].try_into().expect("Internal error: this operation can not fail because Vec can always be converted into Inner"),
-            coinbase_tx_suffix: vec![].try_into().expect("Internal error: this operation can not fail because Vec can always be converted into Inner"),
+            template_coinbase_parts: HashMap::with_hasher(BuildNoHashHasher::default()),
             valid_job_tracker,
             set_new_prev_hash_counter: 0,
             task_manager,
@@ -283,13 +285,18 @@ impl JobDeclarator {
         }
         let tx_ids: Seq064K<'static, U256> = Seq064K::from(tx_ids);
 
-        let coinbase_prefix = self_mutex
-            .safe_lock(|s| s.coinbase_tx_prefix.clone())
-            .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
-
-        let coinbase_suffix = self_mutex
-            .safe_lock(|s| s.coinbase_tx_suffix.clone())
-            .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
+        let (coinbase_prefix, coinbase_suffix) = self_mutex
+            .safe_lock(|s| {
+                take_template_coinbase_parts(&mut s.template_coinbase_parts, template.template_id)
+            })
+            .map_err(|_| Error::JobDeclaratorMutexCorrupted)?
+            .ok_or_else(|| {
+                error!(
+                    "Missing per-template coinbase prefix/suffix for template {}",
+                    template.template_id
+                );
+                Error::Unrecoverable
+            })?;
 
         let declare_job = DeclareMiningJob {
             request_id: id,
@@ -409,16 +416,10 @@ impl JobDeclarator {
                             pool_outs.append(&mut template_outs);
                             match set_new_prev_hash {
                                 Some(p) => {
-                                    let (valid_job_tracker, coinbase_tx_prefix, coinbase_tx_suffix) =
-                                        match self_mutex.safe_lock(|s| {
-                                            (
-                                                s.valid_job_tracker.clone(),
-                                                s.coinbase_tx_prefix.to_vec(),
-                                                s.coinbase_tx_suffix.to_vec(),
-                                            )
-                                        })
+                                    let valid_job_tracker = match self_mutex
+                                        .safe_lock(|s| s.valid_job_tracker.clone())
                                     {
-                                        Ok(context) => context,
+                                        Ok(valid_job_tracker) => valid_job_tracker,
                                         Err(e) => {
                                             error!("{e}");
                                             ProxyState::update_jd_state(JdState::Down);
@@ -431,8 +432,8 @@ impl JobDeclarator {
                                         &p,
                                         &merkle_path,
                                         last_declare.block_tx_count,
-                                        &coinbase_tx_prefix,
-                                        &coinbase_tx_suffix,
+                                        &last_declare_mining_job_sent.coinbase_prefix.to_vec(),
+                                        &last_declare_mining_job_sent.coinbase_suffix.to_vec(),
                                     );
                                     if let Err(e) = Upstream::set_custom_jobs(
                                         &up,
@@ -560,23 +561,14 @@ impl JobDeclarator {
             let signed_token = job.mining_job_token.clone();
             let mut template_outs = template.coinbase_tx_outputs.to_vec();
             pool_outs.append(&mut template_outs);
-            let (coinbase_tx_prefix, coinbase_tx_suffix) = match self_mutex
-                .safe_lock(|s| (s.coinbase_tx_prefix.to_vec(), s.coinbase_tx_suffix.to_vec()))
-            {
-                Ok(context) => context,
-                Err(_) => {
-                    error!("{}", Error::JobDeclaratorMutexCorrupted);
-                    return;
-                }
-            };
             cache_ready_template_context(
                 &valid_job_tracker,
                 template.template_id,
                 &set_new_prev_hash,
                 &merkle_path,
                 block_tx_count,
-                &coinbase_tx_prefix,
-                &coinbase_tx_suffix,
+                &job.coinbase_prefix.to_vec(),
+                &job.coinbase_suffix.to_vec(),
             );
             if let Err(e) = Upstream::set_custom_jobs(
                 &up,
@@ -663,6 +655,24 @@ impl JobDeclarator {
             Error::Unrecoverable
         })
     }
+
+    pub fn remember_template_coinbase_parts(
+        self_mutex: &Arc<Mutex<Self>>,
+        template_id: u64,
+        coinbase_tx_prefix: B064K<'static>,
+        coinbase_tx_suffix: B064K<'static>,
+    ) -> Result<(), Error> {
+        self_mutex
+            .safe_lock(|s| {
+                remember_template_coinbase_parts(
+                    &mut s.template_coinbase_parts,
+                    template_id,
+                    coinbase_tx_prefix,
+                    coinbase_tx_suffix,
+                );
+            })
+            .map_err(|_| Error::JobDeclaratorMutexCorrupted)
+    }
 }
 
 fn missing_prioritized_txids(
@@ -727,6 +737,30 @@ fn block_tx_count_from_request_transaction_list_len(non_coinbase_tx_count: usize
         .expect("block transaction count overflowed")
 }
 
+fn remember_template_coinbase_parts(
+    template_coinbase_parts: &mut TemplateCoinbasePartsMap,
+    template_id: u64,
+    coinbase_tx_prefix: B064K<'static>,
+    coinbase_tx_suffix: B064K<'static>,
+) {
+    if template_coinbase_parts.len() >= MAX_PENDING_TEMPLATE_COINBASE_PARTS
+        && !template_coinbase_parts.contains_key(&template_id)
+    {
+        if let Some(oldest_template_id) = template_coinbase_parts.keys().min().copied() {
+            template_coinbase_parts.remove(&oldest_template_id);
+        }
+    }
+
+    template_coinbase_parts.insert(template_id, (coinbase_tx_prefix, coinbase_tx_suffix));
+}
+
+fn take_template_coinbase_parts(
+    template_coinbase_parts: &mut TemplateCoinbasePartsMap,
+    template_id: u64,
+) -> Option<TemplateCoinbaseParts> {
+    template_coinbase_parts.remove(&template_id)
+}
+
 fn cache_ready_template_context(
     valid_job_tracker: &ValidJobTracker,
     template_id: u64,
@@ -772,8 +806,13 @@ fn cache_ready_template_context(
 
 #[cfg(test)]
 mod tests {
-    use super::{block_tx_count_from_request_transaction_list_len, missing_prioritized_txids};
+    use super::{
+        block_tx_count_from_request_transaction_list_len, missing_prioritized_txids,
+        remember_template_coinbase_parts, take_template_coinbase_parts, TemplateCoinbasePartsMap,
+    };
+    use binary_sv2::B064K;
     use std::collections::HashSet;
+    use std::convert::TryInto;
 
     #[test]
     fn no_missing_prioritized_txids_when_all_are_in_template() {
@@ -798,5 +837,40 @@ mod tests {
     fn block_tx_count_adds_coinbase_to_request_transaction_data_len() {
         assert_eq!(block_tx_count_from_request_transaction_list_len(0), 1);
         assert_eq!(block_tx_count_from_request_transaction_list_len(3), 4);
+    }
+
+    #[test]
+    fn template_coinbase_parts_are_tracked_per_template_until_consumed() {
+        let mut template_coinbase_parts = TemplateCoinbasePartsMap::default();
+        let prefix_a: B064K<'static> = vec![0xaa].try_into().expect("prefix should fit");
+        let suffix_a: B064K<'static> = vec![0xab].try_into().expect("suffix should fit");
+        let prefix_b: B064K<'static> = vec![0xba].try_into().expect("prefix should fit");
+        let suffix_b: B064K<'static> = vec![0xbb].try_into().expect("suffix should fit");
+
+        remember_template_coinbase_parts(
+            &mut template_coinbase_parts,
+            11,
+            prefix_a.clone(),
+            suffix_a.clone(),
+        );
+        remember_template_coinbase_parts(
+            &mut template_coinbase_parts,
+            22,
+            prefix_b.clone(),
+            suffix_b.clone(),
+        );
+
+        assert_eq!(
+            take_template_coinbase_parts(&mut template_coinbase_parts, 11),
+            Some((prefix_a, suffix_a))
+        );
+        assert_eq!(
+            take_template_coinbase_parts(&mut template_coinbase_parts, 22),
+            Some((prefix_b, suffix_b))
+        );
+        assert!(
+            take_template_coinbase_parts(&mut template_coinbase_parts, 11).is_none(),
+            "consuming template A should not disturb template B, but it should remove A"
+        );
     }
 }

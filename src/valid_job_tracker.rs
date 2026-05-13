@@ -673,11 +673,16 @@ pub(crate) fn coinbase_contains_expected_op_return_payload(
     coinbase_transaction: &Transaction,
     expected_payload: &[u8],
 ) -> bool {
-    coinbase_transaction
-        .output
-        .iter()
-        .filter_map(|output| extract_single_op_return_pushdata(&output.script_pubkey))
-        .any(|payload| payload == expected_payload)
+    if expected_payload.starts_with(RSK_MERGED_MINING_TAG) {
+        return last_rskblock_payload(coinbase_transaction)
+            .as_deref()
+            .is_some_and(|payload| payload == expected_payload);
+    }
+
+    coinbase_transaction.output.iter().any(|output| {
+        extract_single_op_return_pushdata(&output.script_pubkey)
+            .is_some_and(|payload| payload == expected_payload)
+    })
 }
 
 fn extract_single_op_return_pushdata(script_pubkey: &bitcoin::ScriptBuf) -> Option<Vec<u8>> {
@@ -701,6 +706,15 @@ fn extract_single_op_return_pushdata(script_pubkey: &bitcoin::ScriptBuf) -> Opti
     }
 
     Some(payload)
+}
+
+fn last_rskblock_payload(coinbase_transaction: &Transaction) -> Option<Vec<u8>> {
+    coinbase_transaction
+        .output
+        .iter()
+        .filter_map(|output| extract_single_op_return_pushdata(&output.script_pubkey))
+        .filter(|payload| payload.starts_with(RSK_MERGED_MINING_TAG))
+        .last()
 }
 
 fn unix_timestamp_now() -> u64 {
@@ -1625,6 +1639,60 @@ mod tests {
             tracker
                 .record_found_job(77, 2, 3, 4, &coinbase_without_payload)
                 .expect("tracker should reject mismatched coinbase"),
+            None
+        );
+        assert_eq!(
+            tracker.take_found_job().expect("tracker should read queue"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn record_found_job_requires_expected_payload_to_be_last_rskblock_tag() {
+        let (injector, tracker) = make_tracker();
+        let payload_hex = rsk_payload_hex("cafebabe");
+        let payload = Vec::from_hex(&payload_hex).expect("payload should decode");
+        let later_payload =
+            Vec::from_hex(&rsk_payload_hex("deadbeef")).expect("later payload should decode");
+
+        apply_payload_to_template(&injector, 78, &payload_hex).await;
+        tracker
+            .cache_template_context(78, [7; 32], 0x1d00ffff, vec![], 1)
+            .expect("tracker should cache template context");
+
+        let coinbase_with_later_rsk_tag = Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: vec![0x03, 0x07, 0x51].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(5_000_000_000),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                },
+                TxOut {
+                    value: Amount::ZERO,
+                    script_pubkey: ScriptBuf::new_op_return(
+                        PushBytesBuf::try_from(payload).expect("payload should fit"),
+                    ),
+                },
+                TxOut {
+                    value: Amount::ZERO,
+                    script_pubkey: ScriptBuf::new_op_return(
+                        PushBytesBuf::try_from(later_payload).expect("payload should fit"),
+                    ),
+                },
+            ],
+        };
+
+        assert_eq!(
+            tracker
+                .record_found_job(78, 2, 3, 4, &serialize(&coinbase_with_later_rsk_tag))
+                .expect("tracker should reject mismatched last RSKBLOCK tag"),
             None
         );
         assert_eq!(
