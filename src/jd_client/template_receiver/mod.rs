@@ -1,4 +1,5 @@
 mod task_manager;
+use crate::op_return_injector::OpReturnInjector;
 use crate::proxy_state::{DownstreamType, JdState, TpState};
 use crate::shared::utils::AbortOnDrop;
 use crate::{
@@ -41,6 +42,7 @@ pub struct TemplateRx {
     down: Arc<Mutex<Downstream>>,
     new_template_message: Option<NewTemplate<'static>>,
     miner_coinbase_output: Vec<u8>,
+    op_return_injector: OpReturnInjector,
     test_only_do_not_send_solution_to_tp: bool,
 }
 
@@ -52,6 +54,7 @@ impl TemplateRx {
         jd: Option<Arc<Mutex<super::job_declarator::JobDeclarator>>>,
         down: Arc<Mutex<Downstream>>,
         miner_coinbase_outputs: Vec<TxOut>,
+        op_return_injector: OpReturnInjector,
         authority_public_key: Option<Secp256k1PublicKey>,
         test_only_do_not_send_solution_to_tp: bool,
     ) -> Result<AbortOnDrop, Error> {
@@ -101,6 +104,7 @@ impl TemplateRx {
             down,
             new_template_message: None,
             miner_coinbase_output: encoded_outputs,
+            op_return_injector,
             test_only_do_not_send_solution_to_tp,
         }));
 
@@ -207,6 +211,9 @@ impl TemplateRx {
         let mut last_token = None;
         let miner_coinbase_output = self_mutex
             .safe_lock(|s| s.miner_coinbase_output.clone())
+            .map_err(|_| Error::TemplateRxMutexCorrupted)?;
+        let op_return_injector = self_mutex
+            .safe_lock(|s| s.op_return_injector.clone())
             .map_err(|_| Error::TemplateRxMutexCorrupted)?;
         let main_task = {
             let self_mutex = self_mutex.clone();
@@ -320,6 +327,24 @@ impl TemplateRx {
                                             miner_name.as_str(),
                                         );
                                     };
+                                    match op_return_injector.apply_pending_to_template(&mut m).await
+                                    {
+                                        Ok(Some(applied)) => {
+                                            info!(
+                                                "Desired OP_RETURN applied to template {} (payload={} bytes, txout={} bytes)",
+                                                m.template_id,
+                                                applied.payload_len_bytes,
+                                                applied.tx_out_len_bytes
+                                            );
+                                        }
+                                        Ok(None) => {}
+                                        Err(e) => {
+                                            warn!(
+                                                "Failed to apply desired OP_RETURN to template {}: {}",
+                                                m.template_id, e
+                                            );
+                                        }
+                                    }
                                     let new_phash = super::IS_NEW_PHASH_ARRIVED
                                         .load(std::sync::atomic::Ordering::Acquire);
                                     let last_is_future = match self_mutex
@@ -836,6 +861,7 @@ mod tests {
             solution_tx,
             false,
             Vec::new(),
+            crate::valid_job_tracker::ValidJobTracker::default(),
             None,
         )));
 
@@ -849,6 +875,7 @@ mod tests {
             down,
             new_template_message: None,
             miner_coinbase_output: encoded_outputs,
+            op_return_injector: OpReturnInjector::default(),
             test_only_do_not_send_solution_to_tp: true,
         }));
         let _abortable = TemplateRx::start_templates(self_mutex, tp_to_client_rx)

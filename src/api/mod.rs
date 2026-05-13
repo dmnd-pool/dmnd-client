@@ -4,7 +4,10 @@ pub mod stats;
 mod utils;
 use std::sync::Arc;
 
-use crate::{api::bitcoin_rpc::BitcoindRpc, router::Router, Configuration};
+use crate::{
+    api::bitcoin_rpc::BitcoindRpc, op_return_injector::OpReturnInjector, router::Router,
+    valid_job_tracker::ValidJobTracker, Configuration,
+};
 use axum::{
     routing::{get, post},
     Router as AxumRouter,
@@ -19,6 +22,9 @@ pub struct AppState {
     stats_sender: StatsSender,
     downstream_handoff: crate::DownstreamHandoffSender,
     prioritizing_txs: Option<PrioritizingTxs>,
+    op_return_injector: OpReturnInjector,
+    valid_job_tracker: ValidJobTracker,
+    api_secret: Option<String>,
 }
 
 #[derive(Clone)]
@@ -31,6 +37,8 @@ pub(crate) async fn start(
     router: Router,
     stats_sender: StatsSender,
     downstream_handoff: crate::DownstreamHandoffSender,
+    op_return_injector: OpReturnInjector,
+    valid_job_tracker: ValidJobTracker,
 ) {
     let prioritizing_txs = Configuration::bitcoind_rpc_config().map(|config| {
         let rpc = Arc::new(BitcoindRpc::new(
@@ -50,6 +58,9 @@ pub(crate) async fn start(
         stats_sender,
         downstream_handoff,
         prioritizing_txs,
+        op_return_injector,
+        valid_job_tracker,
+        api_secret: Configuration::api_secret(),
     };
     let app = AxumRouter::new()
         .route("/api/health", get(Api::health_check))
@@ -57,6 +68,14 @@ pub(crate) async fn start(
         .route(
             "/api/tx/prioritized",
             get(Api::get_prioritized_transactions),
+        )
+        .route(
+            "/api/coinbase/op-return",
+            post(Api::queue_coinbase_op_return),
+        )
+        .route(
+            "/api/merge-mining/found-job",
+            get(Api::poll_found_valid_job),
         )
         .route("/api/pool/info", get(Api::get_pool_info))
         .route("/api/stats/miners", get(Api::get_downstream_stats))

@@ -41,7 +41,9 @@ pub static IS_NEW_TEMPLATE_HANDLED: AtomicBool = AtomicBool::new(true);
 pub static IS_CUSTOM_JOB_SET: AtomicBool = AtomicBool::new(true);
 pub static IS_NEW_PHASH_ARRIVED: AtomicBool = AtomicBool::new(false);
 
+use crate::op_return_injector::OpReturnInjector;
 use crate::proxy_state::{DownstreamType, ProxyState, TpState};
+use crate::valid_job_tracker::ValidJobTracker;
 use roles_logic_sv2::{parsers::Mining, utils::Mutex};
 use std::{
     net::{IpAddr, SocketAddr},
@@ -56,12 +58,22 @@ pub async fn start(
     sender: tokio::sync::mpsc::Sender<Mining<'static>>,
     up_receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     up_sender: tokio::sync::mpsc::Sender<Mining<'static>>,
+    op_return_injector: OpReturnInjector,
+    valid_job_tracker: ValidJobTracker,
 ) -> Option<AbortOnDrop> {
     // This will not work when we implement support for multiple upstream
     IS_CUSTOM_JOB_SET.store(true, std::sync::atomic::Ordering::Release);
     IS_NEW_TEMPLATE_HANDLED.store(true, std::sync::atomic::Ordering::Release);
     IS_NEW_PHASH_ARRIVED.store(false, std::sync::atomic::Ordering::Release);
-    initialize_jd(receiver, sender, up_receiver, up_sender).await
+    initialize_jd(
+        receiver,
+        sender,
+        up_receiver,
+        up_sender,
+        op_return_injector,
+        valid_job_tracker,
+    )
+    .await
 }
 
 async fn initialize_jd(
@@ -69,6 +81,8 @@ async fn initialize_jd(
     sender: tokio::sync::mpsc::Sender<Mining<'static>>,
     up_receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     up_sender: tokio::sync::mpsc::Sender<Mining<'static>>,
+    op_return_injector: OpReturnInjector,
+    valid_job_tracker: ValidJobTracker,
 ) -> Option<AbortOnDrop> {
     let task_manager = TaskManager::initialize();
     let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
@@ -125,15 +139,22 @@ async fn initialize_jd(
         }
     };
 
-    let (jd, jd_abortable) =
-        match JobDeclarator::new(address, auth_pub_k.into_bytes(), upstream.clone(), true).await {
-            Ok(c) => c,
-            Err(e) => {
-                error!("Failed to intialize Jd: {e}");
-                drop(abortable);
-                return None;
-            }
-        };
+    let (jd, jd_abortable) = match JobDeclarator::new(
+        address,
+        auth_pub_k.into_bytes(),
+        upstream.clone(),
+        true,
+        valid_job_tracker.clone(),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to intialize Jd: {e}");
+            drop(abortable);
+            return None;
+        }
+    };
 
     if TaskManager::add_job_declarator_task(task_manager.clone(), jd_abortable)
         .await
@@ -153,6 +174,7 @@ async fn initialize_jd(
         send_solution,
         false,
         vec![],
+        valid_job_tracker,
         Some(jd.clone()),
     )));
     let downstream_abortable = match DownstreamMiningNode::start(donwstream.clone(), receiver).await
@@ -213,6 +235,7 @@ async fn initialize_jd(
         Some(jd.clone()),
         donwstream.clone(),
         vec![],
+        op_return_injector,
         None,
         test_only_do_not_send_solution_to_tp,
     )

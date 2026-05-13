@@ -34,6 +34,7 @@ pub use config::Configuration;
 pub mod jd_client;
 mod minin_pool_connection;
 mod monitor;
+mod op_return_injector;
 mod prioritized_transactions;
 mod proxy_state;
 mod router;
@@ -41,6 +42,7 @@ mod share_accounter;
 mod shared;
 mod shutdown;
 mod translator;
+mod valid_job_tracker;
 
 const TRANSLATOR_BUFFER_SIZE: usize = 128;
 const DOWNSTREAM_ACCEPT_BUFFER_SIZE: usize = 1024;
@@ -201,6 +203,8 @@ async fn initialize_proxy(
     signature: String,
 ) {
     let shutdown_signal = shutdown::handle_shutdown();
+    let op_return_injector = op_return_injector::OpReturnInjector::default();
+    let valid_job_tracker = valid_job_tracker::ValidJobTracker::new(op_return_injector.clone());
     loop {
         if *shutdown_signal.clone().borrow() {
             break;
@@ -272,6 +276,8 @@ async fn initialize_proxy(
                 jdc_to_translator_sender,
                 from_share_accounter_to_jdc_recv,
                 from_jdc_to_share_accounter_send,
+                op_return_injector.clone(),
+                valid_job_tracker.clone(),
             )
             .await;
             if jdc_abortable.is_none() {
@@ -320,8 +326,13 @@ async fn initialize_proxy(
         if let Some(jdc_handle) = jdc_abortable {
             abort_handles.push((jdc_handle, "jdc".to_string()));
         }
-        let server_handle =
-            tokio::spawn(api::start(router.clone(), stats_sender, downstream_handoff));
+        let server_handle = tokio::spawn(api::start(
+            router.clone(),
+            stats_sender,
+            downstream_handoff,
+            op_return_injector.clone(),
+            valid_job_tracker.clone(),
+        ));
         abort_handles.push((server_handle.into(), "api_server".to_string()));
         match monitor(router, abort_handles, epsilon, shutdown_signal.clone()).await {
             Reconnect::NewUpstream(new_pool_addr) => {
