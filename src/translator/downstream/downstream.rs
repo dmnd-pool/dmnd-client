@@ -218,7 +218,7 @@ impl Downstream {
             stats_sender,
             recent_jobs: RecentJobs::new(),
             first_job: last_notify.expect("we have an assertion at the beginning of this function"),
-            share_monitor: SharesMonitor::new(token.clone()),
+            share_monitor: SharesMonitor::new(connection_id, token.clone()),
             user_agent: std::cell::RefCell::new(String::new()),
             token,
             tx_update_token,
@@ -253,9 +253,9 @@ impl Downstream {
             ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
         };
 
-        // Notify/bootstrap and share-monitor startup are not required before the miner can
-        // receive subscribe/authorize responses. Defer them off the connection-open critical
-        // path so startup slots are held only for the bidirectional SV1 relay tasks.
+        // Notify/bootstrap startup is not required before the miner can receive
+        // subscribe/authorize responses. Defer it off the connection-open critical path so
+        // startup slots are held only for the bidirectional SV1 relay tasks.
         let bootstrap_registration_manager = task_manager.clone();
         let bootstrap_handle = tokio::spawn(async move {
             let should_skip_bootstrap =
@@ -280,23 +280,6 @@ impl Downstream {
                 error!("Failed to start notify task: {e}");
                 ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
             };
-
-            let should_skip_share_monitor =
-                downstream.safe_lock(|d| d.is_closed()).unwrap_or_else(|e| {
-                    error!("Failed to read downstream closed state before share monitor: {e}");
-                    ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
-                    true
-                });
-            if should_skip_share_monitor {
-                return;
-            }
-
-            if let Err(e) =
-                Self::start_share_monitor(task_manager.clone(), downstream.clone()).await
-            {
-                error!("Failed to start share monitor task: {e}");
-                ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
-            }
         });
         if let Err(e) = TaskManager::add_bootstrap(
             bootstrap_registration_manager,
@@ -308,31 +291,6 @@ impl Downstream {
             error!("Failed to register bootstrap task for downstream {connection_id}: {e:?}");
             ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
         }
-    }
-
-    /// Starts the shares monitor task.
-    async fn start_share_monitor(
-        task_manager: Arc<Mutex<TaskManager>>,
-        downstream: Arc<Mutex<Self>>,
-    ) -> Result<(), Error<'static>> {
-        let is_closed = downstream.safe_lock(|s| s.is_closed())?;
-        if is_closed {
-            return Ok(());
-        }
-
-        let (share_monitor, connection_id) =
-            downstream.safe_lock(|s| (s.share_monitor.clone(), s.connection_id))?;
-
-        // Create an abortable task for the shares monitor
-        let abortable = tokio::spawn(async move {
-            debug!("Starting shares monitor for downstream: {}", connection_id);
-            share_monitor.clone().monitor().await;
-        });
-
-        // Register the task with the task manager so it can be aborted when needed
-        TaskManager::add_shares_monitor(connection_id, task_manager, abortable.into())
-            .await
-            .map_err(|_| Error::TranslatorTaskManagerFailed)
     }
 
     /// Accept connections from one or more SV1 Downstream roles (SV1 Mining Devices) and create a
@@ -512,6 +470,71 @@ impl Downstream {
         }
     }
 
+    fn invalid_submit_share(message_sv1: &json_rpc::Message) -> Option<ShareInfo> {
+        let request = match message_sv1 {
+            json_rpc::Message::StandardRequest(request) if request.method == "mining.submit" => {
+                request
+            }
+            _ => return None,
+        };
+
+        if let Ok(submit) = client_to_server::Submit::try_from(request.clone()) {
+            let worker_name = submit.user_name.trim();
+            if worker_name.is_empty() {
+                return None;
+            }
+
+            let job_id = submit.job_id.parse::<i64>().unwrap_or_default();
+            return Some(ShareInfo::new(
+                worker_name.to_string(),
+                None,
+                job_id,
+                submit.nonce.0 as i64,
+                Some(RejectionReason::InvalidShare),
+            ));
+        }
+
+        let params = request.params.as_array()?;
+        let worker_name = params.first()?.as_str()?.trim();
+        if worker_name.is_empty() {
+            return None;
+        }
+
+        let job_id = params
+            .get(1)
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .and_then(|job_id| job_id.parse::<i64>().ok())
+                    .or_else(|| value.as_i64())
+            })
+            .unwrap_or_default();
+        let nonce = params
+            .get(4)
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .map(|nonce| nonce.min(i64::MAX as u64) as i64)
+                    .or_else(|| {
+                        value
+                            .as_str()
+                            .and_then(|nonce| {
+                                u32::from_str_radix(nonce.trim_start_matches("0x"), 16).ok()
+                            })
+                            .map(i64::from)
+                    })
+            })
+            .unwrap_or_default();
+
+        Some(ShareInfo::new(
+            worker_name.to_string(),
+            None,
+            job_id,
+            nonce,
+            Some(RejectionReason::InvalidShare),
+        ))
+    }
+
     pub(super) fn current_difficulty(&self) -> f32 {
         self.difficulty_mgmt
             .current_difficulties
@@ -525,10 +548,18 @@ impl Downstream {
         message_sv1: &json_rpc::Message,
     ) -> Result<(), Error<'static>> {
         if let Some(response) = Self::invalid_submit_rejection(message_sv1) {
-            let (connection_id, reason) = self_.safe_lock(|s| {
+            let invalid_share = Self::invalid_submit_share(message_sv1);
+            let (connection_id, reason, share_monitor) = self_.safe_lock(|s| {
                 s.stats_sender.update_rejected_shares(s.connection_id);
-                (s.connection_id, s.invalid_submit_reason(message_sv1))
+                (
+                    s.connection_id,
+                    s.invalid_submit_reason(message_sv1),
+                    s.share_monitor.clone(),
+                )
             })?;
+            if let Some(share) = invalid_share {
+                share_monitor.insert_share(share);
+            }
             error!(
                 "Downstream {}: rejected invalid mining.submit without disconnecting downstream: {}",
                 connection_id, reason
@@ -821,7 +852,7 @@ impl Downstream {
             first_job,
             stats_sender,
             recent_jobs: RecentJobs::new(),
-            share_monitor: SharesMonitor::new(token.clone()),
+            share_monitor: SharesMonitor::new(connection_id, token.clone()),
             user_agent: std::cell::RefCell::new(String::new()),
             token,
             tx_update_token,
@@ -942,13 +973,7 @@ impl IsServer<'static> for Downstream {
                 ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
                 String::new()
             });
-            let user_agent = self.user_agent.borrow().clone();
-            MonitorAPI::worker_connected(
-                self.connection_id,
-                user_agent,
-                request.name.clone(),
-                token,
-            );
+            MonitorAPI::worker_connected(self.connection_id, request.name.clone(), token);
 
             self.session_timing
                 .borrow_mut()
@@ -1203,6 +1228,8 @@ mod tests {
         time::timeout,
     };
 
+    static TEST_TOKEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
     fn first_job(job_id: &str) -> Notify<'static> {
         Notify {
             job_id: job_id.to_string(),
@@ -1244,25 +1271,30 @@ mod tests {
         let stats_sender = StatsSender::new();
         stats_sender.setup_stats_reliable(1).await.unwrap();
 
-        (
-            Arc::new(Mutex::new(Downstream::new(
-                1,
-                authorized_names,
-                vec![],
-                version_rolling_mask,
-                None,
-                tx_sv1_submit,
-                tx_outgoing,
-                extranonce2_len,
-                difficulty_mgmt,
-                Arc::new(Mutex::new(upstream_config)),
-                stats_sender.clone(),
-                first_job("42"),
-                tx_update_token,
-            ))),
-            rx_outgoing,
-            stats_sender,
-        )
+        let downstream = Arc::new(Mutex::new(Downstream::new(
+            1,
+            authorized_names,
+            vec![],
+            version_rolling_mask,
+            None,
+            tx_sv1_submit,
+            tx_outgoing,
+            extranonce2_len,
+            difficulty_mgmt,
+            Arc::new(Mutex::new(upstream_config)),
+            stats_sender.clone(),
+            first_job("42"),
+            tx_update_token,
+        )));
+        let token = format!(
+            "test-token-{}",
+            TEST_TOKEN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        downstream
+            .safe_lock(|d| d.token.safe_lock(|t| *t = token).unwrap())
+            .unwrap();
+
+        (downstream, rx_outgoing, stats_sender)
     }
 
     async fn assert_invalid_submit_is_rejected(
@@ -1273,6 +1305,13 @@ mod tests {
         expected_rejected_shares: u64,
     ) {
         let submit_id = submit.id;
+        let worker_name = submit.user_name.clone();
+        let token = downstream
+            .safe_lock(|d| d.token.safe_lock(|t| t.clone()).unwrap())
+            .unwrap();
+        let previous_invalid_total = MonitorAPI::worker_summary_totals(&token, &worker_name)
+            .map_or(0, |(_, invalid)| invalid);
+
         let result = Downstream::handle_incoming_sv1(downstream, submit.into()).await;
         assert!(result.is_ok());
 
@@ -1289,6 +1328,11 @@ mod tests {
         assert_eq!(
             stats.get(&1).unwrap().rejected_shares,
             expected_rejected_shares
+        );
+        assert_eq!(
+            MonitorAPI::worker_summary_totals(&token, &worker_name)
+                .map_or(0, |(_, invalid)| invalid),
+            previous_invalid_total + 1
         );
     }
 
@@ -1396,6 +1440,42 @@ mod tests {
             1,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn malformed_submit_with_worker_name_counts_as_invalid_share() {
+        let (downstream, mut rx_outgoing, stats_sender) =
+            test_downstream(vec!["worker".to_string()], 4, None).await;
+        let token = downstream
+            .safe_lock(|d| d.token.safe_lock(|t| t.clone()).unwrap())
+            .unwrap();
+        let previous_invalid_total =
+            MonitorAPI::worker_summary_totals(&token, "worker").map_or(0, |(_, invalid)| invalid);
+
+        let message = json_rpc::Message::StandardRequest(json_rpc::StandardRequest {
+            id: 12,
+            method: "mining.submit".to_string(),
+            params: serde_json::json!(["worker", "42", "not-hex", "000015e9", "0000000c"]),
+        });
+
+        let result = Downstream::handle_incoming_sv1(downstream, message).await;
+        assert!(result.is_ok());
+
+        let response = timeout(Duration::from_secs(1), rx_outgoing.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let response = serde_json::to_value(&response).unwrap();
+        assert_eq!(response["id"], serde_json::json!(12));
+        assert_eq!(response["result"], serde_json::json!(false));
+        assert!(response["error"].is_null());
+
+        let stats = stats_sender.collect_stats().await.unwrap();
+        assert_eq!(stats.get(&1).unwrap().rejected_shares, 1);
+        assert_eq!(
+            MonitorAPI::worker_summary_totals(&token, "worker").map_or(0, |(_, invalid)| invalid),
+            previous_invalid_total + 1
+        );
     }
 
     #[tokio::test]
