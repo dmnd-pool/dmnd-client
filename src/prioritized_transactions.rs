@@ -1,32 +1,44 @@
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     sync::{Mutex, OnceLock},
 };
 
-static PRIORITIZED_TXIDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+use bitcoin::{blockdata::transaction::Transaction, Txid};
 
-fn txids() -> &'static Mutex<HashSet<String>> {
-    PRIORITIZED_TXIDS.get_or_init(|| Mutex::new(HashSet::new()))
+static PRIORITIZED_TRANSACTIONS: OnceLock<Mutex<HashMap<Txid, Transaction>>> = OnceLock::new();
+
+fn transactions() -> &'static Mutex<HashMap<Txid, Transaction>> {
+    PRIORITIZED_TRANSACTIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(crate) fn record(txid: &str) {
-    txids()
+pub(crate) fn record(transaction: Transaction) {
+    let txid = transaction.compute_txid();
+    transactions()
         .lock()
         .expect("prioritized transactions mutex poisoned")
-        .insert(txid.to_string());
+        .insert(txid, transaction);
 }
 
-pub(crate) fn snapshot() -> Vec<String> {
-    txids()
+pub(crate) fn snapshot() -> Vec<(Txid, Transaction)> {
+    transactions()
         .lock()
         .expect("prioritized transactions mutex poisoned")
         .iter()
-        .cloned()
+        .map(|(txid, transaction)| (*txid, transaction.clone()))
         .collect()
 }
 
-pub(crate) fn remove(txid: &str) {
-    txids()
+pub(crate) fn snapshot_txids() -> Vec<Txid> {
+    transactions()
+        .lock()
+        .expect("prioritized transactions mutex poisoned")
+        .keys()
+        .copied()
+        .collect()
+}
+
+pub(crate) fn remove(txid: &Txid) {
+    transactions()
         .lock()
         .expect("prioritized transactions mutex poisoned")
         .remove(txid);

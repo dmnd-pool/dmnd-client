@@ -1,7 +1,7 @@
 pub mod message_handler;
 mod task_manager;
 use binary_sv2::{Seq0255, Seq064K, B016M, B064K, U256};
-use bitcoin::{blockdata::transaction::Transaction, hashes::Hash};
+use bitcoin::{blockdata::transaction::Transaction, hashes::Hash, Txid};
 use codec_sv2::{HandshakeRole, Initiator, StandardEitherFrame, StandardSv2Frame};
 use demand_sv2_connection::noise_connection_tokio::Connection;
 use roles_logic_sv2::{
@@ -246,7 +246,7 @@ impl JobDeclarator {
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
 
         let template_transactions = tx_list_.to_vec();
-        let prioritized_txids = crate::prioritized_transactions::snapshot();
+        let prioritized_txids = crate::prioritized_transactions::snapshot_txids();
         let mut template_txids = HashSet::with_capacity(template_transactions.len());
         let mut tx_list: Vec<Transaction> = Vec::new();
         let mut tx_ids = vec![];
@@ -255,7 +255,7 @@ impl JobDeclarator {
                 bitcoin::consensus::deserialize(&tx);
             match transaction {
                 Ok(tx) => {
-                    template_txids.insert(tx.compute_txid().to_string());
+                    template_txids.insert(tx.compute_txid());
                     let w_tx_id: U256 = tx.compute_wtxid().to_raw_hash().to_byte_array().into();
                     tx_list.push(tx);
                     tx_ids.push(w_tx_id);
@@ -597,13 +597,13 @@ impl JobDeclarator {
 }
 
 fn missing_prioritized_txids(
-    prioritized_txids: &[String],
-    template_txids: &HashSet<String>,
-) -> Vec<String> {
+    prioritized_txids: &[Txid],
+    template_txids: &HashSet<Txid>,
+) -> Vec<Txid> {
     prioritized_txids
         .iter()
         .filter(|txid| !template_txids.contains(*txid))
-        .cloned()
+        .copied()
         .collect()
 }
 
@@ -611,7 +611,7 @@ fn missing_prioritized_txids(
 // should remain attractive for block templates while they are in the mempool. If such a
 // transaction is missing from a template, check getmempoolentry before logging an error: when
 // bitcoind no longer has it in the mempool, the most likely explanation is that it was mined.
-async fn check_missing_prioritized_txids(missing_txids: Vec<String>, template_id: u64) {
+async fn check_missing_prioritized_txids(missing_txids: Vec<Txid>, template_id: u64) {
     let Some(config) = crate::Configuration::bitcoind_rpc_config() else {
         return;
     };
@@ -624,10 +624,10 @@ async fn check_missing_prioritized_txids(missing_txids: Vec<String>, template_id
     );
 
     for txid in missing_txids {
-        match rpc.transaction_in_mempool(&txid).await {
+        match rpc.transaction_in_mempool(&txid.to_string()).await {
             Ok(true) => {
                 error!(
-                    txid,
+                    txid = %txid,
                     template_id,
                     "prioritized transaction is in mempool but missing from template transaction list"
                 );
@@ -637,7 +637,7 @@ async fn check_missing_prioritized_txids(missing_txids: Vec<String>, template_id
             }
             Err(e) => {
                 warn!(
-                    txid,
+                    txid = %txid,
                     template_id,
                     error = %e,
                     "failed to check prioritized transaction mempool state"
@@ -650,24 +650,32 @@ async fn check_missing_prioritized_txids(missing_txids: Vec<String>, template_id
 #[cfg(test)]
 mod tests {
     use super::missing_prioritized_txids;
+    use bitcoin::Txid;
     use std::collections::HashSet;
+
+    fn txid(value: u8) -> Txid {
+        format!("{value:064x}").parse().expect("valid txid")
+    }
 
     #[test]
     fn no_missing_prioritized_txids_when_all_are_in_template() {
-        let prioritized = vec!["a".to_string(), "b".to_string()];
-        let template = HashSet::from(["a".to_string(), "b".to_string(), "c".to_string()]);
+        let a = txid(1);
+        let b = txid(2);
+        let c = txid(3);
+        let prioritized = vec![a, b];
+        let template = HashSet::from([a, b, c]);
 
         assert!(missing_prioritized_txids(&prioritized, &template).is_empty());
     }
 
     #[test]
     fn returns_only_prioritized_txids_missing_from_template() {
-        let prioritized = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let template = HashSet::from(["a".to_string(), "c".to_string()]);
+        let a = txid(1);
+        let b = txid(2);
+        let c = txid(3);
+        let prioritized = vec![a, b, c];
+        let template = HashSet::from([a, c]);
 
-        assert_eq!(
-            missing_prioritized_txids(&prioritized, &template),
-            vec!["b".to_string()]
-        );
+        assert_eq!(missing_prioritized_txids(&prioritized, &template), vec![b]);
     }
 }
