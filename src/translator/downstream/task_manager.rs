@@ -13,7 +13,6 @@ enum Task {
     SendDownstream(AbortOnDrop),
     Notify(AbortOnDrop),
     Update(AbortOnDrop),
-    SharesMonitor(AbortOnDrop),
 }
 
 type TaskMessage = (Option<u32>, Task);
@@ -157,18 +156,6 @@ impl TaskManager {
             .await
             .map_err(|_| ())
     }
-
-    pub async fn add_shares_monitor(
-        connection_id: u32,
-        self_: Arc<Mutex<Self>>,
-        abortable: AbortOnDrop,
-    ) -> Result<(), ()> {
-        let send_task = self_.safe_lock(|s| s.send_task.clone()).unwrap();
-        send_task
-            .send((Some(connection_id), Task::SharesMonitor(abortable)))
-            .await
-            .map_err(|_| ())
-    }
 }
 /// Converts a `Task` into its `AbortHandle` for task management.
 impl From<Task> for AbortOnDrop {
@@ -180,7 +167,6 @@ impl From<Task> for AbortOnDrop {
             Task::SendDownstream(handle) => handle,
             Task::Notify(handle) => handle,
             Task::Update(handle) => handle,
-            Task::SharesMonitor(handle) => handle,
         }
     }
 }

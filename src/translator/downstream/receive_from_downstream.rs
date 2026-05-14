@@ -83,21 +83,16 @@ pub async fn start_receive_downstream(
                 error!("Failed to remove downstream hashrate from channel: {}", e)
             };
 
-            let (worker_name, user_agent) = downstream
-                .safe_lock(|d| {
-                    (
-                        d.authorized_names.first().cloned().unwrap_or_default(),
-                        d.user_agent.borrow().clone(),
-                    )
-                })
+            let worker_name = downstream
+                .safe_lock(|d| d.authorized_names.first().cloned().unwrap_or_default())
                 .unwrap_or_else(|e| {
                     error!("Failed to lock downstream: {:?}", e);
                     ProxyState::update_inconsistency(Some(1));
-                    ("unknown".to_string(), "unknown".to_string())
+                    "unknown".to_string()
                 });
 
             if !worker_name.is_empty() {
-                MonitorAPI::worker_disconnected(connection_id, user_agent);
+                MonitorAPI::worker_disconnected(connection_id);
             }
 
             // Apparently there is no way to make the compiler happy without unwrapping here. But
