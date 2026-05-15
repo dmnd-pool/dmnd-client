@@ -462,12 +462,27 @@ impl Upstream {
             return;
         }
 
-        let acknowledged_sequences: Vec<u32> = self
+        if accepted_count == 1 {
+            if let Some(result_tx) = self.pending_submits.remove(&last_sequence_number) {
+                let _ = result_tx.send(Ok(()));
+            } else {
+                warn!(
+                    "SubmitSharesSuccess for unknown pending sequence {}",
+                    last_sequence_number
+                );
+            }
+            return;
+        }
+
+        let mut acknowledged_sequences: Vec<u32> = self
             .pending_submits
             .range(..=last_sequence_number)
             .map(|(sequence_number, _)| *sequence_number)
-            .take(accepted_count as usize)
             .collect();
+
+        acknowledged_sequences.reverse();
+        acknowledged_sequences.truncate(accepted_count as usize);
+        acknowledged_sequences.reverse();
 
         if acknowledged_sequences.len() < accepted_count as usize {
             warn!(
@@ -967,6 +982,40 @@ mod tests {
             .unwrap();
 
         assert_eq!(result_rx.await.unwrap(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn submit_success_resolves_exact_sequence_when_earlier_pending_exists() {
+        let upstream = test_upstream().await;
+        let (first_result_tx, first_result_rx) = oneshot::channel();
+        let (second_result_tx, second_result_rx) = oneshot::channel();
+
+        let (first_sequence, second_sequence) = upstream
+            .safe_lock(|u| {
+                (
+                    u.register_pending_submit(first_result_tx),
+                    u.register_pending_submit(second_result_tx),
+                )
+            })
+            .unwrap();
+
+        upstream
+            .safe_lock(|u| u.resolve_submit_success(second_sequence, 1))
+            .unwrap();
+
+        assert_eq!(second_result_rx.await.unwrap(), Ok(()));
+        assert!(
+            timeout(Duration::from_millis(50), first_result_rx)
+                .await
+                .is_err(),
+            "success for second sequence must not resolve first sequence"
+        );
+
+        upstream
+            .safe_lock(|u| {
+                u.resolve_submit_error(first_sequence, Err(RejectionReason::UpstreamRejected))
+            })
+            .unwrap();
     }
 
     #[tokio::test]
