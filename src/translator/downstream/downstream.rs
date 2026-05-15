@@ -569,27 +569,31 @@ impl Downstream {
         Ok(())
     }
 
-    fn spawn_submit_accounting(
-        self_: Arc<Mutex<Self>>,
-        response_rx: SubmitShareResultReceiver,
+    fn record_downstream_valid_share(
+        &self,
         worker_name: String,
         difficulty: f32,
         job_id: i64,
         nonce: i64,
-        request_job_id: String,
     ) {
+        let share = ShareInfo::new(worker_name, Some(difficulty), job_id, nonce, None);
+        self.share_monitor.insert_share(share);
+        self.stats_sender.update_accepted_shares(self.connection_id);
+    }
+
+    fn spawn_submit_accounting(
+        response_rx: SubmitShareResultReceiver,
+        difficulty: f32,
+        request_job_id: String,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let submit_result = match response_rx.await {
                 Ok(result) => result,
                 Err(_) => Err(RejectionReason::UpstreamRejected),
             };
 
-            let accounting_result = self_.safe_lock(|s| match submit_result {
+            match submit_result {
                 Ok(()) => {
-                    let share =
-                        ShareInfo::new(worker_name.clone(), Some(difficulty), job_id, nonce, None);
-                    s.share_monitor.insert_share(share);
-                    s.stats_sender.update_accepted_shares(s.connection_id);
                     if share_log_enabled() {
                         info!(
                             "Share for Job {} and difficulty {} is accepted upstream",
@@ -598,10 +602,6 @@ impl Downstream {
                     }
                 }
                 Err(reason) => {
-                    let share =
-                        ShareInfo::new(worker_name.clone(), None, job_id, nonce, Some(reason));
-                    s.share_monitor.insert_share(share);
-                    s.stats_sender.update_rejected_shares(s.connection_id);
                     if share_log_enabled() {
                         info!(
                             "Share for Job {} and difficulty {} was rejected with {:?}",
@@ -609,13 +609,8 @@ impl Downstream {
                         );
                     }
                 }
-            });
-
-            if let Err(e) = accounting_result {
-                error!("Failed to finalize submit accounting: {e}");
-                ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
             }
-        });
+        })
     }
 
     async fn handle_submit_request(
@@ -717,15 +712,19 @@ impl Downstream {
 
         match Self::forward_submit_share(&self_, upstream_request).await {
             Ok(response_rx) => {
-                Self::spawn_submit_accounting(
-                    self_.clone(),
+                self_.safe_lock(|s| {
+                    s.record_downstream_valid_share(
+                        request.user_name.clone(),
+                        job.difficulty,
+                        job_id,
+                        nonce,
+                    )
+                })?;
+                std::mem::drop(Self::spawn_submit_accounting(
                     response_rx,
-                    request.user_name.clone(),
                     job.difficulty,
-                    job_id,
-                    nonce,
                     request.job_id.clone(),
-                );
+                ));
                 self_.safe_lock(|s| s.submit_counts_for_diff.set(true))?;
                 Self::send_message_downstream(self_, request.respond(true).into()).await;
             }
@@ -1395,6 +1394,38 @@ mod tests {
             .safe_lock(|d| d.difficulty_mgmt.submits.len())
             .unwrap();
         assert_eq!(counted_shares, 0);
+    }
+
+    #[tokio::test]
+    async fn upstream_rejection_after_downstream_accept_does_not_invalidate_worker_summary() {
+        let (downstream, _rx_outgoing, stats_sender) =
+            test_downstream(vec!["worker".to_string()], 4, None).await;
+        let token = downstream
+            .safe_lock(|d| d.token.safe_lock(|t| t.clone()).unwrap())
+            .unwrap();
+        let previous_totals = MonitorAPI::worker_summary_totals(&token, "worker").unwrap_or((0, 0));
+
+        downstream
+            .safe_lock(|d| {
+                d.record_downstream_valid_share("worker".to_string(), 1.0, 42, 11);
+            })
+            .unwrap();
+
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let handle = Downstream::spawn_submit_accounting(result_rx, 1.0, "42".to_string());
+        result_tx
+            .send(Err(RejectionReason::UpstreamRejected))
+            .unwrap();
+        handle.await.unwrap();
+
+        assert_eq!(
+            MonitorAPI::worker_summary_totals(&token, "worker"),
+            Some((previous_totals.0 + 1, previous_totals.1))
+        );
+
+        let stats = stats_sender.collect_stats().await.unwrap();
+        assert_eq!(stats.get(&1).unwrap().accepted_shares, 1);
+        assert_eq!(stats.get(&1).unwrap().rejected_shares, 0);
     }
 
     #[tokio::test]
