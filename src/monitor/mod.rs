@@ -45,6 +45,7 @@ struct WorkerSummaryAccumulator {
     total_valid_shares: u64,
     total_invalid_shares: u64,
     disconnected_at: Option<Instant>,
+    zero_hashrate_since: Option<Instant>,
     valid_shares_window: VecDeque<ValidShareSample>,
 }
 
@@ -63,6 +64,7 @@ const MONITOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const MONITOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKER_SUMMARY_INTERVAL: Duration = Duration::from_secs(300);
 const WORKER_HASHRATE_WINDOW: Duration = Duration::from_secs(300);
+const ZERO_HASHRATE_CONNECTED_TIMEOUT: Duration = Duration::from_secs(600);
 const WORKER_SUMMARY_RETENTION: Duration = Duration::from_secs(300);
 const WORKER_SUMMARIES_PER_REQUEST: usize = 256;
 
@@ -187,9 +189,11 @@ impl MonitorAPI {
 
         let dispatcher = Self::worker_summary_dispatcher();
         match dispatcher.lock() {
-            Ok(mut state) => {
-                state.worker_connected(connection_id, WorkerSummaryKey { token, worker_name })
-            }
+            Ok(mut state) => state.worker_connected(
+                connection_id,
+                WorkerSummaryKey { token, worker_name },
+                Instant::now(),
+            ),
             Err(e) => error!("Failed to lock worker summary dispatcher: {e}"),
         }
     }
@@ -271,7 +275,7 @@ impl MonitorAPI {
 }
 
 impl WorkerSummaryDispatcherState {
-    fn worker_connected(&mut self, connection_id: u32, key: WorkerSummaryKey) {
+    fn worker_connected(&mut self, connection_id: u32, key: WorkerSummaryKey, now: Instant) {
         if let Some(existing_key) = self.session_keys.insert(connection_id, key.clone()) {
             if existing_key == key {
                 return;
@@ -282,10 +286,10 @@ impl WorkerSummaryDispatcherState {
                 existing_key.worker_name,
                 key.worker_name,
             );
-            self.mark_worker_disconnected(&existing_key, Instant::now());
+            self.mark_worker_disconnected(&existing_key, now);
         }
 
-        self.workers.entry(key).or_default().mark_connected();
+        self.workers.entry(key).or_default().mark_connected(now);
     }
 
     fn worker_disconnected(&mut self, connection_id: u32, now: Instant) {
@@ -304,20 +308,48 @@ impl WorkerSummaryDispatcherState {
         difficulty: Option<f32>,
         now: Instant,
     ) {
-        let key = self
-            .session_keys
-            .get(&connection_id)
-            .filter(|key| key.token == token)
-            .cloned()
-            .unwrap_or(WorkerSummaryKey { token, worker_name });
+        let key = self.connected_key_for_share(connection_id, worker_name, token, now);
 
         let worker = self.workers.entry(key).or_default();
-        if !worker.is_connected() && worker.disconnected_at.is_none() {
-            worker.disconnected_at = Some(now);
-        }
         match difficulty {
             Some(difficulty) => worker.record_valid_share(now, difficulty),
             None => worker.record_invalid_share(),
+        }
+    }
+
+    fn connected_key_for_share(
+        &mut self,
+        connection_id: u32,
+        worker_name: String,
+        token: String,
+        now: Instant,
+    ) -> WorkerSummaryKey {
+        let key = WorkerSummaryKey { token, worker_name };
+
+        match self.session_keys.get(&connection_id).cloned() {
+            Some(existing_key) if existing_key.token == key.token => existing_key,
+            Some(existing_key) => {
+                warn!(
+                    "Worker summary session {connection_id} recorded a share for token `{}` after being registered to token `{}`; resetting local state",
+                    key.token,
+                    existing_key.token,
+                );
+                self.mark_worker_disconnected(&existing_key, now);
+                self.session_keys.insert(connection_id, key.clone());
+                self.workers
+                    .entry(key.clone())
+                    .or_default()
+                    .mark_connected(now);
+                key
+            }
+            None => {
+                self.session_keys.insert(connection_id, key.clone());
+                self.workers
+                    .entry(key.clone())
+                    .or_default()
+                    .mark_connected(now);
+                key
+            }
         }
     }
 
@@ -329,6 +361,7 @@ impl WorkerSummaryDispatcherState {
             worker.prune_valid_shares(now);
             !worker.should_evict(now)
         });
+        self.expire_stale_zero_hashrate_sessions(now);
 
         let mut summaries_by_token: HashMap<String, Vec<WorkerSummary>> = HashMap::new();
         for (key, worker) in &self.workers {
@@ -359,18 +392,49 @@ impl WorkerSummaryDispatcherState {
             worker.mark_disconnected(now);
         }
     }
+
+    fn expire_stale_zero_hashrate_sessions(&mut self, now: Instant) {
+        let expired_keys: Vec<WorkerSummaryKey> = self
+            .workers
+            .iter_mut()
+            .filter_map(|(key, worker)| {
+                if worker.should_force_disconnect_zero_hashrate(now) {
+                    warn!(
+                        "Expiring connected worker `{}` from monitoring after zero hashrate for {} seconds",
+                        key.worker_name,
+                        ZERO_HASHRATE_CONNECTED_TIMEOUT.as_secs(),
+                    );
+                    worker.force_disconnected(now);
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if expired_keys.is_empty() {
+            return;
+        }
+
+        self.session_keys
+            .retain(|_, key| !expired_keys.iter().any(|expired| expired == key));
+    }
 }
 
 impl WorkerSummaryAccumulator {
-    fn mark_connected(&mut self) {
+    fn mark_connected(&mut self, now: Instant) {
         self.active_session_count = self.active_session_count.saturating_add(1);
         self.disconnected_at = None;
+        if self.valid_shares_window.is_empty() && self.zero_hashrate_since.is_none() {
+            self.zero_hashrate_since = Some(now);
+        }
     }
 
     fn mark_disconnected(&mut self, now: Instant) {
         self.active_session_count = self.active_session_count.saturating_sub(1);
         if self.active_session_count == 0 {
             self.disconnected_at = Some(now);
+            self.zero_hashrate_since = None;
         }
     }
 
@@ -383,6 +447,7 @@ impl WorkerSummaryAccumulator {
                 difficulty: difficulty as f64,
                 recorded_at: now,
             });
+            self.zero_hashrate_since = None;
         } else {
             warn!(
                 "Skipping worker hashrate contribution for invalid share difficulty: {}",
@@ -396,11 +461,20 @@ impl WorkerSummaryAccumulator {
     }
 
     fn prune_valid_shares(&mut self, now: Instant) {
+        let mut zero_hashrate_started_at = None;
         while let Some(front) = self.valid_shares_window.front() {
             if now.duration_since(front.recorded_at) <= WORKER_HASHRATE_WINDOW {
                 break;
             }
+            zero_hashrate_started_at = Some(front.recorded_at + WORKER_HASHRATE_WINDOW);
             self.valid_shares_window.pop_front();
+        }
+        if self.valid_shares_window.is_empty() {
+            if let Some(started_at) = zero_hashrate_started_at {
+                self.zero_hashrate_since = Some(started_at);
+            }
+        } else {
+            self.zero_hashrate_since = None;
         }
     }
 
@@ -423,6 +497,20 @@ impl WorkerSummaryAccumulator {
                 .disconnected_at
                 .is_some_and(|at| now.duration_since(at) >= WORKER_SUMMARY_RETENTION)
     }
+
+    fn should_force_disconnect_zero_hashrate(&self, now: Instant) -> bool {
+        self.is_connected()
+            && self.valid_shares_window.is_empty()
+            && self
+                .zero_hashrate_since
+                .is_some_and(|at| now.duration_since(at) >= ZERO_HASHRATE_CONNECTED_TIMEOUT)
+    }
+
+    fn force_disconnected(&mut self, now: Instant) {
+        self.active_session_count = 0;
+        self.disconnected_at = Some(now);
+        self.zero_hashrate_since = None;
+    }
 }
 
 #[cfg(test)]
@@ -430,7 +518,7 @@ mod tests {
     use super::{
         shared_client, MonitorAPI, WorkerSummaryDispatcherState, WorkerSummaryKey,
         WorkerSummaryPayload, MONITOR_REQUEST_TIMEOUT, WORKER_HASHRATE_WINDOW,
-        WORKER_SUMMARY_RETENTION,
+        WORKER_SUMMARY_RETENTION, ZERO_HASHRATE_CONNECTED_TIMEOUT,
     };
     use crate::{monitor::worker_summary::WorkerSummary, shared::error::Error};
     use std::time::{Duration, Instant};
@@ -446,25 +534,20 @@ mod tests {
     #[test]
     fn worker_summary_dispatcher_aggregates_sessions_per_worker() {
         let mut state = WorkerSummaryDispatcherState::default();
-        state.worker_connected(1, key("token", "worker-1"));
-        state.worker_connected(2, key("token", "worker-1"));
+        let now = Instant::now();
+        state.worker_connected(1, key("token", "worker-1"), now);
+        state.worker_connected(2, key("token", "worker-1"), now);
 
         state.record_share(
             1,
             "worker-1".to_string(),
             "token".to_string(),
             Some(16.0),
-            Instant::now(),
+            now,
         );
-        state.record_share(
-            2,
-            "worker-1".to_string(),
-            "token".to_string(),
-            None,
-            Instant::now(),
-        );
+        state.record_share(2, "worker-1".to_string(), "token".to_string(), None, now);
 
-        let summaries = state.snapshot_connected_worker_summaries(Instant::now());
+        let summaries = state.snapshot_connected_worker_summaries(now);
         let token_summaries = summaries.get("token").expect("token summary should exist");
         assert_eq!(token_summaries.len(), 1);
         assert_eq!(token_summaries[0].worker_name(), "worker-1");
@@ -472,8 +555,8 @@ mod tests {
         assert_eq!(token_summaries[0].total_invalid_shares(), 1);
         assert!(token_summaries[0].hashrate() > 0.0);
 
-        state.worker_disconnected(1, Instant::now());
-        let summaries = state.snapshot_connected_worker_summaries(Instant::now());
+        state.worker_disconnected(1, now);
+        let summaries = state.snapshot_connected_worker_summaries(now);
         assert_eq!(
             summaries
                 .get("token")
@@ -482,9 +565,9 @@ mod tests {
             1
         );
 
-        state.worker_disconnected(2, Instant::now());
-        let summaries = state.snapshot_connected_worker_summaries(Instant::now());
-        assert!(summaries.get("token").is_none());
+        state.worker_disconnected(2, now);
+        let summaries = state.snapshot_connected_worker_summaries(now);
+        assert!(!summaries.contains_key("token"));
     }
 
     #[test]
@@ -492,7 +575,7 @@ mod tests {
         let mut state = WorkerSummaryDispatcherState::default();
         let now = Instant::now();
         let worker_key = key("token", "worker-1");
-        state.worker_connected(1, worker_key.clone());
+        state.worker_connected(1, worker_key.clone(), now);
 
         let worker = state
             .workers
@@ -517,7 +600,7 @@ mod tests {
     fn worker_summary_dispatcher_evicts_disconnected_workers_after_retention() {
         let mut state = WorkerSummaryDispatcherState::default();
         let now = Instant::now();
-        state.worker_connected(1, key("token", "worker-1"));
+        state.worker_connected(1, key("token", "worker-1"), now);
         state.worker_disconnected(1, now);
 
         let summaries = state.snapshot_connected_worker_summaries(now);
@@ -529,6 +612,69 @@ mod tests {
         );
         assert!(summaries.is_empty());
         assert!(state.workers.is_empty());
+    }
+
+    #[test]
+    fn worker_summary_dispatcher_expires_connected_zero_hashrate_workers() {
+        let mut state = WorkerSummaryDispatcherState::default();
+        let now = Instant::now();
+        let worker_key = key("token", "worker-1");
+        state.worker_connected(1, worker_key.clone(), now);
+        state.record_share(
+            1,
+            "worker-1".to_string(),
+            "token".to_string(),
+            Some(8.0),
+            now,
+        );
+
+        let stale_at =
+            now + WORKER_HASHRATE_WINDOW + ZERO_HASHRATE_CONNECTED_TIMEOUT + Duration::from_secs(1);
+        let summaries = state.snapshot_connected_worker_summaries(stale_at);
+
+        assert!(summaries.is_empty());
+        assert!(state.session_keys.is_empty());
+        assert!(!state
+            .workers
+            .get(&worker_key)
+            .expect("worker should remain until retention")
+            .is_connected());
+    }
+
+    #[test]
+    fn worker_summary_dispatcher_reconnects_expired_worker_on_later_share() {
+        let mut state = WorkerSummaryDispatcherState::default();
+        let now = Instant::now();
+        let worker_key = key("token", "worker-1");
+        state.worker_connected(1, worker_key, now);
+        state.record_share(
+            1,
+            "worker-1".to_string(),
+            "token".to_string(),
+            Some(8.0),
+            now,
+        );
+
+        let stale_at =
+            now + WORKER_HASHRATE_WINDOW + ZERO_HASHRATE_CONNECTED_TIMEOUT + Duration::from_secs(1);
+        assert!(state
+            .snapshot_connected_worker_summaries(stale_at)
+            .is_empty());
+
+        let resumed_at = stale_at + Duration::from_secs(1);
+        state.record_share(
+            1,
+            "worker-1".to_string(),
+            "token".to_string(),
+            Some(4.0),
+            resumed_at,
+        );
+        let summaries = state.snapshot_connected_worker_summaries(resumed_at);
+
+        let token_summaries = summaries.get("token").expect("token summary should exist");
+        assert_eq!(token_summaries.len(), 1);
+        assert_eq!(token_summaries[0].worker_name(), "worker-1");
+        assert!(token_summaries[0].hashrate() > 0.0);
     }
 
     #[test]

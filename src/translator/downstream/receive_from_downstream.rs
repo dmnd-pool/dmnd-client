@@ -5,7 +5,9 @@ use std::sync::Arc;
 use sv1_api::json_rpc;
 use tokio::sync::mpsc;
 use tokio::task;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
+
+const DOWNSTREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(360);
 
 pub(super) async fn process_incoming_message(
     downstream: Arc<Mutex<Downstream>>,
@@ -45,7 +47,23 @@ pub async fn start_receive_downstream(
     let handle = {
         let task_manager = task_manager.clone();
         task::spawn(async move {
-            while let Some(incoming) = recv_from_down.recv().await {
+            loop {
+                let incoming = match tokio::time::timeout(
+                    DOWNSTREAM_IDLE_TIMEOUT,
+                    recv_from_down.recv(),
+                )
+                .await
+                {
+                    Ok(Some(incoming)) => incoming,
+                    Ok(None) => break,
+                    Err(_) => {
+                        warn!(
+                            "Downstream {connection_id} idle for more than {} seconds, disconnecting",
+                            DOWNSTREAM_IDLE_TIMEOUT.as_secs(),
+                        );
+                        break;
+                    }
+                };
                 let incoming: Result<json_rpc::Message, _> = serde_json::from_str(&incoming);
                 if let Ok(incoming) = incoming {
                     if let Err(error) = process_incoming_message(downstream.clone(), incoming).await
@@ -61,7 +79,7 @@ pub async fn start_receive_downstream(
                             sv1_api::error::Error::InvalidJsonRpcMessageKind
                         ))
                     );
-                    return;
+                    break;
                 }
             }
             if let Err(e) = downstream.safe_lock(|d| d.mark_closed()) {
