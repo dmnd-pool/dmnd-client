@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio::task;
 use tracing::{debug, error, warn};
 
-const DOWNSTREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(360);
+const DOWNSTREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(99999999);
 
 pub(super) async fn process_incoming_message(
     downstream: Arc<Mutex<Downstream>>,
