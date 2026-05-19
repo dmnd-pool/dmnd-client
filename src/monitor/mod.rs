@@ -59,6 +59,7 @@ static MONITOR_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static WORKER_SUMMARY_ENDPOINT: OnceLock<Url> = OnceLock::new();
 static WORKER_SUMMARY_DISPATCHER: OnceLock<StdMutex<WorkerSummaryDispatcherState>> =
     OnceLock::new();
+static WORKER_PROXY_ID: OnceLock<i64> = OnceLock::new();
 
 const MONITOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const MONITOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -80,7 +81,7 @@ fn shared_client() -> reqwest::Client {
 }
 
 fn worker_summary_server_endpoint() -> String {
-    // Send live worker telemetry through the dashboard's primary worker-entry
+    // Send live worker telemetry through the dashboard's normal worker-entry
     // ingestion path.
     match Configuration::environment().as_str() {
         "staging" => format!("{STAGING_URL}/api/worker/entry"),
@@ -89,6 +90,10 @@ fn worker_summary_server_endpoint() -> String {
         "production" => format!("{PRODUCTION_URL}/api/worker/entry"),
         _ => unreachable!(),
     }
+}
+
+fn worker_proxy_id() -> i64 {
+    *WORKER_PROXY_ID.get_or_init(rand::random::<i64>)
 }
 
 impl MonitorAPI {
@@ -374,6 +379,7 @@ impl WorkerSummaryDispatcherState {
                 .or_default()
                 .push(WorkerSummary::new(
                     key.worker_name.clone(),
+                    worker_proxy_id(),
                     worker.hashrate(),
                     worker.total_valid_shares,
                     worker.total_invalid_shares,
@@ -680,7 +686,7 @@ mod tests {
     #[test]
     fn worker_summary_payload_matches_dashboard_worker_entry_contract() {
         let payload = WorkerSummaryPayload {
-            entries: &[WorkerSummary::new("worker-1".to_string(), 42.5, 7, 2)],
+            entries: &[WorkerSummary::new("worker-1".to_string(), 42, 42.5, 7, 2)],
             token: "token",
         };
 
@@ -690,6 +696,7 @@ mod tests {
             serde_json::json!({
                 "entries": [{
                     "worker_name": "worker-1",
+                    "proxy_id": 42,
                     "hashrate": 42.5,
                     "valid_shares": 7,
                     "invalid_shares": 2
@@ -719,7 +726,7 @@ mod tests {
 
         let err = api
             .send_worker_summaries(
-                &[WorkerSummary::new("worker-1".to_string(), 1.0, 1, 0)],
+                &[WorkerSummary::new("worker-1".to_string(), 42, 1.0, 1, 0)],
                 "token",
             )
             .await

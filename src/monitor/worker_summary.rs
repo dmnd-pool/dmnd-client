@@ -1,15 +1,23 @@
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct WorkerSummary {
     worker_name: String,
+    proxy_id: i64,
     hashrate: f64,
     valid_shares: u64,
     invalid_shares: u64,
 }
 
 impl WorkerSummary {
-    pub fn new(worker_name: String, hashrate: f64, valid_shares: u64, invalid_shares: u64) -> Self {
+    pub fn new(
+        worker_name: String,
+        proxy_id: i64,
+        hashrate: f64,
+        valid_shares: u64,
+        invalid_shares: u64,
+    ) -> Self {
         Self {
             worker_name,
+            proxy_id,
             hashrate,
             valid_shares,
             invalid_shares,
