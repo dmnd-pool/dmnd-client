@@ -170,18 +170,18 @@ impl Downstream {
     /// The target T is calculated as T = pdiff / D, where pdiff is the maximum target
     pub fn difficulty_to_target(difficulty: f32) -> [u8; 32] {
         // Clamp difficulty to avoid division by zero or overflow
-        let difficulty = f32::max(difficulty, 0.001);
+        let difficulty = f32::max(difficulty, 0.000000001);
 
         let pdiff: [u8; 32] = [
             0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
             255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
         ];
         let pdiff = U256::from_big_endian(&pdiff);
-        let scale: u128 = 1_000_000;
+        let scale: u128 = 1_000_000_000;
 
-        // To handle the floating-point diff and `pdiff`, we scale it by 10^6 (1_000_000) to convert it to an integer
+        // To handle the floating-point diff and `pdiff`, we scale it by 10^9 (1_000_000_000) to convert it to an integer
         // For example, if difficulty is 0.001:
-        //   diff_int = 0.001 * 1e6 = 1_000
+        //   diff_int = 0.001 * 1e9 = 1_000_000
         let scaled_difficulty = difficulty * (scale as f32);
 
         if scaled_difficulty > (u128::MAX as f32) {
@@ -427,6 +427,16 @@ mod test {
         utils::{HexU32Be, MerkleNode, PrevHash},
     };
     use tokio::sync::mpsc::channel;
+
+    #[test]
+    fn difficulty_target_supports_benchmark_floor() {
+        let floor_target = Downstream::difficulty_to_target(0.000000001);
+        let clamped_target = Downstream::difficulty_to_target(0.0);
+        let higher_diff_target = Downstream::difficulty_to_target(1.0);
+
+        assert_eq!(floor_target, clamped_target);
+        assert!(floor_target > higher_diff_target);
+    }
 
     #[test]
     #[ignore] // TODO
