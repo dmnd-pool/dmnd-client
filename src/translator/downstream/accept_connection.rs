@@ -51,6 +51,9 @@ pub async fn start_accept_connection(
                     raw_initial_difficulty,
                     hard_minimum_difficulty,
                 );
+            let token = Arc::new(Mutex::new(
+                Configuration::token().expect("Token is not set"),
+            ));
 
             debug!(
                 "Translator downstream startup params: hash_rate={} H/s, shares_per_second={}, raw_initial_difficulty={}, initial_difficulty={}",
@@ -108,6 +111,9 @@ pub async fn start_accept_connection(
                         let task_manager = task_manager.clone();
                         let stats_sender = stats_sender.clone();
                         let tx_update_token = tx_update_token.clone();
+                        let token = token.clone();
+                        let updates_upstream_token =
+                            super::downstream::claim_upstream_token_update();
                         let host = addr.to_string();
                         task::spawn(async move {
                             let permit = match downstream_init_slots.acquire_owned().await {
@@ -135,6 +141,8 @@ pub async fn start_accept_connection(
                                 hard_minimum_difficulty,
                                 stats_sender,
                                 tx_update_token,
+                                token,
+                                updates_upstream_token,
                                 accepted_at,
                             )
                             .await;
