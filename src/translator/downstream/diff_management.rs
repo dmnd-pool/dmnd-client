@@ -95,6 +95,25 @@ impl Downstream {
         Ok(())
     }
 
+    pub fn request_upstream_rate_limit_retarget(
+        self_: &Arc<Mutex<Self>>,
+        multiplier: f32,
+    ) -> ProxyResult<'static, (f32, f32)> {
+        let upstream_difficulty_config = self_
+            .safe_lock(|d| d.upstream_difficulty_config.clone())
+            .map_err(|_| Error::TranslatorDiffConfigMutexPoisoned)?;
+        upstream_difficulty_config
+            .safe_lock(|upstream| {
+                let previous = upstream.channel_nominal_hashrate;
+                upstream.channel_nominal_hashrate = (upstream.channel_nominal_hashrate
+                    * multiplier)
+                    .max(crate::Configuration::downstream_hashrate());
+                upstream.request_immediate_update();
+                (previous, upstream.channel_nominal_hashrate)
+            })
+            .map_err(|_| Error::TranslatorDiffConfigMutexPoisoned)
+    }
+
     /// Checks the downstream's difficulty based on recent share submissions. And if is worth an update, update the
     /// downstream and the bridge.
     pub async fn try_update_difficulty_settings(
