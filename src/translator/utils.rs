@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{atomic::AtomicBool, Arc},
+    time::Duration,
 };
 
 use crate::{
@@ -23,12 +24,80 @@ use sv1_api::{client_to_server, server_to_client::Notify};
 use tracing::{debug, error, info};
 
 use super::downstream::Downstream;
+
+const SHARE_RATE_LIMIT_PER_MINUTE: usize = 70;
+const SHARE_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+const UPSTREAM_RATE_LIMIT_RETARGET_INTERVAL: Duration = Duration::from_secs(5);
+
 lazy_static! {
-    pub static ref SHARE_TIMESTAMPS: Arc<Mutex<VecDeque<tokio::time::Instant>>> =
-        Arc::new(Mutex::new(VecDeque::with_capacity(70)));
+    pub static ref SHARE_TIMESTAMPS: Arc<Mutex<VecDeque<tokio::time::Instant>>> = Arc::new(
+        Mutex::new(VecDeque::with_capacity(SHARE_RATE_LIMIT_PER_MINUTE))
+    );
     pub static ref IS_RATE_LIMITED: AtomicBool = AtomicBool::new(false);
+    static ref LAST_UPSTREAM_RATE_LIMIT_RETARGET: Arc<Mutex<Option<tokio::time::Instant>>> =
+        Arc::new(Mutex::new(None));
     static ref SHARE_COUNTS: Arc<Mutex<std::collections::HashMap<u32, (u32, tokio::time::Instant)>>> =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
+}
+
+fn prune_expired_share_timestamps(
+    timestamps: &mut VecDeque<tokio::time::Instant>,
+    now: tokio::time::Instant,
+) {
+    while let Some(&front) = timestamps.front() {
+        if now.duration_since(front) >= SHARE_RATE_LIMIT_WINDOW {
+            timestamps.pop_front();
+        } else {
+            break;
+        }
+    }
+}
+
+fn reserve_share_slot(
+    timestamps: &mut VecDeque<tokio::time::Instant>,
+    now: tokio::time::Instant,
+) -> bool {
+    prune_expired_share_timestamps(timestamps, now);
+    if timestamps.len() >= SHARE_RATE_LIMIT_PER_MINUTE {
+        return false;
+    }
+
+    timestamps.push_back(now);
+    true
+}
+
+fn maybe_request_upstream_rate_limit_retarget(
+    downstream: &Arc<Mutex<Downstream>>,
+    now: tokio::time::Instant,
+) -> crate::translator::error::ProxyResult<'static, ()> {
+    let should_update = LAST_UPSTREAM_RATE_LIMIT_RETARGET
+        .safe_lock(|last_update| {
+            let should_update = last_update.is_none_or(|last_update| {
+                now.duration_since(last_update) >= UPSTREAM_RATE_LIMIT_RETARGET_INTERVAL
+            });
+            if should_update {
+                *last_update = Some(now);
+            }
+            should_update
+        })
+        .map_err(|e| {
+            error!("Failed to lock LAST_UPSTREAM_RATE_LIMIT_RETARGET: {:?}", e);
+            Error::TranslatorDiffConfigMutexPoisoned
+        })?;
+
+    if !should_update {
+        return Ok(());
+    }
+
+    let multiplier = (SHARE_RATE_LIMIT_PER_MINUTE as f32 / *crate::SHARE_PER_MIN).max(2.0);
+    let (previous, updated) =
+        Downstream::request_upstream_rate_limit_retarget(downstream, multiplier)?;
+    info!(
+        "Upstream share rate limit held; requested channel retarget by raising nominal hashrate from {} H/s to {} H/s",
+        previous, updated
+    );
+
+    Ok(())
 }
 
 /// Checks if a share can be sent upstream based on a rate limit of 70 shares per minute.
@@ -47,13 +116,7 @@ pub async fn check_share_rate_limit(downstream: Arc<Mutex<Downstream>>) {
         let now = tokio::time::Instant::now();
         let count = SHARE_TIMESTAMPS
             .safe_lock(|timestamps| {
-                while let Some(&front) = timestamps.front() {
-                    if now.duration_since(front).as_secs() >= 60 {
-                        timestamps.pop_front();
-                    } else {
-                        break;
-                    }
-                }
+                prune_expired_share_timestamps(timestamps, now);
                 timestamps.len()
             })
             .unwrap_or_else(|e| {
@@ -62,7 +125,7 @@ pub async fn check_share_rate_limit(downstream: Arc<Mutex<Downstream>>) {
                 0
             });
 
-        let is_limited = count >= 70;
+        let is_limited = count >= SHARE_RATE_LIMIT_PER_MINUTE;
         IS_RATE_LIMITED.store(is_limited, std::sync::atomic::Ordering::SeqCst);
 
         if is_limited {
@@ -73,39 +136,40 @@ pub async fn check_share_rate_limit(downstream: Arc<Mutex<Downstream>>) {
 
         if rate_limit_hit_count >= 5 && now.duration_since(last_update).as_secs() >= 2 {
             debug!("Rate limited. Updating difficulty");
+            if let Err(e) = maybe_request_upstream_rate_limit_retarget(&downstream, now) {
+                error!("Failed to request upstream rate-limit retarget: {e}");
+            }
             if let Err(e) = Downstream::try_update_difficulty_settings(&downstream).await {
                 error!("Failed to update difficulty: {e}");
             }
             last_update = now;
-            IS_RATE_LIMITED.store(false, std::sync::atomic::Ordering::SeqCst);
             rate_limit_hit_count = 0;
         }
     }
 }
 
-/// Checks if a share can be sent by checking if rate is limited
+/// Reserves one upstream-share slot in the rolling rate-limit window.
 pub fn allow_submit_share() -> crate::translator::error::ProxyResult<'static, bool> {
     if Configuration::difficulty_updates_disabled() {
         return Ok(true);
     }
 
-    // Check if rate-limited
-    let is_rate_limited = IS_RATE_LIMITED.load(std::sync::atomic::Ordering::SeqCst);
-
-    if is_rate_limited {
-        return Ok(false); // Rate limit exceeded, don’t send
-    }
-
-    SHARE_TIMESTAMPS
+    let now = tokio::time::Instant::now();
+    let allowed = SHARE_TIMESTAMPS
         .safe_lock(|timestamps| {
-            timestamps.push_back(tokio::time::Instant::now());
+            let allowed = reserve_share_slot(timestamps, now);
+            IS_RATE_LIMITED.store(
+                !allowed || timestamps.len() >= SHARE_RATE_LIMIT_PER_MINUTE,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            allowed
         })
         .map_err(|e| {
             error!("Failed to lock SHARE_TIMESTAMPS: {:?}", e);
             Error::TranslatorDiffConfigMutexPoisoned
         })?;
 
-    Ok(true) // Share can be sent
+    Ok(allowed)
 }
 
 pub fn validate_share(
@@ -295,3 +359,83 @@ pub fn get_share_count(connection_id: u32) -> f32 {
 //     // full_extranonce_len - pool_extranonce1_len - miner_extranonce2 = tproxy_extranonce1_len
 //     channel_extranonce2_size - downstream_extranonce2_len
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Barrier, Mutex as StdMutex,
+    };
+
+    static RATE_LIMIT_TEST_MUTEX: StdMutex<()> = StdMutex::new(());
+
+    fn reset_global_share_limiter_for_test() {
+        SHARE_TIMESTAMPS
+            .safe_lock(|timestamps| timestamps.clear())
+            .unwrap();
+        IS_RATE_LIMITED.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn allow_submit_share_rejects_71st_share_without_background_tick() {
+        let _guard = RATE_LIMIT_TEST_MUTEX.lock().unwrap();
+        reset_global_share_limiter_for_test();
+
+        for _ in 0..SHARE_RATE_LIMIT_PER_MINUTE {
+            assert!(allow_submit_share().unwrap());
+        }
+
+        assert!(!allow_submit_share().unwrap());
+
+        reset_global_share_limiter_for_test();
+    }
+
+    #[test]
+    fn reserve_share_slot_prunes_expired_shares() {
+        let now = tokio::time::Instant::now();
+        let mut timestamps = VecDeque::from(vec![
+            now - SHARE_RATE_LIMIT_WINDOW;
+            SHARE_RATE_LIMIT_PER_MINUTE
+        ]);
+
+        assert!(reserve_share_slot(&mut timestamps, now));
+        assert_eq!(timestamps.len(), 1);
+    }
+
+    #[test]
+    fn reserve_share_slot_caps_concurrent_bursts() {
+        let timestamps = Arc::new(StdMutex::new(VecDeque::with_capacity(
+            SHARE_RATE_LIMIT_PER_MINUTE,
+        )));
+        let barrier = Arc::new(Barrier::new(SHARE_RATE_LIMIT_PER_MINUTE * 2));
+        let admitted = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+
+        for _ in 0..(SHARE_RATE_LIMIT_PER_MINUTE * 2) {
+            let timestamps = timestamps.clone();
+            let barrier = barrier.clone();
+            let admitted = admitted.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let mut timestamps = timestamps.lock().unwrap();
+                if reserve_share_slot(&mut timestamps, tokio::time::Instant::now()) {
+                    admitted.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(
+            admitted.load(Ordering::Relaxed),
+            SHARE_RATE_LIMIT_PER_MINUTE
+        );
+        assert_eq!(
+            timestamps.lock().unwrap().len(),
+            SHARE_RATE_LIMIT_PER_MINUTE
+        );
+    }
+}
