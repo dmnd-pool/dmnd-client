@@ -158,7 +158,7 @@ impl Upstream {
 
 #[cfg(test)]
 mod tests {
-    use super::{UpstreamRetargetRateLimiter, MAX_UPSTREAM_RETARGETS_PER_MINUTE};
+    use super::UpstreamRetargetRateLimiter;
     use std::time::Duration;
 
     #[test]
