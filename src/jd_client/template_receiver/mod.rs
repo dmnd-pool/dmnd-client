@@ -4,6 +4,7 @@ use crate::shared::utils::AbortOnDrop;
 use crate::{
     jd_client::mining_downstream::DownstreamMiningNode as Downstream, proxy_state::ProxyState,
 };
+use binary_sv2::{Seq064K, B016M, B064K};
 
 use super::{error::Error, job_declarator::JobDeclarator};
 use bitcoin::{consensus::Encodable, TxOut};
@@ -22,7 +23,10 @@ use roles_logic_sv2::{
 use setup_connection::SetupConnectionHandler;
 use std::{convert::TryInto, net::SocketAddr, sync::Arc};
 use task_manager::TaskManager;
-use tokio::sync::mpsc::{Receiver as TReceiver, Sender as TSender};
+use tokio::sync::{
+    mpsc::{Receiver as TReceiver, Sender as TSender},
+    watch,
+};
 use tracing::{error, info, warn};
 
 mod message_handler;
@@ -33,6 +37,13 @@ pub type Message = PoolMessages<'static>;
 pub type StdFrame = StandardSv2Frame<Message>;
 pub type EitherFrame = StandardEitherFrame<Message>;
 
+#[derive(Clone)]
+struct LastTemplateForDeclare {
+    template: NewTemplate<'static>,
+    tx_list: Seq064K<'static, B016M<'static>>,
+    excess_data: B064K<'static>,
+}
+
 pub struct TemplateRx {
     sender: TSender<EitherFrame>,
     /// Allows the tp recv to communicate back to the main thread any status updates
@@ -40,7 +51,9 @@ pub struct TemplateRx {
     jd: Option<Arc<Mutex<super::job_declarator::JobDeclarator>>>,
     down: Arc<Mutex<Downstream>>,
     new_template_message: Option<NewTemplate<'static>>,
+    last_template_for_declare: Option<LastTemplateForDeclare>,
     miner_coinbase_output: Vec<u8>,
+    jds_connection_state: watch::Receiver<bool>,
     test_only_do_not_send_solution_to_tp: bool,
 }
 
@@ -53,6 +66,7 @@ impl TemplateRx {
         down: Arc<Mutex<Downstream>>,
         miner_coinbase_outputs: Vec<TxOut>,
         authority_public_key: Option<Secp256k1PublicKey>,
+        jds_connection_state: watch::Receiver<bool>,
         test_only_do_not_send_solution_to_tp: bool,
     ) -> Result<AbortOnDrop, Error> {
         let mut encoded_outputs = vec![];
@@ -100,7 +114,9 @@ impl TemplateRx {
             jd,
             down,
             new_template_message: None,
+            last_template_for_declare: None,
             miner_coinbase_output: encoded_outputs,
+            jds_connection_state,
             test_only_do_not_send_solution_to_tp,
         }));
 
@@ -192,6 +208,78 @@ impl TemplateRx {
         }
     }
 
+    async fn refresh_jds_reconnect_token(
+        self_mutex: &Arc<Mutex<Self>>,
+        jd: Option<Arc<Mutex<JobDeclarator>>>,
+        miner_coinbase_output: &[u8],
+        coinbase_output_max_additional_size_sent: &mut bool,
+    ) -> Option<AllocateMiningJobTokenSuccess<'static>> {
+        let token = Self::get_last_token(jd, miner_coinbase_output).await?;
+        *coinbase_output_max_additional_size_sent = true;
+        Self::send_max_coinbase_size(self_mutex, token.coinbase_output_max_additional_size).await;
+        Some(token)
+    }
+
+    fn redeclare_last_template(
+        self_mutex: &Arc<Mutex<Self>>,
+        jd: Option<Arc<Mutex<JobDeclarator>>>,
+        token: AllocateMiningJobTokenSuccess<'static>,
+    ) -> bool {
+        let Some(jd) = jd else {
+            return false;
+        };
+        let last_template_for_declare =
+            match self_mutex.safe_lock(|s| s.last_template_for_declare.clone()) {
+                Ok(last_template_for_declare) => last_template_for_declare,
+                Err(e) => {
+                    error!("TemplateRx mutex poisoned: {e}");
+                    ProxyState::update_tp_state(TpState::Down);
+                    return false;
+                }
+            };
+        let Some(last_template_for_declare) = last_template_for_declare else {
+            return false;
+        };
+
+        tokio::task::spawn(async move {
+            if let Err(e) = super::job_declarator::JobDeclarator::on_new_template(
+                &jd,
+                last_template_for_declare.template,
+                token.mining_job_token.to_vec(),
+                last_template_for_declare.tx_list,
+                last_template_for_declare.excess_data,
+                token.coinbase_output.to_vec(),
+            )
+            .await
+            {
+                error!("{e:?}");
+                ProxyState::update_downstream_state(DownstreamType::JdClientMiningDownstream);
+            };
+        });
+        true
+    }
+
+    async fn handle_jds_reconnected(
+        self_mutex: &Arc<Mutex<Self>>,
+        jd: Option<Arc<Mutex<JobDeclarator>>>,
+        miner_coinbase_output: &[u8],
+        coinbase_output_max_additional_size_sent: &mut bool,
+    ) -> Option<Option<AllocateMiningJobTokenSuccess<'static>>> {
+        let token = Self::refresh_jds_reconnect_token(
+            self_mutex,
+            jd.clone(),
+            miner_coinbase_output,
+            coinbase_output_max_additional_size_sent,
+        )
+        .await?;
+
+        if Self::redeclare_last_template(self_mutex, jd, token.clone()) {
+            Some(None)
+        } else {
+            Some(Some(token))
+        }
+    }
+
     pub async fn start_templates(
         self_mutex: Arc<Mutex<Self>>,
         mut receiver: TReceiver<EitherFrame>,
@@ -204,7 +292,10 @@ impl TemplateRx {
             .safe_lock(|s| s.down.clone())
             .map_err(|_| Error::JdClientDownstreamMutexCorrupted)?;
         let mut coinbase_output_max_additional_size_sent = false;
-        let mut last_token = None;
+        let mut last_token: Option<Option<AllocateMiningJobTokenSuccess<'static>>> = None;
+        let mut jds_connection_state = self_mutex
+            .safe_lock(|s| s.jds_connection_state.clone())
+            .map_err(|_| Error::TemplateRxMutexCorrupted)?;
         let miner_coinbase_output = self_mutex
             .safe_lock(|s| s.miner_coinbase_output.clone())
             .map_err(|_| Error::TemplateRxMutexCorrupted)?;
@@ -215,7 +306,35 @@ impl TemplateRx {
                 // Send CoinbaseOutputDataSize size to TP
                 let mut pending_new_template: Option<NewTemplate<'static>> = None;
                 let mut pending_tx_data_template_id: Option<u64> = None;
+                let mut jds_connection_state_closed = false;
                 loop {
+                    let jds_is_alive_again = if !jds_connection_state_closed {
+                        match jds_connection_state.has_changed() {
+                            Ok(true) => *jds_connection_state.borrow_and_update(),
+                            Ok(false) => false,
+                            Err(_) => {
+                                jds_connection_state_closed = true;
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    };
+                    if jds_is_alive_again {
+                        last_token = match Self::handle_jds_reconnected(
+                            &self_mutex,
+                            jd.clone(),
+                            &miner_coinbase_output[..],
+                            &mut coinbase_output_max_additional_size_sent,
+                        )
+                        .await
+                        {
+                            Some(last_token) => last_token.map(Some),
+                            None => break,
+                        };
+                        continue;
+                    }
+
                     if last_token.is_none() {
                         let jd = match self_mutex.safe_lock(|s| s.jd.clone()) {
                             Ok(jd) => jd,
@@ -259,12 +378,42 @@ impl TemplateRx {
                             None,
                         )
                     } else {
-                        let received = match receiver.recv().await {
-                            Some(received) => received,
-                            None => {
-                                error!("Failed to receive msg");
-                                ProxyState::update_tp_state(TpState::Down);
-                                break;
+                        let received = tokio::select! {
+                            biased;
+                            changed = jds_connection_state.changed(), if !jds_connection_state_closed => {
+                                match changed {
+                                    Ok(()) => {
+                                        let connected = *jds_connection_state.borrow_and_update();
+                                        if connected {
+                                            last_token = match Self::handle_jds_reconnected(
+                                                &self_mutex,
+                                                jd.clone(),
+                                                &miner_coinbase_output[..],
+                                                &mut coinbase_output_max_additional_size_sent,
+                                            )
+                                            .await
+                                            {
+                                                Some(last_token) => last_token.map(Some),
+                                                None => break,
+                                            };
+                                        }
+                                        continue;
+                                    }
+                                    Err(_) => {
+                                        jds_connection_state_closed = true;
+                                        continue;
+                                    }
+                                }
+                            }
+                            received = receiver.recv() => {
+                                match received {
+                                    Some(received) => received,
+                                    None => {
+                                        error!("Failed to receive msg");
+                                        ProxyState::update_tp_state(TpState::Down);
+                                        break;
+                                    }
+                                }
                             }
                         };
                         let frame: Result<StdFrame, _> = received.try_into();
@@ -533,6 +682,24 @@ impl TemplateRx {
                                             "Ignoring RequestTransactionDataSuccess for template id {} with mismatched active template",
                                             m.template_id
                                         );
+                                        pending_tx_data_template_id = None;
+                                        last_token = None;
+                                        continue;
+                                    }
+                                    let last_template_for_declare = LastTemplateForDeclare {
+                                        template: new_template_message.clone(),
+                                        tx_list: m.transaction_list.clone(),
+                                        excess_data: m.excess_data.clone(),
+                                    };
+                                    if self_mutex
+                                        .safe_lock(|t| {
+                                            t.last_template_for_declare =
+                                                Some(last_template_for_declare)
+                                        })
+                                        .is_err()
+                                    {
+                                        error!("TemplateRx mutex poisoned");
+                                        ProxyState::update_tp_state(TpState::Down);
                                         pending_tx_data_template_id = None;
                                         last_token = None;
                                         continue;
@@ -843,12 +1010,15 @@ mod tests {
         Vec::<TxOut>::new()
             .consensus_encode(&mut encoded_outputs)
             .expect("encode coinbase outputs");
+        let (_jds_connection_state_sender, jds_connection_state) = watch::channel(true);
         let self_mutex = Arc::new(Mutex::new(TemplateRx {
             sender: client_to_tp_tx,
             jd: None,
             down,
             new_template_message: None,
+            last_template_for_declare: None,
             miner_coinbase_output: encoded_outputs,
+            jds_connection_state,
             test_only_do_not_send_solution_to_tp: true,
         }));
         let _abortable = TemplateRx::start_templates(self_mutex, tp_to_client_rx)

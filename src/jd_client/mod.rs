@@ -7,8 +7,7 @@ pub mod mining_upstream;
 mod task_manager;
 mod template_receiver;
 
-use job_declarator::JobDeclarator;
-use key_utils::Secp256k1PublicKey;
+use job_declarator::{EitherFrame, JobDeclarator};
 use mining_downstream::DownstreamMiningNode;
 use std::sync::atomic::AtomicBool;
 use task_manager::TaskManager;
@@ -56,12 +55,24 @@ pub async fn start(
     sender: tokio::sync::mpsc::Sender<Mining<'static>>,
     up_receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     up_sender: tokio::sync::mpsc::Sender<Mining<'static>>,
+    jds_sender: tokio::sync::mpsc::Sender<EitherFrame>,
+    jds_receiver: tokio::sync::mpsc::Receiver<EitherFrame>,
+    jds_connection_state: tokio::sync::watch::Receiver<bool>,
 ) -> Option<AbortOnDrop> {
     // This will not work when we implement support for multiple upstream
     IS_CUSTOM_JOB_SET.store(true, std::sync::atomic::Ordering::Release);
     IS_NEW_TEMPLATE_HANDLED.store(true, std::sync::atomic::Ordering::Release);
     IS_NEW_PHASH_ARRIVED.store(false, std::sync::atomic::Ordering::Release);
-    initialize_jd(receiver, sender, up_receiver, up_sender).await
+    initialize_jd(
+        receiver,
+        sender,
+        up_receiver,
+        up_sender,
+        jds_sender,
+        jds_receiver,
+        jds_connection_state,
+    )
+    .await
 }
 
 async fn initialize_jd(
@@ -69,6 +80,9 @@ async fn initialize_jd(
     sender: tokio::sync::mpsc::Sender<Mining<'static>>,
     up_receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
     up_sender: tokio::sync::mpsc::Sender<Mining<'static>>,
+    jds_sender: tokio::sync::mpsc::Sender<EitherFrame>,
+    jds_receiver: tokio::sync::mpsc::Receiver<EitherFrame>,
+    jds_connection_state: tokio::sync::watch::Receiver<bool>,
 ) -> Option<AbortOnDrop> {
     let task_manager = TaskManager::initialize();
     let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
@@ -110,30 +124,22 @@ async fn initialize_jd(
     let ip_tp = parts.next().expect("The passed value for TP address is not valid. Terminating.... TP_ADDRESS should be in this format `127.0.0.1:8442`").to_string();
     let port_tp = parts.next().expect("The passed value for TP address is not valid. Terminating.... TP_ADDRESS should be in this format `127.0.0.1:8442`").parse::<u16>().expect("This operation should not fail because a valid port_tp should always be converted to U16");
 
-    let auth_pub_k: Secp256k1PublicKey = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
-    let address = match crate::ACTIVE_POOL_ADDRESS.safe_lock(|address| *address) {
-        Ok(Some(address)) => address,
-        Ok(None) => {
-            error!("Pool address is missing");
-            ProxyState::update_inconsistency(Some(1));
-            return None;
-        }
+    let (jd, jd_abortable) = match JobDeclarator::new(
+        jds_sender,
+        jds_receiver,
+        jds_connection_state.clone(),
+        upstream.clone(),
+        true,
+    )
+    .await
+    {
+        Ok(c) => c,
         Err(e) => {
-            error!("Pool address mutex is poisoned: {e:?}");
-            ProxyState::update_inconsistency(Some(1));
+            error!("Failed to intialize Jd: {e}");
+            drop(abortable);
             return None;
         }
     };
-
-    let (jd, jd_abortable) =
-        match JobDeclarator::new(address, auth_pub_k.into_bytes(), upstream.clone(), true).await {
-            Ok(c) => c,
-            Err(e) => {
-                error!("Failed to intialize Jd: {e}");
-                drop(abortable);
-                return None;
-            }
-        };
 
     if TaskManager::add_job_declarator_task(task_manager.clone(), jd_abortable)
         .await
@@ -214,6 +220,7 @@ async fn initialize_jd(
         donwstream.clone(),
         vec![],
         None,
+        jds_connection_state,
         test_only_do_not_send_solution_to_tp,
     )
     .await

@@ -28,6 +28,15 @@ use std::collections::VecDeque;
 use super::task_manager::TaskManager;
 
 #[derive(Debug)]
+pub struct UpstreamChannelFactory {
+    pub factory: PoolChannelFactory,
+    pub channel_id: u32,
+    pub target: U256<'static>,
+    pub extranonce_prefix: Vec<u8>,
+    pub extranonce_size: u16,
+}
+
+#[derive(Debug)]
 struct CircularBuffer {
     buffer: VecDeque<(u64, u32)>,
     capacity: usize,
@@ -106,7 +115,7 @@ pub struct Upstream {
     /// Sends messages to the SV2 Upstream role
     pub sender: TSender<Mining<'static>>,
     pub downstream: Option<Arc<Mutex<Downstream>>>,
-    channel_factory: Option<PoolChannelFactory>,
+    channel_factory: Option<UpstreamChannelFactory>,
     template_to_job_id: TemplateToJobId,
     req_ids: Id,
 }
@@ -276,7 +285,7 @@ impl Upstream {
 
     pub async fn take_channel_factory(
         self_: Arc<Mutex<Self>>,
-    ) -> Result<PoolChannelFactory, Error> {
+    ) -> Result<UpstreamChannelFactory, Error> {
         while self_
             .safe_lock(|s| s.channel_factory.is_none())
             .map_err(|_| Error::JdClientUpstreamMutexCorrupted)?
@@ -414,22 +423,30 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
         .inspect_err(|_| {
             error!("Signature + extranonce lens exceed 32 bytes");
         })?;
-        let extranonce: Extranonce = m
-            .extranonce_prefix
-            .into_static()
-            .to_vec()
+        let channel_id = m.channel_id;
+        let target = m.target.clone().into_static();
+        let extranonce_prefix = m.extranonce_prefix.to_vec();
+        let extranonce_size = m.extranonce_size;
+        let extranonce: Extranonce = extranonce_prefix
+            .clone()
             .try_into()
             .expect("Internal error: this operation can not fail because extranonce_pref can always be converted to Vec<u8>");
-        self.channel_id = Some(m.channel_id);
+        self.channel_id = Some(channel_id);
         channel_factory
             .replicate_upstream_extended_channel_only_jd(
-                m.target.into_static(),
+                target.clone(),
                 extranonce,
-                m.channel_id,
-                m.extranonce_size,
+                channel_id,
+                extranonce_size,
             )
             .expect("Impossible to open downstream channel");
-        self.channel_factory = Some(channel_factory);
+        self.channel_factory = Some(UpstreamChannelFactory {
+            factory: channel_factory,
+            channel_id,
+            target,
+            extranonce_prefix,
+            extranonce_size,
+        });
 
         let downstream = match self.downstream.as_ref() {
             Some(downstream) => downstream.clone(),
@@ -574,6 +591,10 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
                 "Set custom mining job success {}, for template {}",
                 m.job_id, template_id
             );
+            info!(
+                "JD template/job mapping registered: request_id={} template_id={} job_id={}",
+                m.request_id, template_id, m.job_id
+            );
             IS_CUSTOM_JOB_SET.store(true, std::sync::atomic::Ordering::Release);
             Ok(SendTo::None(None))
         } else {
@@ -601,8 +622,15 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
         m: roles_logic_sv2::mining_sv2::SetTarget,
     ) -> Result<roles_logic_sv2::handlers::mining::SendTo<Downstream>, RolesLogicError> {
         if let Some(factory) = self.channel_factory.as_mut() {
-            factory.update_target_for_channel(m.channel_id, m.maximum_target.clone().into());
-            factory.set_target(&mut m.maximum_target.clone().into());
+            factory
+                .factory
+                .update_target_for_channel(m.channel_id, m.maximum_target.clone().into());
+            factory
+                .factory
+                .set_target(&mut m.maximum_target.clone().into());
+            if m.channel_id == factory.channel_id {
+                factory.target = m.maximum_target.clone().into_static();
+            }
         }
         if let Some(downstream) = &self.downstream {
             downstream
@@ -632,10 +660,167 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
         &mut self,
         _m: roles_logic_sv2::mining_sv2::Reconnect,
     ) -> Result<roles_logic_sv2::handlers::mining::SendTo<Downstream>, RolesLogicError> {
+        if let Some(channel_id) = self.channel_id.take() {
+            info!(
+                "JD mining upstream pool reconnected; marking channel_id={} not ready until channel reopen succeeds",
+                channel_id
+            );
+        } else {
+            info!("JD mining upstream pool reconnected before an upstream channel was ready");
+        }
+        self.channel_factory = None;
+
         if let Some(downstream) = &self.downstream {
             Ok(SendTo::RelaySameMessageToRemote(downstream.clone()))
         } else {
             Err(RolesLogicError::DownstreamDown)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use roles_logic_sv2::mining_sv2::OpenExtendedMiningChannelSuccess;
+    use tokio::sync::mpsc;
+    use tokio::time::{timeout, Duration};
+
+    fn u256_max() -> U256<'static> {
+        vec![255_u8; 32]
+            .try_into()
+            .expect("test u256 must contain 32 bytes")
+    }
+
+    fn reconnect_message() -> roles_logic_sv2::mining_sv2::Reconnect<'static> {
+        roles_logic_sv2::mining_sv2::Reconnect {
+            new_host: String::new()
+                .try_into()
+                .expect("empty reconnect host must fit in Str0255"),
+            new_port: 0,
+        }
+    }
+
+    fn open_success(channel_id: u32) -> OpenExtendedMiningChannelSuccess<'static> {
+        OpenExtendedMiningChannelSuccess {
+            request_id: 0,
+            channel_id,
+            target: u256_max(),
+            extranonce_size: 16,
+            extranonce_prefix: vec![channel_id as u8; 16]
+                .try_into()
+                .expect("test extranonce prefix must fit in B032"),
+        }
+    }
+
+    fn declare_mining_job() -> DeclareMiningJob<'static> {
+        DeclareMiningJob {
+            request_id: 0,
+            mining_job_token: Vec::new().try_into().unwrap(),
+            version: 0,
+            coinbase_prefix: Vec::new().try_into().unwrap(),
+            coinbase_suffix: Vec::new().try_into().unwrap(),
+            tx_list: Vec::<U256<'static>>::new().try_into().unwrap(),
+            excess_data: Vec::new().try_into().unwrap(),
+        }
+    }
+
+    fn set_new_prev_hash() -> roles_logic_sv2::template_distribution_sv2::SetNewPrevHash<'static> {
+        roles_logic_sv2::template_distribution_sv2::SetNewPrevHash {
+            template_id: 1,
+            prev_hash: u256_max(),
+            header_timestamp: 0,
+            n_bits: 0,
+            target: u256_max(),
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_marks_channel_not_ready_until_open_success() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let upstream = Upstream::new(16, sender).await.unwrap();
+
+        upstream
+            .safe_lock(|u| u.handle_open_extended_mining_channel_success(open_success(7)))
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(upstream.safe_lock(|u| u.channel_id).unwrap(), Some(7));
+
+        upstream
+            .safe_lock(|u| u.handle_reconnect(reconnect_message()))
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(upstream.safe_lock(|u| u.channel_id).unwrap(), None);
+        assert!(upstream.safe_lock(|u| u.channel_factory.is_none()).unwrap());
+
+        upstream
+            .safe_lock(|u| u.handle_open_extended_mining_channel_success(open_success(42)))
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(upstream.safe_lock(|u| u.channel_id).unwrap(), Some(42));
+        assert_eq!(
+            upstream
+                .safe_lock(|u| u.channel_factory.as_ref().map(|factory| factory.channel_id))
+                .unwrap(),
+            Some(42)
+        );
+    }
+
+    #[tokio::test]
+    async fn set_custom_jobs_waits_for_reopened_channel_after_reconnect() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let upstream = Upstream::new(16, sender).await.unwrap();
+
+        upstream
+            .safe_lock(|u| u.handle_open_extended_mining_channel_success(open_success(7)))
+            .unwrap()
+            .unwrap_err();
+        upstream
+            .safe_lock(|u| u.handle_reconnect(reconnect_message()))
+            .unwrap()
+            .unwrap_err();
+
+        let upstream_for_job = upstream.clone();
+        let set_custom_task = tokio::spawn(async move {
+            Upstream::set_custom_jobs(
+                &upstream_for_job,
+                declare_mining_job(),
+                set_new_prev_hash(),
+                Vec::<U256<'static>>::new().try_into().unwrap(),
+                Vec::new().try_into().unwrap(),
+                0,
+                Vec::new().try_into().unwrap(),
+                0,
+                0,
+                Vec::new(),
+                0,
+                1,
+            )
+            .await
+        });
+
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv())
+                .await
+                .is_err(),
+            "set_custom_jobs must not send while the upstream channel is not ready"
+        );
+
+        upstream
+            .safe_lock(|u| u.handle_open_extended_mining_channel_success(open_success(42)))
+            .unwrap()
+            .unwrap_err();
+
+        let message = timeout(Duration::from_millis(250), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match message {
+            Mining::SetCustomMiningJob(job) => {
+                assert_eq!(job.channel_id, 42);
+            }
+            other => panic!("expected SetCustomMiningJob, got {other:?}"),
+        }
+
+        set_custom_task.await.unwrap().unwrap();
     }
 }

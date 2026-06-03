@@ -15,7 +15,9 @@ impl ParseServerJobDeclarationMessages for JobDeclarator {
         &mut self,
         message: AllocateMiningJobTokenSuccess,
     ) -> Result<SendTo, Error> {
-        self.allocated_tokens.push(message.into_static());
+        let message = message.into_static();
+        self.last_allocated_token = Some(message.clone());
+        self.allocated_tokens.push(message);
 
         Ok(SendTo::None(None))
     }

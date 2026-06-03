@@ -384,7 +384,7 @@ impl PoolLatency {
                     let initiator = Initiator::from_raw_k(authority_public_key.into_bytes())
                         // Safe expect Key is a constant and must be right
                         .expect("Unable to create initialtor");
-                    let (mut receiver, mut sender, _, _) =
+                    let (mut jds_receiver, mut jds_sender, _, _) =
                         match Connection::new(stream, HandshakeRole::Initiator(initiator)).await {
                             Ok(connection) => connection,
                             Err(e) => {
@@ -393,7 +393,8 @@ impl PoolLatency {
                             }
                         };
                     if let Err(e) =
-                        SetupConnectionHandler::setup(&mut receiver, &mut sender, address).await
+                        SetupConnectionHandler::setup(&mut jds_receiver, &mut jds_sender, address)
+                            .await
                     {
                         error!("Failed to setup connection: {:?}", e);
                         return Err(());
@@ -401,9 +402,11 @@ impl PoolLatency {
 
                     self.open_sv2_jd_connection = Some(open_sv2_jd_connection_timer.elapsed());
 
-                    let (sender, mut _receiver) = tokio::sync::mpsc::channel(10);
+                    let (mining_sender, mut _mining_receiver) = tokio::sync::mpsc::channel(10);
                     let upstream =
-                        match crate::jd_client::mining_upstream::Upstream::new(0, sender).await {
+                        match crate::jd_client::mining_upstream::Upstream::new(0, mining_sender)
+                            .await
+                        {
                             Ok(upstream) => upstream,
                             Err(e) => {
                                 error!("Failed to create upstream: {:?}", e);
@@ -412,8 +415,9 @@ impl PoolLatency {
                         };
 
                     let (job_declarator, _aborter) = match JobDeclarator::new(
-                        address,
-                        authority_public_key.into_bytes(),
+                        jds_sender,
+                        jds_receiver,
+                        tokio::sync::watch::channel(true).1,
                         upstream,
                         false,
                     )

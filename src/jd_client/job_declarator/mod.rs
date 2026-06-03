@@ -2,8 +2,7 @@ pub mod message_handler;
 mod task_manager;
 use binary_sv2::{Seq0255, Seq064K, B016M, B064K, U256};
 use bitcoin::{blockdata::transaction::Transaction, hashes::Hash, Txid};
-use codec_sv2::{HandshakeRole, Initiator, StandardEitherFrame, StandardSv2Frame};
-use demand_sv2_connection::noise_connection_tokio::Connection;
+use codec_sv2::{StandardEitherFrame, StandardSv2Frame};
 use roles_logic_sv2::{
     handlers::SendTo_,
     job_declaration_sv2::{AllocateMiningJobTokenSuccess, SubmitSolutionJd},
@@ -17,7 +16,10 @@ use std::{
     convert::TryInto,
 };
 use task_manager::TaskManager;
-use tokio::sync::mpsc::{Receiver as TReceiver, Sender as TSender};
+use tokio::sync::{
+    mpsc::{Receiver as TReceiver, Sender as TSender},
+    watch,
+};
 use tracing::{error, info, warn};
 
 use async_recursion::async_recursion;
@@ -28,14 +30,14 @@ use roles_logic_sv2::{
     template_distribution_sv2::NewTemplate,
     utils::Id,
 };
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 
 pub type Message = PoolMessages<'static>;
 pub type SendTo = SendTo_<JobDeclaration<'static>, ()>;
 pub type StdFrame = StandardSv2Frame<Message>;
+pub type EitherFrame = StandardEitherFrame<Message>;
 
 pub mod setup_connection;
-use setup_connection::SetupConnectionHandler;
 
 use crate::{
     proxy_state::{JdState, PoolState, ProxyState},
@@ -54,12 +56,13 @@ pub struct LastDeclareJob {
 
 #[derive(Debug)]
 pub struct JobDeclarator {
-    sender: TSender<StandardEitherFrame<PoolMessages<'static>>>,
+    sender: TSender<EitherFrame>,
     allocated_tokens: Vec<AllocateMiningJobTokenSuccess<'static>>,
+    last_allocated_token: Option<AllocateMiningJobTokenSuccess<'static>>,
     req_ids: Id,
-    min_extranonce_size: u16,
     // (Sent DeclareMiningJob, is future, template id, merkle path)
     last_declare_mining_jobs_sent: HashMap<u32, Option<LastDeclareJob>>,
+    jds_connection_state: watch::Receiver<bool>,
     pub last_set_new_prev_hash: Option<SetNewPrevHash<'static>>,
     set_new_prev_hash_counter: u8,
     #[allow(clippy::type_complexity)]
@@ -82,25 +85,15 @@ pub struct JobDeclarator {
 
 impl JobDeclarator {
     pub async fn new(
-        address: SocketAddr,
-        authority_public_key: [u8; 32],
+        sender: TSender<EitherFrame>,
+        receiver: TReceiver<EitherFrame>,
+        jds_connection_state: watch::Receiver<bool>,
         up: Arc<Mutex<Upstream>>,
         should_log_when_connected: bool,
     ) -> Result<(Arc<Mutex<Self>>, AbortOnDrop), Error> {
-        let stream = tokio::net::TcpStream::connect(address).await?;
-        let initiator = Initiator::from_raw_k(authority_public_key)?;
-        let (mut receiver, mut sender, _, _) =
-            Connection::new(stream, HandshakeRole::Initiator(initiator))
-                .await
-                .map_err(|_| Error::Unrecoverable)?;
-
-        SetupConnectionHandler::setup(&mut receiver, &mut sender, address).await?;
-
         if should_log_when_connected {
             info!("JD CONNECTED");
         }
-
-        let min_extranonce_size = crate::MIN_EXTRANONCE_SIZE;
 
         let task_manager = TaskManager::initialize();
         let abortable = task_manager
@@ -110,8 +103,8 @@ impl JobDeclarator {
         let self_ = Arc::new(Mutex::new(JobDeclarator {
             sender,
             allocated_tokens: vec![],
+            last_allocated_token: None,
             req_ids: Id::new(),
-            min_extranonce_size,
             last_declare_mining_jobs_sent: HashMap::with_capacity(2),
             last_set_new_prev_hash: None,
             future_jobs: HashMap::with_hasher(BuildNoHashHasher::default()),
@@ -119,12 +112,42 @@ impl JobDeclarator {
             coinbase_tx_prefix: vec![].try_into().expect("Internal error: this operation can not fail because Vec can always be converted into Inner"),
             coinbase_tx_suffix: vec![].try_into().expect("Internal error: this operation can not fail because Vec can always be converted into Inner"),
             set_new_prev_hash_counter: 0,
-            task_manager,
+            jds_connection_state: jds_connection_state.clone(),
+            task_manager: task_manager.clone(),
         }));
 
         Self::allocate_tokens(&self_, 2).await;
         Self::on_upstream_message(self_.clone(), receiver).await?;
         Ok((self_, abortable))
+    }
+
+    fn refresh_jds_connection_state(self_mutex: &Arc<Mutex<Self>>) -> Result<(bool, bool), Error> {
+        self_mutex
+            .safe_lock(|s| {
+                let state_changed = s.jds_connection_state.has_changed().unwrap_or(false);
+                let connected = if state_changed {
+                    let connected = *s.jds_connection_state.borrow_and_update();
+                    super::IS_CUSTOM_JOB_SET.store(true, std::sync::atomic::Ordering::Release);
+                    if connected {
+                        s.reset_jds_session_state();
+                        info!("JDS reconnected; cleared pending job declaration state");
+                    } else {
+                        info!("JDS disconnected; keeping last allocated mining job token");
+                    }
+                    connected
+                } else {
+                    *s.jds_connection_state.borrow()
+                };
+                (connected, state_changed)
+            })
+            .map_err(|_| Error::JobDeclaratorMutexCorrupted)
+    }
+
+    fn reset_jds_session_state(&mut self) {
+        self.allocated_tokens.clear();
+        self.last_declare_mining_jobs_sent.clear();
+        self.future_jobs.clear();
+        self.set_new_prev_hash_counter = 0;
     }
 
     fn get_last_declare_job_sent(
@@ -163,6 +186,14 @@ impl JobDeclarator {
     pub async fn get_last_token(
         self_mutex: &Arc<Mutex<Self>>,
     ) -> Result<AllocateMiningJobTokenSuccess<'static>, Error> {
+        // if JDS dropped the connection we simply return the last token seen
+        if !Self::refresh_jds_connection_state(self_mutex)?.0 {
+            return self_mutex
+                .safe_lock(|s| s.last_allocated_token.clone())
+                .map_err(|_| Error::JobDeclaratorMutexCorrupted)?
+                .ok_or(Error::Unrecoverable);
+        }
+
         let mut token_len = self_mutex
             .safe_lock(|s| s.allocated_tokens.len())
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
@@ -241,8 +272,8 @@ impl JobDeclarator {
         }
         super::IS_CUSTOM_JOB_SET.store(false, std::sync::atomic::Ordering::Release);
         // now as u64 unix time
-        let (id, _, sender) = self_mutex
-            .safe_lock(|s| (s.req_ids.next(), s.min_extranonce_size, s.sender.clone()))
+        let (id, sender) = self_mutex
+            .safe_lock(|s| (s.req_ids.next(), s.sender.clone()))
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
 
         let template_transactions = tx_list_.to_vec();
@@ -298,6 +329,15 @@ impl JobDeclarator {
             coinbase_pool_output,
             tx_list: tx_list_.clone(),
         };
+        let (jds_connected, jds_state_changed) = Self::refresh_jds_connection_state(self_mutex)?;
+        if !jds_connected || jds_state_changed {
+            super::IS_CUSTOM_JOB_SET.store(true, std::sync::atomic::Ordering::Release);
+            warn!(
+                "JDS unavailable or session changed; skipping DeclareMiningJob for template {}",
+                last_declare.template.template_id
+            );
+            return Ok(());
+        }
         Self::update_last_declare_job_sent(self_mutex, id, last_declare)?;
         let frame: StdFrame =
             PoolMessages::JobDeclaration(JobDeclaration::DeclareMiningJob(declare_job))
@@ -433,7 +473,7 @@ impl JobDeclarator {
                             }
                         };
                         if sender.send(sv2_frame.into()).await.is_err() {
-                            error!("Job declarator failed to send message");
+                            error!("Job declarator failed to send message AAAAA");
                             ProxyState::update_jd_state(JdState::Down);
                             break;
                         };
@@ -447,7 +487,7 @@ impl JobDeclarator {
                 }
             }
         });
-        TaskManager::add_allocate_tokens(task_manager, main_task.into())
+        TaskManager::add_main_task(task_manager, main_task.into())
             .await
             .map_err(|_| Error::JobDeclaratorTaskManagerFailed)
     }
@@ -477,14 +517,15 @@ impl JobDeclarator {
                         && s.last_set_new_prev_hash != Some(set_new_prev_hash.clone())
                     //it means that a new prev_hash is arrived while the previous hasn't exited the loop yet
                     {
-                        s.set_new_prev_hash_counter -= 1;
+                        s.set_new_prev_hash_counter = s.set_new_prev_hash_counter.saturating_sub(1);
                         Some(None)
                     } else {
                         s.future_jobs
                             .remove(&id)
                             .map(|(job, merkle_path, template, pool_outs)| {
-                                s.future_jobs = HashMap::with_hasher(BuildNoHashHasher::default());
-                                s.set_new_prev_hash_counter -= 1;
+                                s.future_jobs.clear();
+                                s.set_new_prev_hash_counter =
+                                    s.set_new_prev_hash_counter.saturating_sub(1);
                                 Some((job, s.up.clone(), merkle_path, template, pool_outs))
                             })
                     }
@@ -555,7 +596,7 @@ impl JobDeclarator {
                 .expect("Infallible operation");
 
             if sender.send(frame.into()).await.is_err() {
-                error!("Job declarator failed to send message");
+                error!("Job declarator failed to send message BBBB");
                 ProxyState::update_jd_state(JdState::Down);
             }
         }
@@ -649,12 +690,105 @@ async fn check_missing_prioritized_txids(missing_txids: Vec<Txid>, template_id: 
 
 #[cfg(test)]
 mod tests {
-    use super::missing_prioritized_txids;
+    use super::*;
     use bitcoin::Txid;
     use std::collections::HashSet;
+    use tokio::sync::{mpsc, watch};
 
     fn txid(value: u8) -> Txid {
         format!("{value:064x}").parse().expect("valid txid")
+    }
+
+    fn make_allocate_token(request_id: u32) -> AllocateMiningJobTokenSuccess<'static> {
+        AllocateMiningJobTokenSuccess {
+            request_id,
+            mining_job_token: vec![request_id as u8; 32]
+                .try_into()
+                .expect("mining job token should fit in B0255"),
+            coinbase_output_max_additional_size: 100,
+            coinbase_output: Vec::new()
+                .try_into()
+                .expect("coinbase output should fit in B064K"),
+            async_mining_allowed: true,
+        }
+    }
+
+    fn make_declare_job(request_id: u32) -> DeclareMiningJob<'static> {
+        DeclareMiningJob {
+            request_id,
+            mining_job_token: vec![request_id as u8; 32]
+                .try_into()
+                .expect("mining job token should fit in B0255"),
+            version: 0,
+            coinbase_prefix: Vec::new()
+                .try_into()
+                .expect("coinbase prefix should fit in B064K"),
+            coinbase_suffix: Vec::new()
+                .try_into()
+                .expect("coinbase suffix should fit in B064K"),
+            tx_list: Seq064K::new(Vec::new()).expect("transaction list should be empty"),
+            excess_data: Vec::new()
+                .try_into()
+                .expect("excess data should fit in B064K"),
+        }
+    }
+
+    fn make_new_template(template_id: u64) -> NewTemplate<'static> {
+        NewTemplate {
+            template_id,
+            future_template: true,
+            version: 0,
+            coinbase_tx_version: 1,
+            coinbase_prefix: Vec::new()
+                .try_into()
+                .expect("coinbase prefix should fit in B0255"),
+            coinbase_tx_input_sequence: 0,
+            coinbase_tx_value_remaining: 0,
+            coinbase_tx_outputs_count: 0,
+            coinbase_tx_outputs: Vec::new()
+                .try_into()
+                .expect("coinbase outputs should fit in B064K"),
+            coinbase_tx_locktime: 0,
+            merkle_path: Vec::new().into(),
+        }
+    }
+
+    fn make_last_declare_job(request_id: u32, template_id: u64) -> LastDeclareJob {
+        LastDeclareJob {
+            declare_job: make_declare_job(request_id),
+            template: make_new_template(template_id),
+            coinbase_pool_output: vec![1, 2, 3],
+            tx_list: Seq064K::new(Vec::new()).expect("transaction list should be empty"),
+        }
+    }
+
+    async fn make_job_declarator(
+        jds_connection_state: watch::Receiver<bool>,
+    ) -> Arc<Mutex<JobDeclarator>> {
+        let (sender, _receiver) = mpsc::channel(1);
+        let (up_sender, _up_receiver) = mpsc::channel(1);
+        let up = Upstream::new(0, up_sender)
+            .await
+            .expect("upstream should initialize");
+        Arc::new(Mutex::new(JobDeclarator {
+            sender,
+            allocated_tokens: vec![],
+            last_allocated_token: None,
+            req_ids: Id::new(),
+            last_declare_mining_jobs_sent: HashMap::with_capacity(2),
+            jds_connection_state,
+            last_set_new_prev_hash: None,
+            set_new_prev_hash_counter: 0,
+            future_jobs: HashMap::with_hasher(BuildNoHashHasher::default()),
+            up,
+            coinbase_tx_prefix: vec![].try_into().expect(
+                "Internal error: this operation can not fail because Vec can always be converted into Inner",
+            ),
+            coinbase_tx_suffix: vec![].try_into().expect(
+                "Internal error: this operation can not fail because Vec can always be converted into Inner",
+            ),
+            task_manager: TaskManager::initialize(),
+        }))
     }
 
     #[test]
@@ -677,5 +811,52 @@ mod tests {
         let template = HashSet::from([a, c]);
 
         assert_eq!(missing_prioritized_txids(&prioritized, &template), vec![b]);
+    }
+
+    #[tokio::test]
+    async fn jds_reconnect_clears_future_jobs_and_prev_hash_counter() {
+        let (state_sender, state_receiver) = watch::channel(true);
+        let job_declarator = make_job_declarator(state_receiver).await;
+
+        job_declarator
+            .safe_lock(|s| {
+                s.allocated_tokens.push(make_allocate_token(1));
+                s.last_declare_mining_jobs_sent
+                    .insert(2, Some(make_last_declare_job(2, 10)));
+                s.future_jobs.insert(
+                    10,
+                    (
+                        make_declare_job(2),
+                        Vec::new().into(),
+                        make_new_template(10),
+                        vec![4, 5, 6],
+                    ),
+                );
+                s.set_new_prev_hash_counter = 2;
+            })
+            .expect("job declarator lock should not be poisoned");
+
+        state_sender.send_replace(false);
+        assert_eq!(
+            JobDeclarator::refresh_jds_connection_state(&job_declarator)
+                .expect("disconnect state refresh should succeed"),
+            (false, true)
+        );
+
+        state_sender.send_replace(true);
+        assert_eq!(
+            JobDeclarator::refresh_jds_connection_state(&job_declarator)
+                .expect("reconnect state refresh should succeed"),
+            (true, true)
+        );
+
+        job_declarator
+            .safe_lock(|s| {
+                assert!(s.allocated_tokens.is_empty());
+                assert!(s.last_declare_mining_jobs_sent.is_empty());
+                assert!(s.future_jobs.is_empty());
+                assert_eq!(s.set_new_prev_hash_counter, 0);
+            })
+            .expect("job declarator lock should not be poisoned");
     }
 }

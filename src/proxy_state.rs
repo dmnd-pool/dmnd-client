@@ -249,6 +249,31 @@ impl ProxyState {
         }
     }
 
+    pub fn is_pool_down() -> bool {
+        PROXY_STATE
+            .safe_lock(|state| state.pool == PoolState::Down)
+            .unwrap_or(false)
+    }
+
+    pub fn is_miner_session_restart_required() -> (bool, Option<String>) {
+        let errors = Self::get_errors();
+        if let Ok(errors) = errors {
+            let restart_errors: Vec<ProxyStates> = errors
+                .into_iter()
+                .filter(|e| !matches!(e, ProxyStates::Pool(_)))
+                .collect();
+            if restart_errors.is_empty() {
+                (false, None)
+            } else {
+                let error_descriptions: Vec<String> =
+                    restart_errors.iter().map(|e| format!("{e:?}")).collect();
+                (true, Some(error_descriptions.join(", ")))
+            }
+        } else {
+            (true, Some("Proxy".to_string()))
+        }
+    }
+
     pub fn get_errors() -> Result<Vec<ProxyStates>, ()> {
         let mut errors = Vec::new();
         if PROXY_STATE

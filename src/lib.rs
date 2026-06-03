@@ -13,16 +13,24 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 static GLOBAL: Jemalloc = Jemalloc;
 
 use crate::auto_update::check_update_proxy;
+use crate::jd_client::job_declarator::{
+    setup_connection::SetupConnectionHandler, EitherFrame as JdsEitherFrame,
+};
 use crate::shared::utils::AbortOnDrop;
+use codec_sv2::{HandshakeRole, Initiator};
+use demand_share_accounting_ext::parser::PoolExtMessages;
+use demand_sv2_connection::noise_connection_tokio::Connection;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
+use roles_logic_sv2::{mining_sv2::SubmitSharesSuccess, parsers::Mining};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    OnceLock,
+    Arc, OnceLock,
 };
 use std::{net::SocketAddr, time::Duration};
-use tokio::sync::mpsc::channel;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::Mutex as TokioMutex;
 use tracing::{error, info, warn};
 
 mod api;
@@ -201,30 +209,40 @@ async fn initialize_proxy(
     signature: String,
 ) {
     let shutdown_signal = shutdown::handle_shutdown();
+    let restore_channel = translator::new_restore_channel();
     loop {
         if *shutdown_signal.clone().borrow() {
             break;
         }
         let stats_sender = api::stats::StatsSender::new();
-        let (send_to_pool, recv_from_pool, pool_connection_abortable) = match router
-            .connect_pool(pool_addr, shutdown_signal.clone())
-            .await
-        {
-            Ok(connection) => connection,
-            Err(minin_pool_connection::errors::Error::Shutdown) => {
-                break;
-            }
-            Err(_) => {
-                error!("No upstream available. Retrying in 5 seconds...");
-                warn!(
-                    "Please make sure the your token {} is correct",
-                    Configuration::token().expect("Token is not set")
-                );
-                let secs = 5;
-                tokio::time::sleep(Duration::from_secs(secs)).await;
-                continue;
-            }
-        };
+        let (initial_send_to_pool, initial_recv_from_pool, initial_pool_connection_abortable) =
+            match router
+                .connect_pool(pool_addr, shutdown_signal.clone())
+                .await
+            {
+                Ok(connection) => connection,
+                Err(minin_pool_connection::errors::Error::Shutdown) => {
+                    break;
+                }
+                Err(_) => {
+                    error!("No upstream available. Retrying in 5 seconds...");
+                    warn!(
+                        "Please make sure the your token {} is correct",
+                        Configuration::token().expect("Token is not set")
+                    );
+                    let secs = 5;
+                    tokio::time::sleep(Duration::from_secs(secs)).await;
+                    continue;
+                }
+            };
+        let (send_to_pool, recv_from_pool, pool_connection_abortable) =
+            start_pool_connection_supervisor(
+                router.clone(),
+                initial_send_to_pool,
+                initial_recv_from_pool,
+                initial_pool_connection_abortable,
+                shutdown_signal.clone(),
+            );
 
         let (downs_sv1_tx, downs_sv1_rx) = channel(crate::DOWNSTREAM_ACCEPT_BUFFER_SIZE);
         let downstream_handoff = downs_sv1_tx.clone();
@@ -236,6 +254,7 @@ async fn initialize_proxy(
             translator_up_tx,
             stats_sender.clone(),
             signature.clone(),
+            restore_channel.clone(),
         )
         .await
         {
@@ -257,6 +276,7 @@ async fn initialize_proxy(
             .expect("Translator failed before initialization");
 
         let jdc_abortable: Option<AbortOnDrop>;
+        let jds_connection_abortable: Option<AbortOnDrop>;
         let share_accounter_abortable;
         let tp = match TP_ADDRESS.safe_lock(|tp| tp.clone()) {
             Ok(tp) => tp,
@@ -267,13 +287,53 @@ async fn initialize_proxy(
         };
 
         if let Some(_tp_addr) = tp {
-            jdc_abortable = jd_client::start(
-                jdc_from_translator_receiver,
-                jdc_to_translator_sender,
-                from_share_accounter_to_jdc_recv,
-                from_jdc_to_share_accounter_send,
-            )
-            .await;
+            let auth_pub_k: Secp256k1PublicKey = AUTH_PUB_KEY.parse().expect("Invalid public key");
+            let authority_public_key = auth_pub_k.into_bytes();
+            let jds_address = match ACTIVE_POOL_ADDRESS.safe_lock(|address| *address) {
+                Ok(Some(address)) => address,
+                Ok(None) => {
+                    error!("Pool address is missing");
+                    ProxyState::update_inconsistency(Some(1));
+                    return;
+                }
+                Err(e) => {
+                    error!("Pool address mutex is poisoned: {e:?}");
+                    ProxyState::update_inconsistency(Some(1));
+                    return;
+                }
+            };
+            match connect_jds(jds_address, authority_public_key).await {
+                Ok((initial_send_to_jds, initial_recv_from_jds)) => {
+                    let (send_to_jds, recv_from_jds, abortable, jds_connection_state) =
+                        start_jds_connection_supervisor(
+                            jds_address,
+                            authority_public_key,
+                            initial_send_to_jds,
+                            initial_recv_from_jds,
+                        );
+                    jdc_abortable = jd_client::start(
+                        jdc_from_translator_receiver,
+                        jdc_to_translator_sender,
+                        from_share_accounter_to_jdc_recv,
+                        from_jdc_to_share_accounter_send,
+                        send_to_jds,
+                        recv_from_jds,
+                        jds_connection_state,
+                    )
+                    .await;
+                    if jdc_abortable.is_some() {
+                        jds_connection_abortable = Some(abortable);
+                    } else {
+                        drop(abortable);
+                        jds_connection_abortable = None;
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to initialize JDS connection: {e}");
+                    jdc_abortable = None;
+                    jds_connection_abortable = None;
+                }
+            }
             if jdc_abortable.is_none() {
                 ProxyState::update_tp_state(TpState::Down);
             };
@@ -293,6 +353,7 @@ async fn initialize_proxy(
             }
         } else {
             jdc_abortable = None;
+            jds_connection_abortable = None;
 
             share_accounter_abortable = match share_accounter::start(
                 jdc_from_translator_receiver,
@@ -320,11 +381,15 @@ async fn initialize_proxy(
         if let Some(jdc_handle) = jdc_abortable {
             abort_handles.push((jdc_handle, "jdc".to_string()));
         }
+        if let Some(jds_connection_handle) = jds_connection_abortable {
+            abort_handles.push((jds_connection_handle, "jds_connection".to_string()));
+        }
         let server_handle =
             tokio::spawn(api::start(router.clone(), stats_sender, downstream_handoff));
         abort_handles.push((server_handle.into(), "api_server".to_string()));
         match monitor(router, abort_handles, epsilon, shutdown_signal.clone()).await {
             Reconnect::NewUpstream(new_pool_addr) => {
+                translator::clear_restore_channel(&restore_channel);
                 ProxyState::update_proxy_state_up();
                 pool_addr = Some(new_pool_addr);
                 continue;
@@ -336,6 +401,226 @@ async fn initialize_proxy(
             }
         };
     }
+}
+
+fn start_pool_connection_supervisor(
+    mut router: Router,
+    initial_send_to_pool: Sender<PoolExtMessages<'static>>,
+    initial_recv_from_pool: Receiver<PoolExtMessages<'static>>,
+    initial_pool_connection_abortable: AbortOnDrop,
+    shutdown_signal: watch::Receiver<bool>,
+) -> (
+    Sender<PoolExtMessages<'static>>,
+    Receiver<PoolExtMessages<'static>>,
+    AbortOnDrop,
+) {
+    let (stable_send_to_pool, mut stable_recv_from_roles) =
+        channel::<PoolExtMessages<'static>>(crate::TRANSLATOR_BUFFER_SIZE);
+    let (stable_send_to_roles, stable_recv_from_pool) =
+        channel::<PoolExtMessages<'static>>(crate::TRANSLATOR_BUFFER_SIZE);
+    let current_pool_sender = Arc::new(tokio::sync::Mutex::new(Some(initial_send_to_pool)));
+
+    let outbound_current_sender = current_pool_sender.clone();
+    let outbound_send_to_roles = stable_send_to_roles.clone();
+    let outbound_handle = tokio::spawn(async move {
+        while let Some(msg) = stable_recv_from_roles.recv().await {
+            let Some(sender) = outbound_current_sender.lock().await.clone() else {
+                resolve_submit_while_pool_is_down(msg, &outbound_send_to_roles).await;
+                continue;
+            };
+
+            if let Err(e) = sender.send(msg).await {
+                let msg = e.0;
+                *outbound_current_sender.lock().await = None;
+                resolve_submit_while_pool_is_down(msg, &outbound_send_to_roles).await;
+            }
+        }
+    });
+
+    let supervisor_current_sender = current_pool_sender.clone();
+    let supervisor_handle = tokio::spawn(async move {
+        let mut recv_from_pool = initial_recv_from_pool;
+        let mut pool_connection_abortable = Some(initial_pool_connection_abortable);
+        loop {
+            ProxyState::update_pool_state(PoolState::Up);
+            while let Some(msg) = recv_from_pool.recv().await {
+                if stable_send_to_roles.send(msg).await.is_err() {
+                    error!("Share accounter is not available for pool messages");
+                    ProxyState::update_inconsistency(Some(1));
+                    return;
+                }
+            }
+
+            ProxyState::update_pool_state(PoolState::Down);
+            *supervisor_current_sender.lock().await = None;
+            drop(pool_connection_abortable.take());
+
+            let (send_to_pool, new_recv_from_pool, new_pool_connection_abortable) = match router
+                .connect_pool(router.current_pool, shutdown_signal.clone())
+                .await
+            {
+                Ok(connection) => connection,
+                Err(minin_pool_connection::errors::Error::Shutdown) => return,
+                Err(e) => {
+                    error!("Pool supervisor failed to reconnect: {e:?}");
+                    ProxyState::update_pool_state(PoolState::Down);
+                    return;
+                }
+            };
+
+            *supervisor_current_sender.lock().await = Some(send_to_pool);
+            recv_from_pool = new_recv_from_pool;
+            pool_connection_abortable = Some(new_pool_connection_abortable);
+
+            if stable_send_to_roles
+                .send(pool_reconnect_trigger_message())
+                .await
+                .is_err()
+            {
+                error!("Unable to signal upstream channel restore after pool reconnect");
+                ProxyState::update_inconsistency(Some(1));
+                return;
+            }
+        }
+    });
+
+    let mut abortable: AbortOnDrop = supervisor_handle.into();
+    abortable.add_task(outbound_handle);
+    (stable_send_to_pool, stable_recv_from_pool, abortable)
+}
+
+async fn connect_jds(
+    address: SocketAddr,
+    authority_public_key: [u8; 32],
+) -> Result<(Sender<JdsEitherFrame>, Receiver<JdsEitherFrame>), String> {
+    let stream = tokio::net::TcpStream::connect(address)
+        .await
+        .map_err(|e| format!("failed to connect to JDS at {address}: {e}"))?;
+    let initiator = Initiator::from_raw_k(authority_public_key)
+        .map_err(|e| format!("failed to create JDS initiator: {e:?}"))?;
+    let (mut receiver, mut sender, _, _) =
+        Connection::new(stream, HandshakeRole::Initiator(initiator))
+            .await
+            .map_err(|e| format!("failed to create JDS connection: {e:?}"))?;
+
+    SetupConnectionHandler::setup(&mut receiver, &mut sender, address)
+        .await
+        .map_err(|e| format!("failed to setup JDS connection: {e}"))?;
+    Ok((sender, receiver))
+}
+
+fn start_jds_connection_supervisor(
+    address: SocketAddr,
+    authority_public_key: [u8; 32],
+    initial_send_to_jds: Sender<JdsEitherFrame>,
+    initial_recv_from_jds: Receiver<JdsEitherFrame>,
+) -> (
+    Sender<JdsEitherFrame>,
+    Receiver<JdsEitherFrame>,
+    AbortOnDrop,
+    watch::Receiver<bool>,
+) {
+    let (stable_send_to_jds, mut stable_recv_from_roles) = channel::<JdsEitherFrame>(10);
+    let (stable_send_to_roles, stable_recv_from_jds) = channel::<JdsEitherFrame>(10);
+    let current_jds_sender = Arc::new(TokioMutex::new(Some(initial_send_to_jds)));
+    let (jds_connection_state_sender, jds_connection_state) = watch::channel(true);
+
+    let outbound_current_sender = current_jds_sender.clone();
+    let outbound_connection_state_sender = jds_connection_state_sender.clone();
+    let outbound_handle = tokio::spawn(async move {
+        while let Some(msg) = stable_recv_from_roles.recv().await {
+            let Some(sender) = outbound_current_sender.lock().await.clone() else {
+                warn!("Dropping JD message while JDS is disconnected");
+                continue;
+            };
+
+            if sender.send(msg).await.is_err() {
+                *outbound_current_sender.lock().await = None;
+                outbound_connection_state_sender.send_replace(false);
+                warn!("Dropping JD message after failed send to JDS");
+            }
+        }
+    });
+
+    let supervisor_current_sender = current_jds_sender.clone();
+    let supervisor_connection_state_sender = jds_connection_state_sender.clone();
+    let supervisor_handle = tokio::spawn(async move {
+        let mut recv_from_jds = initial_recv_from_jds;
+        loop {
+            while let Some(msg) = recv_from_jds.recv().await {
+                if stable_send_to_roles.send(msg).await.is_err() {
+                    error!("Job declarator is not available for JDS messages");
+                    return;
+                }
+            }
+
+            *supervisor_current_sender.lock().await = None;
+            supervisor_connection_state_sender.send_replace(false);
+            warn!("JDS connection lost; reconnecting");
+
+            let (new_send_to_jds, new_recv_from_jds) = loop {
+                match connect_jds(address, authority_public_key).await {
+                    Ok(connection) => break connection,
+                    Err(e) => {
+                        error!("JDS supervisor failed to reconnect: {e}");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
+            };
+
+            info!("JD CONNECTED");
+            *supervisor_current_sender.lock().await = Some(new_send_to_jds);
+            supervisor_connection_state_sender.send_replace(true);
+            recv_from_jds = new_recv_from_jds;
+        }
+    });
+
+    let mut abortable: AbortOnDrop = supervisor_handle.into();
+    abortable.add_task(outbound_handle);
+    (
+        stable_send_to_jds,
+        stable_recv_from_jds,
+        abortable,
+        jds_connection_state,
+    )
+}
+
+async fn resolve_submit_while_pool_is_down(
+    msg: PoolExtMessages<'static>,
+    send_to_roles: &Sender<PoolExtMessages<'static>>,
+) {
+    let PoolExtMessages::Mining(Mining::SubmitSharesExtended(submit)) = msg else {
+        warn!("Dropping message while pool is disconnected");
+        return;
+    };
+
+    warn!(
+        "Pool disconnected; accepting SubmitSharesExtended locally for Channel Id {} sequence {}",
+        submit.channel_id, submit.sequence_number
+    );
+    let success = Mining::SubmitSharesSuccess(SubmitSharesSuccess {
+        channel_id: submit.channel_id,
+        last_sequence_number: submit.sequence_number,
+        new_submits_accepted_count: 1,
+        new_shares_sum: 1,
+    });
+    if send_to_roles
+        .send(PoolExtMessages::Mining(success))
+        .await
+        .is_err()
+    {
+        error!("Unable to resolve submit while pool is disconnected");
+        ProxyState::update_inconsistency(Some(1));
+    }
+}
+
+fn pool_reconnect_trigger_message() -> PoolExtMessages<'static> {
+    PoolExtMessages::Mining(Mining::Reconnect(roles_logic_sv2::mining_sv2::Reconnect {
+        new_host: String::new()
+            .try_into()
+            .expect("empty reconnect host must fit in Str0255"),
+        new_port: 0,
+    }))
 }
 
 async fn monitor(
@@ -378,7 +663,7 @@ async fn monitor(
             }
 
             // Check if the proxy state is down, and if so, reinitialize the proxy.
-            let is_proxy_down = ProxyState::is_proxy_down();
+            let is_proxy_down = ProxyState::is_miner_session_restart_required();
             if is_proxy_down.0 {
                 error!(
                     "Status: {:?}. Reinitializing proxy...",
@@ -391,7 +676,7 @@ async fn monitor(
         }
 
         // Check if the proxy state is down, and if so, reinitialize the proxy.
-        let is_proxy_down = ProxyState::is_proxy_down();
+        let is_proxy_down = ProxyState::is_miner_session_restart_required();
         if is_proxy_down.0 {
             error!(
                 "{:?} is DOWN. Reinitializing proxy...",
