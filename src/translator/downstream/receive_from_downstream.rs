@@ -5,7 +5,7 @@ use std::sync::Arc;
 use sv1_api::json_rpc;
 use tokio::sync::mpsc;
 use tokio::task;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 const DOWNSTREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(360);
 
@@ -64,8 +64,35 @@ pub async fn start_receive_downstream(
                         break;
                     }
                 };
+                let incoming_len = incoming.len();
                 let incoming: Result<json_rpc::Message, _> = serde_json::from_str(&incoming);
                 if let Ok(incoming) = incoming {
+                    match &incoming {
+                        json_rpc::Message::StandardRequest(request) => {
+                            info!(
+                                "dmnd-client-debug downstream_recv_message connection_id={} method={} id={:?} raw_len={}",
+                                connection_id,
+                                request.method,
+                                request.id,
+                                incoming_len
+                            );
+                        }
+                        json_rpc::Message::OkResponse(response)
+                        | json_rpc::Message::ErrorResponse(response) => {
+                            info!(
+                                "dmnd-client-debug downstream_recv_response connection_id={} id={:?} raw_len={}",
+                                connection_id,
+                                response.id,
+                                incoming_len
+                            );
+                        }
+                        _ => {
+                            info!(
+                                "dmnd-client-debug downstream_recv_other connection_id={} raw_len={}",
+                                connection_id, incoming_len
+                            );
+                        }
+                    }
                     if let Err(error) = process_incoming_message(downstream.clone(), incoming).await
                     {
                         error!("Failed to handle incoming sv1 msg: {:?}", error);
