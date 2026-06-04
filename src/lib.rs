@@ -35,6 +35,7 @@ pub mod jd_client;
 mod minin_pool_connection;
 mod monitor;
 mod prioritized_transactions;
+mod proxy_protocol;
 mod proxy_state;
 mod router;
 mod share_accounter;

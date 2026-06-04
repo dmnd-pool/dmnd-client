@@ -804,26 +804,44 @@ and make that test pass."
             .unwrap_or("off".to_string());
 
         let sv1_log = args.sv1_loglevel
-            || config.sv1_log.unwrap_or(false)
-            || std::env::var("SV1_LOGLEVEL").is_ok();
+            || config
+                .sv1_log
+                .or_else(|| env_bool("SV1_LOGLEVEL"))
+                .unwrap_or(false);
 
         let share_log = args.share_log
-            || config.share_log.unwrap_or(false)
-            || std::env::var("SHARE_LOG").is_ok();
+            || config
+                .share_log
+                .or_else(|| env_bool("SHARE_LOG"))
+                .unwrap_or(false);
 
-        let file_logging = args.file_logging || std::env::var("FILE_LOGGING").is_ok();
+        let file_logging = args.file_logging || env_bool("FILE_LOGGING").unwrap_or(false);
 
-        let staging =
-            args.staging || config.staging.unwrap_or(false) || std::env::var("STAGING").is_ok();
-        let testnet3 =
-            args.testnet3 || config.testnet3.unwrap_or(false) || std::env::var("TESTNET3").is_ok();
-        let local = args.local || config.local.unwrap_or(false) || std::env::var("LOCAL").is_ok();
-        let monitor =
-            args.monitor || config.monitor.unwrap_or(false) || std::env::var("MONITOR").is_ok();
+        let staging = args.staging
+            || config
+                .staging
+                .or_else(|| env_bool("STAGING"))
+                .unwrap_or(false);
+        let testnet3 = args.testnet3
+            || config
+                .testnet3
+                .or_else(|| env_bool("TESTNET3"))
+                .unwrap_or(false);
+        let local = args.local || config.local.or_else(|| env_bool("LOCAL")).unwrap_or(false);
+        let monitor = args.monitor
+            || config
+                .monitor
+                .or_else(|| env_bool("MONITOR"))
+                .unwrap_or(false);
 
-        let auto_update = args.auto_update
-            || config.auto_update.unwrap_or(true)
-            || std::env::var("AUTO_UPDATE").is_ok();
+        let auto_update = if args.auto_update {
+            true
+        } else {
+            config
+                .auto_update
+                .or_else(|| env_bool("AUTO_UPDATE"))
+                .unwrap_or(true)
+        };
 
         Self::new(
             token,
@@ -919,6 +937,15 @@ fn configured_pool_addresses(
     }
 
     Vec::new()
+}
+
+fn env_bool(name: &str) -> Option<bool> {
+    let value = std::env::var(name).ok()?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn split_pool_addresses(values: Vec<String>) -> Vec<String> {

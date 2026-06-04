@@ -116,6 +116,8 @@ mod shared {
     }
 }
 
+#[path = "../src/proxy_protocol.rs"]
+mod proxy_protocol;
 #[path = "../src/ingress/sv1_ingress.rs"]
 mod sv1_ingress;
 

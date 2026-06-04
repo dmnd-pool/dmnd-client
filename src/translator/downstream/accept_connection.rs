@@ -146,7 +146,7 @@ pub async fn start_accept_connection(
                                 opened.extranonce,
                                 opened.last_notify,
                                 opened.extranonce2_len as usize,
-                                host,
+                                host.clone(),
                                 upstream_difficulty_config,
                                 send,
                                 recv,
