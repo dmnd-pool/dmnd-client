@@ -79,6 +79,33 @@ Example:
 
     TOKEN=abc123 cargo run -- -l info -d 200T --tp-address="127.0.0.1:8336"
 
+#### 4.2 Endpoint configuration
+
+By default, the client discovers pool addresses from the dashboard API for the selected environment
+and sends worker telemetry to the same API. Operators can override those endpoints when running the
+client behind a private gateway, proxy, or custom deployment.
+
+The dashboard API base URL can be configured with `--api-base-url`, `api_base_url`, `API_BASE_URL`,
+or `DMND_CLIENT_API_BASE_URL`. The value should be the base URL only; the client appends
+`/api/pool/urls` for pool discovery and `/api/worker/entry` for worker telemetry.
+
+Direct pool addresses can be configured with one or more `--pool-address` values,
+`pool_addresses`, `POOL_ADDRESSES`, `POOL_ADDRESS`, or `DMND_CLIENT_POOL_ADDRESSES`. When direct
+pool addresses are configured, the client skips the dashboard pool-discovery request and connects
+to those addresses directly.
+
+Example using `config.toml`:
+
+    api_base_url = "https://api.example.com"
+    pool_addresses = ["pool-a.example.com:20000", "pool-b.example.com:20000"]
+
+Example using environment variables:
+
+    TOKEN=<DMND-token> \
+    API_BASE_URL=https://api.example.com \
+    POOL_ADDRESSES=pool-a.example.com:20000,pool-b.example.com:20000 \
+    cargo run -- -l info -d <avg-hashrate>T --tp-address="127.0.0.1:8336"
+
 # 5. Connect Your Miner
 -----------------------------
 

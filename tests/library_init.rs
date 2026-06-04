@@ -124,6 +124,8 @@ async fn library_init_sv2_setup_connection() {
     let config = dmnd_client::Configuration::new(
         Some("test_token".to_string()),
         Some(tp_sniffer_addr.to_string()),
+        None,
+        vec![mock_pool_mining_addr.to_string()],
         120_000,
         0,
         100_000_000_000_000.0,

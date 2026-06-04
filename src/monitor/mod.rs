@@ -6,10 +6,7 @@ use std::{
 };
 use tracing::{debug, error, info, warn};
 
-use crate::{
-    config::Configuration, monitor::worker_summary::WorkerSummary, shared::error::Error, LOCAL_URL,
-    PRODUCTION_URL, STAGING_URL, TESTNET3_URL,
-};
+use crate::{config::Configuration, monitor::worker_summary::WorkerSummary, shared::error::Error};
 
 pub mod shares;
 pub mod worker_summary;
@@ -82,13 +79,7 @@ fn shared_client() -> reqwest::Client {
 fn worker_summary_server_endpoint() -> String {
     // Send live worker telemetry through the dashboard's primary worker-entry
     // ingestion path.
-    match Configuration::environment().as_str() {
-        "staging" => format!("{STAGING_URL}/api/worker/entry"),
-        "testnet3" => format!("{TESTNET3_URL}/api/worker/entry"),
-        "local" => format!("{LOCAL_URL}/api/worker/entry"),
-        "production" => format!("{PRODUCTION_URL}/api/worker/entry"),
-        _ => unreachable!(),
-    }
+    format!("{}/api/worker/entry", Configuration::dashboard_base_url())
 }
 
 impl MonitorAPI {
