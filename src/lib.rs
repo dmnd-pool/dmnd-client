@@ -35,6 +35,7 @@ pub mod jd_client;
 mod minin_pool_connection;
 mod monitor;
 mod prioritized_transactions;
+mod proxy_protocol;
 mod proxy_state;
 mod router;
 mod share_accounter;
@@ -56,7 +57,6 @@ const MAIN_AUTH_PUB_KEY: &str = "9c44K6QVizyPWb9xfeqhckFRosxWwB3EfytGa4CfTdD526q
 const TEST_AUTH_PUB_KEY: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
 pub const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:32767";
 const STAGING_URL: &str = "https://staging-user-dashboard-server.dmnd.work";
-const LOCAL_URL: &str = "http://localhost:8787";
 const TESTNET3_URL: &str = "https://testnet3-user-dashboard-server.dmnd.work";
 const PRODUCTION_URL: &str = "https://production-user-dashboard-server.dmnd.work";
 

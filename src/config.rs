@@ -47,6 +47,10 @@ struct Args {
     token: Option<String>,
     #[clap(long)]
     tp_address: Option<String>,
+    #[clap(long = "api-base-url")]
+    api_base_url: Option<String>,
+    #[clap(long = "pool-address", value_delimiter = ',')]
+    pool_addresses: Vec<String>,
     #[clap(long)]
     listening_addr: Option<String>,
     #[clap(long)]
@@ -87,6 +91,8 @@ struct Args {
 struct ConfigFile {
     token: Option<String>,
     tp_address: Option<String>,
+    api_base_url: Option<String>,
+    pool_addresses: Option<Vec<String>>,
     interval: Option<u64>,
     delay: Option<u64>,
     downstream_hashrate: Option<String>,
@@ -119,6 +125,8 @@ impl ConfigFile {
         ConfigFile {
             token: None,
             tp_address: None,
+            api_base_url: None,
+            pool_addresses: None,
             interval: None,
             delay: None,
             downstream_hashrate: None,
@@ -152,6 +160,8 @@ impl ConfigFile {
 pub struct Configuration {
     token: Option<String>,
     tp_address: Option<String>,
+    api_base_url: Option<String>,
+    pool_addresses: Vec<String>,
     interval: u64,
     delay: u64,
     downstream_hashrate: f32,
@@ -211,6 +221,8 @@ and make that test pass."
     pub fn new(
         token: Option<String>,
         tp_address: Option<String>,
+        api_base_url: Option<String>,
+        pool_addresses: Vec<String>,
         interval: u64,
         delay: u64,
         downstream_hashrate: f32,
@@ -255,6 +267,8 @@ and make that test pass."
         Configuration {
             token,
             tp_address,
+            api_base_url,
+            pool_addresses,
             interval,
             delay,
             downstream_hashrate,
@@ -338,6 +352,8 @@ and make that test pass."
         Self::new(
             Some("test_token".to_string()),
             None,
+            None,
+            Vec::new(),
             120_000,
             0,
             DEFAULT_SV1_HASHPOWER,
@@ -388,6 +404,24 @@ and make that test pass."
 
     pub fn tp_address() -> Option<String> {
         Self::cfg().tp_address.clone()
+    }
+
+    pub fn api_base_url() -> Option<String> {
+        Self::cfg().api_base_url.clone()
+    }
+
+    pub fn dashboard_base_url() -> String {
+        if let Some(url) = Self::api_base_url() {
+            return url;
+        }
+
+        match Self::environment().as_str() {
+            "staging" => STAGING_URL.to_string(),
+            "testnet3" => TESTNET3_URL.to_string(),
+            "production" => PRODUCTION_URL.to_string(),
+            "local" => "http://localhost:8787".to_string(),
+            _ => unreachable!(),
+        }
     }
 
     pub async fn pool_address() -> Option<Vec<SocketAddr>> {
@@ -576,7 +610,7 @@ and make that test pass."
             .token
             .or(config.token)
             .or_else(|| std::env::var("TOKEN").ok());
-        println!("User Token: {token:?}");
+        println!("User token configured: {}", token.is_some());
 
         let signature = match args.signature {
             Some(s) => {
@@ -598,6 +632,23 @@ and make that test pass."
             .tp_address
             .or(config.tp_address)
             .or_else(|| std::env::var("TP_ADDRESS").ok());
+
+        let api_base_url = args
+            .api_base_url
+            .or(config.api_base_url)
+            .or_else(|| std::env::var("API_BASE_URL").ok())
+            .or_else(|| std::env::var("DMND_CLIENT_API_BASE_URL").ok())
+            .and_then(normalize_optional_url);
+
+        let pool_addresses = configured_pool_addresses(
+            args.pool_addresses,
+            config.pool_addresses,
+            [
+                "POOL_ADDRESSES",
+                "POOL_ADDRESS",
+                "DMND_CLIENT_POOL_ADDRESSES",
+            ],
+        );
 
         let miner_name = args
             .miner_name
@@ -753,30 +804,50 @@ and make that test pass."
             .unwrap_or("off".to_string());
 
         let sv1_log = args.sv1_loglevel
-            || config.sv1_log.unwrap_or(false)
-            || std::env::var("SV1_LOGLEVEL").is_ok();
+            || config
+                .sv1_log
+                .or_else(|| env_bool("SV1_LOGLEVEL"))
+                .unwrap_or(false);
 
         let share_log = args.share_log
-            || config.share_log.unwrap_or(false)
-            || std::env::var("SHARE_LOG").is_ok();
+            || config
+                .share_log
+                .or_else(|| env_bool("SHARE_LOG"))
+                .unwrap_or(false);
 
-        let file_logging = args.file_logging || std::env::var("FILE_LOGGING").is_ok();
+        let file_logging = args.file_logging || env_bool("FILE_LOGGING").unwrap_or(false);
 
-        let staging =
-            args.staging || config.staging.unwrap_or(false) || std::env::var("STAGING").is_ok();
-        let testnet3 =
-            args.testnet3 || config.testnet3.unwrap_or(false) || std::env::var("TESTNET3").is_ok();
-        let local = args.local || config.local.unwrap_or(false) || std::env::var("LOCAL").is_ok();
-        let monitor =
-            args.monitor || config.monitor.unwrap_or(false) || std::env::var("MONITOR").is_ok();
+        let staging = args.staging
+            || config
+                .staging
+                .or_else(|| env_bool("STAGING"))
+                .unwrap_or(false);
+        let testnet3 = args.testnet3
+            || config
+                .testnet3
+                .or_else(|| env_bool("TESTNET3"))
+                .unwrap_or(false);
+        let local = args.local || config.local.or_else(|| env_bool("LOCAL")).unwrap_or(false);
+        let monitor = args.monitor
+            || config
+                .monitor
+                .or_else(|| env_bool("MONITOR"))
+                .unwrap_or(false);
 
-        let auto_update = args.auto_update
-            || config.auto_update.unwrap_or(true)
-            || std::env::var("AUTO_UPDATE").is_ok();
+        let auto_update = if args.auto_update {
+            true
+        } else {
+            config
+                .auto_update
+                .or_else(|| env_bool("AUTO_UPDATE"))
+                .unwrap_or(true)
+        };
 
         Self::new(
             token,
             tp_address,
+            api_base_url,
+            pool_addresses,
             interval,
             delay,
             downstream_hashrate,
@@ -840,6 +911,65 @@ fn parse_hashrate(hashrate_str: &str) -> Result<f32, String> {
     Ok(hashrate)
 }
 
+fn configured_pool_addresses(
+    cli_addresses: Vec<String>,
+    config_addresses: Option<Vec<String>>,
+    env_names: [&str; 3],
+) -> Vec<String> {
+    if !cli_addresses.is_empty() {
+        return split_pool_addresses(cli_addresses);
+    }
+
+    if let Some(config_addresses) = config_addresses {
+        let addresses = split_pool_addresses(config_addresses);
+        if !addresses.is_empty() {
+            return addresses;
+        }
+    }
+
+    for env_name in env_names {
+        if let Ok(value) = std::env::var(env_name) {
+            let addresses = split_pool_addresses(vec![value]);
+            if !addresses.is_empty() {
+                return addresses;
+            }
+        }
+    }
+
+    Vec::new()
+}
+
+fn env_bool(name: &str) -> Option<bool> {
+    let value = std::env::var(name).ok()?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn split_pool_addresses(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split(',')
+                .map(|address| address.trim().to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|address| !address.is_empty())
+        .collect()
+}
+
+fn normalize_optional_url(url: String) -> Option<String> {
+    let url = url.trim().trim_end_matches('/').to_string();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url)
+    }
+}
+
 fn parse_address(addr: String) -> Option<SocketAddr> {
     match addr.to_socket_addrs() {
         Ok(mut addrs) => match addrs.next() {
@@ -858,19 +988,26 @@ fn parse_address(addr: String) -> Option<SocketAddr> {
 
 /// Fetches pool URLs from the server based on the environment.
 async fn fetch_pool_urls() -> Result<Vec<SocketAddr>, Error> {
+    if !Configuration::cfg().pool_addresses.is_empty() {
+        info!(
+            "Using {} configured pool address(es)",
+            Configuration::cfg().pool_addresses.len()
+        );
+        let socket_addrs = Configuration::cfg()
+            .pool_addresses
+            .iter()
+            .filter_map(|address| parse_address(address.clone()))
+            .collect();
+        return Ok(socket_addrs);
+    }
+
     if Configuration::cfg().local {
         info!("Running in local mode, using hardcoded address 127.0.0.1:20000");
         return Ok(vec![
             parse_address("127.0.0.1:20000".to_string()).expect("Invalid local address")
         ]);
     };
-    let url = if Configuration::cfg().staging {
-        STAGING_URL
-    } else if Configuration::cfg().testnet3 {
-        TESTNET3_URL
-    } else {
-        PRODUCTION_URL
-    };
+    let url = Configuration::dashboard_base_url();
     let endpoint = format!("{url}/api/pool/urls");
     info!("Fetching pool URLs from: {}", endpoint);
     let token = Configuration::token().expect("TOKEN is not set");

@@ -20,6 +20,7 @@ use tokio::{
         mpsc::{channel, Receiver, Sender},
         OwnedSemaphorePermit, Semaphore,
     },
+    time,
 };
 use tokio_util::codec::{Framed, LinesCodec};
 use tracing::{debug, error, info, warn};
@@ -95,6 +96,10 @@ pub fn start_listen_for_downstream(downstreams: Sender<DownstreamConnection>) ->
             "Listening for downstream connections on {:?}",
             downstream_addr
         );
+        let proxy_protocol_mode =
+            crate::proxy_protocol::ProxyProtocolMode::from_env("DOWNSTREAM_PROXY_PROTOCOL")
+                .expect("Invalid DOWNSTREAM_PROXY_PROTOCOL value");
+        info!("Downstream PROXY protocol mode: {:?}", proxy_protocol_mode);
         loop {
             if let Some(slots) = connection_slots.as_ref() {
                 if slots.available_permits() == 0 {
@@ -125,7 +130,7 @@ pub fn start_listen_for_downstream(downstreams: Sender<DownstreamConnection>) ->
                 continue;
             }
 
-            let (stream, addr) = match downstream_listener.accept().await {
+            let (stream, peer_addr) = match downstream_listener.accept().await {
                 Ok(connection) => connection,
                 Err(e) => {
                     error!("Failed to accept downstream connection: {e}");
@@ -133,6 +138,31 @@ pub fn start_listen_for_downstream(downstreams: Sender<DownstreamConnection>) ->
                 }
             };
             let accepted_at = Instant::now();
+
+            let accepted_stream = match time::timeout(
+                Duration::from_secs(5),
+                crate::proxy_protocol::accept(stream, peer_addr, proxy_protocol_mode),
+            )
+            .await
+            {
+                Ok(Ok(accepted_stream)) => accepted_stream,
+                Ok(Err(err)) => {
+                    warn!("dropping downstream {peer_addr:#?}; invalid PROXY protocol header: {err}");
+                    continue;
+                }
+                Err(_) => {
+                    warn!("dropping downstream {peer_addr:#?}; timed out reading PROXY protocol header");
+                    continue;
+                }
+            };
+            let destination_addr = accepted_stream.destination_addr;
+            let stream = accepted_stream.stream;
+            let addr = accepted_stream.source_addr;
+            if accepted_stream.used_proxy_protocol {
+                info!(
+                    "Accepted PROXY protocol downstream peer={peer_addr:#?} source={addr:#?} destination={destination_addr:#?}"
+                );
+            }
 
             debug!("Accepted downstream connection from {:?}", addr);
             let connection_slot = match connection_slots.as_ref() {

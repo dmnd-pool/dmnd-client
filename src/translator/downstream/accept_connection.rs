@@ -17,7 +17,7 @@ use tokio::sync::{
     Semaphore,
 };
 use tokio::task;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn start_accept_connection(
@@ -63,9 +63,10 @@ pub async fn start_accept_connection(
                 base_initial_difficulty,
             );
 
+            info!("dmnd-client-debug accept_loop_waiting_for_bridge_ready");
             match Bridge::ready(&bridge).await {
                 Ok(_) => {
-                    debug!("Bridge is ready, proceeding with downstream opens");
+                    info!("dmnd-client-debug accept_loop_bridge_ready");
                 }
                 Err(_) => {
                     error!("Bridge not ready");
@@ -82,7 +83,13 @@ pub async fn start_accept_connection(
                 } = connection;
                 let initial_difficulty = base_initial_difficulty;
                 let expected_hash_rate = share_per_second * initial_difficulty * 2f32.powf(32.0);
-                debug!("Translator opening connection for ip {}", addr);
+                info!(
+                    "dmnd-client-debug accept_loop_received_downstream addr={} accepted_age_ms={} initial_difficulty={} expected_hash_rate={}",
+                    addr,
+                    accepted_at.elapsed().as_millis(),
+                    initial_difficulty,
+                    expected_hash_rate
+                );
                 record_stage(SessionTimingStage::AcceptQueueWait, accepted_at.elapsed());
                 let bridge_open_started_at = std::time::Instant::now();
                 let open_sv1_downstream =
@@ -100,9 +107,14 @@ pub async fn start_accept_connection(
 
                 match open_sv1_downstream {
                     Ok(opened) => {
-                        debug!(
-                            "Translator opening connection for ip {} with id {}",
-                            addr, opened.channel_id
+                        info!(
+                            "dmnd-client-debug accept_loop_opened_downstream addr={} channel_id={} extranonce_len={} extranonce2_len={} last_notify_present={} bridge_open_ms={}",
+                            addr,
+                            opened.channel_id,
+                            opened.extranonce.len(),
+                            opened.extranonce2_len,
+                            opened.last_notify.is_some(),
+                            bridge_open_started_at.elapsed().as_millis()
                         );
                         let tx_sv1_submit = tx_sv1_submit.clone();
                         let tx_mining_notify = tx_mining_notify.clone();
@@ -116,6 +128,10 @@ pub async fn start_accept_connection(
                             super::downstream::claim_upstream_token_update();
                         let host = addr.to_string();
                         task::spawn(async move {
+                            info!(
+                                "dmnd-client-debug downstream_init_task_start host={} channel_id={}",
+                                host, opened.channel_id
+                            );
                             let permit = match downstream_init_slots.acquire_owned().await {
                                 Ok(permit) => permit,
                                 Err(_) => {
@@ -125,6 +141,10 @@ pub async fn start_accept_connection(
                             };
                             let _permit = permit;
                             let downstream_init_started_at = std::time::Instant::now();
+                            info!(
+                                "dmnd-client-debug downstream_new_downstream_call host={} channel_id={}",
+                                host, opened.channel_id
+                            );
                             Downstream::new_downstream(
                                 opened.channel_id,
                                 tx_sv1_submit,
@@ -132,7 +152,7 @@ pub async fn start_accept_connection(
                                 opened.extranonce,
                                 opened.last_notify,
                                 opened.extranonce2_len as usize,
-                                host,
+                                host.clone(),
                                 upstream_difficulty_config,
                                 send,
                                 recv,
@@ -146,6 +166,12 @@ pub async fn start_accept_connection(
                                 accepted_at,
                             )
                             .await;
+                            info!(
+                                "dmnd-client-debug downstream_new_downstream_returned host={} channel_id={} downstream_init_ms={}",
+                                host,
+                                opened.channel_id,
+                                downstream_init_started_at.elapsed().as_millis()
+                            );
                             record_stage(
                                 SessionTimingStage::DownstreamInit,
                                 downstream_init_started_at.elapsed(),
@@ -157,7 +183,7 @@ pub async fn start_accept_connection(
                         });
                     }
                     Err(e) => {
-                        error!("{e:?}");
+                        error!("dmnd-client-debug accept_loop_open_downstream_failed error={e:?}");
                         ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
                         break;
                     }

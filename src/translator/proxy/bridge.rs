@@ -71,12 +71,25 @@ pub struct Bridge {
 
 impl Bridge {
     pub async fn ready(self_: &'_ Arc<Mutex<Self>>) -> Result<(), Error<'_>> {
+        let started_at = std::time::Instant::now();
+        let mut last_log_at = started_at;
         while self_
             .safe_lock(|b| b.last_notify.is_none())
             .map_err(|_| Error::BridgeMutexPoisoned)?
         {
-            tokio::task::yield_now().await;
+            if last_log_at.elapsed() >= std::time::Duration::from_secs(5) {
+                info!(
+                    "dmnd-client-debug bridge_waiting_for_first_notify elapsed_ms={}",
+                    started_at.elapsed().as_millis()
+                );
+                last_log_at = std::time::Instant::now();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+        info!(
+            "dmnd-client-debug bridge_ready elapsed_ms={}",
+            started_at.elapsed().as_millis()
+        );
         Ok(())
     }
 
@@ -119,13 +132,28 @@ impl Bridge {
         &mut self,
         hash_rate: f32,
     ) -> ProxyResult<'static, OpenSv1Downstream> {
+        info!(
+            "dmnd-client-debug open_sv1_downstream_start hash_rate={} last_notify_present={}",
+            hash_rate,
+            self.last_notify.is_some()
+        );
         match self.channel_factory.new_extended_channel(0, hash_rate, 0) {
             Ok(messages) => {
+                info!(
+                    "dmnd-client-debug open_sv1_downstream_channel_factory_messages count={}",
+                    messages.len()
+                );
                 let mut message = messages
                     .iter()
                     .filter(|m| matches!(m, Mining::OpenExtendedMiningChannelSuccess(_)));
                 if let Some(Mining::OpenExtendedMiningChannelSuccess(success)) = message.next() {
-                    debug!("New extended channel opened with id {}", success.channel_id);
+                    info!(
+                        "dmnd-client-debug open_sv1_downstream_success channel_id={} extranonce_len={} extranonce2_len={} last_notify_present={}",
+                        success.channel_id,
+                        success.extranonce_prefix.len(),
+                        success.extranonce_size,
+                        self.last_notify.is_some()
+                    );
                     let extranonce = success.extranonce_prefix.to_vec();
                     let extranonce2_len = success.extranonce_size;
                     Ok(OpenSv1Downstream {

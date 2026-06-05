@@ -173,6 +173,16 @@ impl Downstream {
         updates_upstream_token: bool,
         accepted_at: std::time::Instant,
     ) {
+        info!(
+            "dmnd-client-debug downstream_new_start connection_id={} host={} extranonce1_len={} extranonce2_len={} last_notify_present={} initial_difficulty={} hard_minimum_difficulty={:?}",
+            connection_id,
+            host,
+            extranonce1.len(),
+            extranonce2_len,
+            last_notify.is_some(),
+            initial_difficulty,
+            hard_minimum_difficulty
+        );
         assert!(last_notify.is_some());
 
         let (tx_outgoing, receiver_outgoing) = channel(crate::TRANSLATOR_BUFFER_SIZE);
@@ -254,6 +264,11 @@ impl Downstream {
         {
             error!("Failed to start receive downstream task: {e}");
             ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+        } else {
+            info!(
+                "dmnd-client-debug downstream_receive_task_started connection_id={} host={}",
+                connection_id, host
+            );
         };
 
         if let Err(e) = start_send_to_downstream(
@@ -267,6 +282,11 @@ impl Downstream {
         {
             error!("Failed to start send_to_downstream task {e}");
             ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+        } else {
+            info!(
+                "dmnd-client-debug downstream_send_task_started connection_id={} host={}",
+                connection_id, host
+            );
         };
 
         // Notify/bootstrap startup is not required before the miner can receive
@@ -306,6 +326,11 @@ impl Downstream {
         {
             error!("Failed to register bootstrap task for downstream {connection_id}: {e:?}");
             ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+        } else {
+            info!(
+                "dmnd-client-debug downstream_bootstrap_task_registered connection_id={}",
+                connection_id
+            );
         }
     }
 
@@ -351,6 +376,28 @@ impl Downstream {
         self_: Arc<Mutex<Self>>,
         message_sv1: json_rpc::Message,
     ) -> Result<(), super::super::error::Error<'static>> {
+        let connection_id = self_.safe_lock(|s| s.connection_id)?;
+        match &message_sv1 {
+            json_rpc::Message::StandardRequest(request) => {
+                info!(
+                    "dmnd-client-debug handle_incoming_sv1_start connection_id={} method={} id={:?}",
+                    connection_id, request.method, request.id
+                );
+            }
+            json_rpc::Message::Notification(notification) => {
+                info!(
+                    "dmnd-client-debug handle_incoming_sv1_start connection_id={} notification={}",
+                    connection_id, notification.method
+                );
+            }
+            json_rpc::Message::OkResponse(response)
+            | json_rpc::Message::ErrorResponse(response) => {
+                info!(
+                    "dmnd-client-debug handle_incoming_sv1_start connection_id={} response_id={:?}",
+                    connection_id, response.id
+                );
+            }
+        }
         if let json_rpc::Message::StandardRequest(request) = &message_sv1 {
             if request.method == "mining.submit" {
                 let submit = match client_to_server::Submit::try_from(request.clone()) {
@@ -391,6 +438,10 @@ impl Downstream {
         match response {
             Ok(res) => {
                 if let Some(r) = res {
+                    info!(
+                        "dmnd-client-debug handle_incoming_sv1_response_ready connection_id={}",
+                        connection_id
+                    );
                     // If some response is received, indicates no messages translation is needed
                     // and response should be sent directly to the SV1 Downstream. Otherwise,
                     // message will be sent to the upstream Translator to be translated to SV2 and
@@ -399,6 +450,10 @@ impl Downstream {
                     Self::send_message_downstream(self_, r.into()).await;
                     Ok(())
                 } else {
+                    info!(
+                        "dmnd-client-debug handle_incoming_sv1_forwarded_upstream connection_id={}",
+                        connection_id
+                    );
                     // If None response is received, indicates this SV1 message received from the
                     // Downstream MD is passed to the `Translator` for translation into SV2
                     Ok(())
@@ -770,16 +825,48 @@ impl Downstream {
         self_: Arc<Mutex<Self>>,
         response: json_rpc::Message,
     ) {
-        let sender = match self_.safe_lock(|s| s.tx_outgoing.clone()) {
-            Ok(sender) => sender,
-            Err(e) => {
-                // Poisoned mutex
-                error!("{e}");
-                ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
-                return;
+        let response_summary = match &response {
+            json_rpc::Message::StandardRequest(request) => {
+                format!("request:{} id={:?}", request.method, request.id)
+            }
+            json_rpc::Message::Notification(notification) => {
+                format!("notification:{}", notification.method)
+            }
+            json_rpc::Message::OkResponse(response)
+            | json_rpc::Message::ErrorResponse(response) => {
+                format!(
+                    "response id={:?} error_present={}",
+                    response.id,
+                    response.error.is_some()
+                )
             }
         };
-        let _ = sender.send(response).await;
+        let (sender, connection_id) =
+            match self_.safe_lock(|s| (s.tx_outgoing.clone(), s.connection_id)) {
+                Ok(sender) => sender,
+                Err(e) => {
+                    // Poisoned mutex
+                    error!("{e}");
+                    ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+                    return;
+                }
+            };
+        info!(
+            "dmnd-client-debug send_message_downstream_enqueue connection_id={} message={}",
+            connection_id, response_summary
+        );
+        if sender.send(response).await.is_err() {
+            error!(
+                "dmnd-client-debug send_message_downstream_failed connection_id={}",
+                connection_id
+            );
+            ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+        } else {
+            info!(
+                "dmnd-client-debug send_message_downstream_enqueued connection_id={}",
+                connection_id
+            );
+        }
     }
 
     /// Send SV1 response message that is generated by `Downstream` (as opposed to being received
@@ -944,7 +1031,14 @@ impl IsServer<'static> for Downstream {
     /// The subscription messages are erroneous and just used to conform the SV1 protocol spec.
     /// Because no one unsubscribed in practice, they just unplug their machine.
     fn handle_subscribe(&self, request: &client_to_server::Subscribe) -> Vec<(String, String)> {
-        debug!("Down: Handling mining.subscribe: {:?}", &request);
+        info!(
+            "dmnd-client-debug handle_subscribe connection_id={} agent={} extranonce1_len={} extranonce2_len={} first_job_id={}",
+            self.connection_id,
+            request.agent_signature,
+            self.extranonce1.len(),
+            self.extranonce2_len,
+            self.first_job.job_id
+        );
         self.session_timing
             .borrow_mut()
             .record_subscribe_if_needed();
