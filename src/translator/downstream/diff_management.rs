@@ -95,6 +95,25 @@ impl Downstream {
         Ok(())
     }
 
+    pub fn request_upstream_rate_limit_retarget(
+        self_: &Arc<Mutex<Self>>,
+        multiplier: f32,
+    ) -> ProxyResult<'static, (f32, f32)> {
+        let upstream_difficulty_config = self_
+            .safe_lock(|d| d.upstream_difficulty_config.clone())
+            .map_err(|_| Error::TranslatorDiffConfigMutexPoisoned)?;
+        upstream_difficulty_config
+            .safe_lock(|upstream| {
+                let previous = upstream.channel_nominal_hashrate;
+                upstream.channel_nominal_hashrate = (upstream.channel_nominal_hashrate
+                    * multiplier)
+                    .max(crate::Configuration::downstream_hashrate());
+                upstream.request_immediate_update();
+                (previous, upstream.channel_nominal_hashrate)
+            })
+            .map_err(|_| Error::TranslatorDiffConfigMutexPoisoned)
+    }
+
     /// Checks the downstream's difficulty based on recent share submissions. And if is worth an update, update the
     /// downstream and the bridge.
     pub async fn try_update_difficulty_settings(
@@ -170,18 +189,18 @@ impl Downstream {
     /// The target T is calculated as T = pdiff / D, where pdiff is the maximum target
     pub fn difficulty_to_target(difficulty: f32) -> [u8; 32] {
         // Clamp difficulty to avoid division by zero or overflow
-        let difficulty = f32::max(difficulty, 0.001);
+        let difficulty = f32::max(difficulty, 0.000000001);
 
         let pdiff: [u8; 32] = [
             0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
             255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
         ];
         let pdiff = U256::from_big_endian(&pdiff);
-        let scale: u128 = 1_000_000;
+        let scale: u128 = 1_000_000_000;
 
-        // To handle the floating-point diff and `pdiff`, we scale it by 10^6 (1_000_000) to convert it to an integer
+        // To handle the floating-point diff and `pdiff`, we scale it by 10^9 (1_000_000_000) to convert it to an integer
         // For example, if difficulty is 0.001:
-        //   diff_int = 0.001 * 1e6 = 1_000
+        //   diff_int = 0.001 * 1e9 = 1_000_000
         let scaled_difficulty = difficulty * (scale as f32);
 
         if scaled_difficulty > (u128::MAX as f32) {
@@ -427,6 +446,16 @@ mod test {
         utils::{HexU32Be, MerkleNode, PrevHash},
     };
     use tokio::sync::mpsc::channel;
+
+    #[test]
+    fn difficulty_target_supports_benchmark_floor() {
+        let floor_target = Downstream::difficulty_to_target(0.000000001);
+        let clamped_target = Downstream::difficulty_to_target(0.0);
+        let higher_diff_target = Downstream::difficulty_to_target(1.0);
+
+        assert_eq!(floor_target, clamped_target);
+        assert!(floor_target > higher_diff_target);
+    }
 
     #[test]
     #[ignore] // TODO

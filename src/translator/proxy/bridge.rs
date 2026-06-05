@@ -404,8 +404,8 @@ impl Bridge {
                     Share::Standard(_) => unreachable!(),
                 };
 
-                if let Ok(is_rate_limited) = allow_submit_share() {
-                    if !is_rate_limited {
+                if let Ok(allowed_by_rate_limit) = allow_submit_share() {
+                    if !allowed_by_rate_limit {
                         warn!("Share will not be sent upstream: Exceeded 70 shares/min limit");
                         Self::resolve_submit(
                             result_tx,
@@ -414,7 +414,7 @@ impl Bridge {
                         return Ok(());
                     }
                 } else {
-                    error!("Failed to record share: Bridge mutex poisoned");
+                    error!("Failed to reserve upstream share rate-limit slot");
                     ProxyState::update_inconsistency(Some(1));
                     Self::resolve_submit(
                         result_tx,

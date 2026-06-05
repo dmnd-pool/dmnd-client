@@ -38,7 +38,10 @@ use server_to_client::Notify;
 use std::{
     cell::Cell,
     collections::{hash_map::Entry, HashMap, VecDeque},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 use sv1_api::{
     client_to_server, json_rpc, server_to_client,
@@ -46,6 +49,19 @@ use sv1_api::{
     IsServer,
 };
 use tracing::{debug, error, info, warn};
+
+static UPSTREAM_TOKEN_UPDATE_CLAIMED: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn claim_upstream_token_update() -> bool {
+    UPSTREAM_TOKEN_UPDATE_CLAIMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
+#[cfg(test)]
+fn reset_upstream_token_update_claim_for_tests() {
+    UPSTREAM_TOKEN_UPDATE_CLAIMED.store(false, Ordering::Release);
+}
 
 #[derive(Debug, Clone)]
 pub struct DownstreamDifficultyConfig {
@@ -127,6 +143,7 @@ pub struct Downstream {
     pub user_agent: std::cell::RefCell<String>, // RefCell is used here because `handle_subscribe` and `handle_authorize` take &self not &mut self and we need to mutate user_agent
     pub token: Arc<Mutex<String>>,
     tx_update_token: Sender<String>,
+    updates_upstream_token: bool,
     pub session_timing: std::cell::RefCell<DownstreamSessionTiming>,
     submit_counts_for_diff: Cell<bool>,
     channel_hashrate_registered: Cell<bool>,
@@ -152,6 +169,8 @@ impl Downstream {
         hard_minimum_difficulty: Option<f32>,
         stats_sender: StatsSender,
         tx_update_token: Sender<String>,
+        token: Arc<Mutex<String>>,
+        updates_upstream_token: bool,
         accepted_at: std::time::Instant,
     ) {
         info!(
@@ -209,10 +228,6 @@ impl Downstream {
             hard_minimum_difficulty,
         };
 
-        let token = Arc::new(Mutex::new(
-            Configuration::token().expect("Token is not set"),
-        ));
-
         let downstream = Arc::new(Mutex::new(Downstream {
             connection_id,
             authorized_names: vec![],
@@ -232,6 +247,7 @@ impl Downstream {
             user_agent: std::cell::RefCell::new(String::new()),
             token,
             tx_update_token,
+            updates_upstream_token,
             session_timing: std::cell::RefCell::new(DownstreamSessionTiming::new(accepted_at)),
             submit_counts_for_diff: Cell::new(false),
             channel_hashrate_registered: Cell::new(false),
@@ -942,6 +958,7 @@ impl Downstream {
             user_agent: std::cell::RefCell::new(String::new()),
             token,
             tx_update_token,
+            updates_upstream_token: true,
             session_timing: std::cell::RefCell::new(DownstreamSessionTiming::new(
                 std::time::Instant::now(),
             )),
@@ -1042,23 +1059,30 @@ impl IsServer<'static> for Downstream {
 
     fn handle_authorize(&self, request: &client_to_server::Authorize) -> bool {
         if self.authorized_names.is_empty() {
-            let new_token = request.password.clone();
-            if !new_token.is_empty() {
-                if let Err(e) = self.token.safe_lock(|t| *t = new_token.clone()) {
-                    error!("Failed to update token: {:?}", e);
-                    ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
-                }
-                let tx_update_token = self.tx_update_token.clone();
-                // TODO not sure if we should await this task or not
-                tokio::spawn(async move {
-                    if tx_update_token.send(new_token).await.is_err() {
-                        error!("Failed to send token update to upstream");
-                        ProxyState::update_upstream_state(UpstreamType::TranslatorUpstream);
+            if self.updates_upstream_token {
+                let new_token = request.password.clone();
+                if !new_token.is_empty() {
+                    if let Err(e) = self.token.safe_lock(|t| *t = new_token.clone()) {
+                        error!("Failed to update token: {:?}", e);
+                        ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
                     }
-                });
-            } else {
-                error!("Downstream is expected to carry a token");
-                return false;
+                    let tx_update_token = self.tx_update_token.clone();
+                    // TODO not sure if we should await this task or not
+                    tokio::spawn(async move {
+                        if tx_update_token.send(new_token).await.is_err() {
+                            error!("Failed to send token update to upstream");
+                            ProxyState::update_upstream_state(UpstreamType::TranslatorUpstream);
+                        }
+                    });
+                } else {
+                    error!("Downstream is expected to carry a token");
+                    return false;
+                }
+            } else if !request.password.is_empty() {
+                debug!(
+                    "Ignoring mining.authorize password from downstream {} because only the first connected downstream can update the upstream token",
+                    self.connection_id
+                );
             }
 
             let token = self.token.safe_lock(|t| t.clone()).unwrap_or_else(|e| {
@@ -1388,6 +1412,137 @@ mod tests {
             .unwrap();
 
         (downstream, rx_outgoing, stats_sender)
+    }
+
+    async fn token_update_test_downstream(
+        updates_upstream_token: bool,
+        shared_token: Arc<Mutex<String>>,
+    ) -> (Arc<Mutex<Downstream>>, Receiver<String>) {
+        let mut current_difficulties = VecDeque::new();
+        current_difficulties.push_back(1.0);
+        let difficulty_mgmt = DownstreamDifficultyConfig {
+            estimated_downstream_hash_rate: 1.0,
+            submits: VecDeque::new(),
+            pid_controller: Pid::new(*crate::SHARE_PER_MIN, 10.0),
+            current_difficulties,
+            initial_difficulty: 1.0,
+            hard_minimum_difficulty: None,
+        };
+        let (upstream_config, _rx) =
+            UpstreamDifficultyConfig::new(crate::CHANNEL_DIFF_UPDTATE_INTERVAL, 0.0);
+        let (tx_sv1_submit, _rx_sv1_submit) = channel::<DownstreamMessages>(8);
+        let (tx_outgoing, _rx_outgoing) = channel(8);
+        let (tx_update_token, rx_update_token) = channel(8);
+        let stats_sender = StatsSender::new();
+        stats_sender.setup_stats_reliable(1).await.unwrap();
+
+        let downstream = Arc::new(Mutex::new(Downstream::new(
+            1,
+            vec![],
+            vec![],
+            None,
+            None,
+            tx_sv1_submit,
+            tx_outgoing,
+            4,
+            difficulty_mgmt,
+            Arc::new(Mutex::new(upstream_config)),
+            stats_sender,
+            first_job("42"),
+            tx_update_token,
+        )));
+        downstream
+            .safe_lock(|d| {
+                d.token = shared_token.clone();
+                d.share_monitor = SharesMonitor::new(d.connection_id, shared_token);
+                d.updates_upstream_token = updates_upstream_token;
+            })
+            .unwrap();
+
+        (downstream, rx_update_token)
+    }
+
+    #[tokio::test]
+    async fn first_downstream_authorize_password_updates_upstream_token() {
+        let shared_token = Arc::new(Mutex::new("configured-token".to_string()));
+        let (downstream, mut rx_update_token) =
+            token_update_test_downstream(true, shared_token.clone()).await;
+
+        let authorized = downstream
+            .safe_lock(|d| {
+                d.handle_authorize(&client_to_server::Authorize {
+                    id: 1,
+                    name: "worker-1".to_string(),
+                    password: "first-token".to_string(),
+                })
+            })
+            .unwrap();
+
+        assert!(authorized);
+        assert_eq!(
+            shared_token.safe_lock(|t| t.clone()).unwrap(),
+            "first-token"
+        );
+        let upstream_update = timeout(Duration::from_secs(1), rx_update_token.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(upstream_update, "first-token");
+    }
+
+    #[tokio::test]
+    async fn later_downstream_authorize_password_is_ignored_for_upstream_token() {
+        let shared_token = Arc::new(Mutex::new("first-token".to_string()));
+        let (downstream, mut rx_update_token) =
+            token_update_test_downstream(false, shared_token.clone()).await;
+
+        let authorized = downstream
+            .safe_lock(|d| {
+                d.handle_authorize(&client_to_server::Authorize {
+                    id: 2,
+                    name: "worker-2".to_string(),
+                    password: "ignored-token".to_string(),
+                })
+            })
+            .unwrap();
+
+        assert!(authorized);
+        assert_eq!(
+            shared_token.safe_lock(|t| t.clone()).unwrap(),
+            "first-token"
+        );
+        assert!(matches!(
+            rx_update_token.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn upstream_token_update_claim_is_global_and_atomic() {
+        reset_upstream_token_update_claim_for_tests();
+
+        let successful_claims = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..64 {
+            let successful_claims = successful_claims.clone();
+            handles.push(std::thread::spawn(move || {
+                if claim_upstream_token_update() {
+                    successful_claims.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(
+            successful_claims.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert!(!claim_upstream_token_update());
+
+        reset_upstream_token_update_claim_for_tests();
     }
 
     async fn assert_invalid_submit_is_rejected(
