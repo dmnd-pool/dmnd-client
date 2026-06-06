@@ -44,6 +44,7 @@ pub async fn start_accept_connection(
             let hard_minimum_difficulty =
                 crate::translator::downstream::diff_management::hard_minimum_difficulty_for_proxy_mode(
                     Configuration::local(),
+                    Configuration::downstream_min_difficulty(),
                 );
             let raw_initial_difficulty = initial_hash_rate / (share_per_second * 2f32.powf(32.0));
             let base_initial_difficulty =
