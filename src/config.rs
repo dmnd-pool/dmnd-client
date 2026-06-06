@@ -749,9 +749,7 @@ and make that test pass."
                     .ok()
                     .and_then(|s| parse_downstream_min_difficulty(&s).ok())
             })
-            .unwrap_or(
-                crate::translator::downstream::diff_management::NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY,
-            );
+            .unwrap_or(crate::translator::NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY);
         println!("Using downstream minimum difficulty: {downstream_min_difficulty}");
 
         let listening_addr = args.listening_addr.or(config.listening_addr).or_else(|| {
