@@ -29,6 +29,8 @@ struct Args {
     local: bool,
     #[clap(long = "d", short = 'd', value_parser = parse_hashrate)]
     downstream_hashrate: Option<f32>,
+    #[clap(long = "downstream-min-difficulty", value_parser = parse_downstream_min_difficulty)]
+    downstream_min_difficulty: Option<f32>,
     #[clap(long = "loglevel", short = 'l')]
     loglevel: Option<String>,
     #[clap(long = "nc", short = 'n')]
@@ -96,6 +98,7 @@ struct ConfigFile {
     interval: Option<u64>,
     delay: Option<u64>,
     downstream_hashrate: Option<String>,
+    downstream_min_difficulty: Option<f32>,
     loglevel: Option<String>,
     nc_loglevel: Option<String>,
     sv1_log: Option<bool>,
@@ -130,6 +133,7 @@ impl ConfigFile {
             interval: None,
             delay: None,
             downstream_hashrate: None,
+            downstream_min_difficulty: None,
             loglevel: None,
             nc_loglevel: None,
             sv1_log: None,
@@ -165,6 +169,7 @@ pub struct Configuration {
     interval: u64,
     delay: u64,
     downstream_hashrate: f32,
+    downstream_min_difficulty: f32,
     loglevel: String,
     nc_loglevel: String,
     sv1_log: bool,
@@ -226,6 +231,7 @@ and make that test pass."
         interval: u64,
         delay: u64,
         downstream_hashrate: f32,
+        downstream_min_difficulty: f32,
         loglevel: String,
         nc_loglevel: String,
         sv1_log: bool,
@@ -272,6 +278,7 @@ and make that test pass."
             interval,
             delay,
             downstream_hashrate,
+            downstream_min_difficulty,
             loglevel,
             nc_loglevel,
             sv1_log,
@@ -357,6 +364,7 @@ and make that test pass."
             120_000,
             0,
             DEFAULT_SV1_HASHPOWER,
+            crate::translator::downstream::diff_management::NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY,
             "info".to_string(),
             "off".to_string(),
             false,
@@ -448,6 +456,10 @@ and make that test pass."
 
     pub fn downstream_hashrate() -> f32 {
         Self::cfg().downstream_hashrate
+    }
+
+    pub fn downstream_min_difficulty() -> f32 {
+        Self::cfg().downstream_min_difficulty
     }
 
     pub fn downstream_listening_addr() -> Option<String> {
@@ -729,6 +741,19 @@ and make that test pass."
             );
         }
 
+        let downstream_min_difficulty = args
+            .downstream_min_difficulty
+            .or(config.downstream_min_difficulty)
+            .or_else(|| {
+                std::env::var("DOWNSTREAM_MIN_DIFFICULTY")
+                    .ok()
+                    .and_then(|s| parse_downstream_min_difficulty(&s).ok())
+            })
+            .unwrap_or(
+                crate::translator::downstream::diff_management::NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY,
+            );
+        println!("Using downstream minimum difficulty: {downstream_min_difficulty}");
+
         let listening_addr = args.listening_addr.or(config.listening_addr).or_else(|| {
             std::env::var("LISTENING_ADDR")
                 .ok()
@@ -851,6 +876,7 @@ and make that test pass."
             interval,
             delay,
             downstream_hashrate,
+            downstream_min_difficulty,
             loglevel,
             nc_loglevel,
             sv1_log,
@@ -909,6 +935,24 @@ fn parse_hashrate(hashrate_str: &str) -> Result<f32, String> {
     }
     info!("Parsed hashrate: {} h/s", hashrate);
     Ok(hashrate)
+}
+
+fn parse_downstream_min_difficulty(value: &str) -> Result<f32, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("Downstream minimum difficulty cannot be empty".to_string());
+    }
+
+    let difficulty: f32 = value.parse().map_err(|_| {
+        format!("Invalid downstream minimum difficulty '{value}'. Expected a non-negative number")
+    })?;
+    if !difficulty.is_finite() || difficulty < 0.0 {
+        return Err(format!(
+            "Invalid downstream minimum difficulty '{value}'. Expected a finite non-negative number"
+        ));
+    }
+
+    Ok(difficulty)
 }
 
 fn configured_pool_addresses(

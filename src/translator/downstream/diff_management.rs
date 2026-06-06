@@ -394,11 +394,14 @@ pub fn nearest_power_of_2(x: f32) -> f32 {
     2f32.powi(exponent)
 }
 
-pub fn hard_minimum_difficulty_for_proxy_mode(local_mode: bool) -> Option<f32> {
+pub fn hard_minimum_difficulty_for_proxy_mode(
+    local_mode: bool,
+    downstream_min_difficulty: f32,
+) -> Option<f32> {
     if local_mode {
         None
     } else {
-        Some(NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY)
+        Some(downstream_min_difficulty)
     }
 }
 
@@ -874,7 +877,7 @@ mod test {
     #[test]
     fn non_local_proxy_mode_floor_is_power_of_two() {
         assert_eq!(
-            hard_minimum_difficulty_for_proxy_mode(false),
+            hard_minimum_difficulty_for_proxy_mode(false, NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY),
             Some(NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY)
         );
         assert_eq!(
@@ -890,6 +893,18 @@ mod test {
                 Some(NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY)
             ),
             1_000_000.0
+        );
+    }
+
+    #[test]
+    fn non_local_proxy_mode_floor_can_be_disabled_explicitly() {
+        assert_eq!(
+            hard_minimum_difficulty_for_proxy_mode(false, 0.0),
+            Some(0.0)
+        );
+        assert_eq!(
+            quantize_downstream_difficulty(0.001, Some(0.0)),
+            0.000_976_562_5
         );
     }
 
