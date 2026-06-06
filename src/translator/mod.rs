@@ -1,4 +1,5 @@
 mod downstream;
+pub(crate) use downstream::diff_management::NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY;
 
 mod error;
 mod proxy;
