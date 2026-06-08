@@ -146,7 +146,6 @@ async fn library_init_sv2_setup_connection() {
         "3001".to_string(),
         false,
         false,
-        "DDxDD".to_string(),
         None,
         "http://127.0.0.1:8332".to_string(),
         "user".to_string(),

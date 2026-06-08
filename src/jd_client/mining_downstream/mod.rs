@@ -533,7 +533,7 @@ impl
                 "SOLO".as_bytes().to_vec(),
             )
             .inspect_err(|_| {
-                error!("Signature + extranonce lens exceed 32 bytes");
+                error!("Coinbase tag + extranonce lens exceed 32 bytes");
             })?;
 
             self.status.set_channel(channel_factory);

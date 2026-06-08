@@ -183,13 +183,7 @@ async fn start_internal() {
     let mut router = router::Router::new(pool_addresses, auth_pub_k, None, None);
     let epsilon = Duration::from_millis(30_000);
     let best_upstream = router.select_pool_connect().await;
-    initialize_proxy(
-        &mut router,
-        best_upstream,
-        epsilon,
-        Configuration::signature(),
-    )
-    .await;
+    initialize_proxy(&mut router, best_upstream, epsilon).await;
     info!("exiting");
     tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 }
@@ -198,7 +192,6 @@ async fn initialize_proxy(
     router: &mut Router,
     mut pool_addr: Option<std::net::SocketAddr>,
     epsilon: Duration,
-    signature: String,
 ) {
     let shutdown_signal = shutdown::handle_shutdown();
     loop {
@@ -231,23 +224,17 @@ async fn initialize_proxy(
         let sv1_ingress_abortable = ingress::sv1_ingress::start_listen_for_downstream(downs_sv1_tx);
 
         let (translator_up_tx, mut translator_up_rx) = channel(10);
-        let translator_abortable = match translator::start(
-            downs_sv1_rx,
-            translator_up_tx,
-            stats_sender.clone(),
-            signature.clone(),
-        )
-        .await
-        {
-            Ok(abortable) => abortable,
-            Err(e) => {
-                error!("Impossible to initialize translator: {e}");
-                // Impossible to start the proxy so we restart proxy
-                ProxyState::update_translator_state(TranslatorState::Down);
-                ProxyState::update_tp_state(TpState::Down);
-                return;
-            }
-        };
+        let translator_abortable =
+            match translator::start(downs_sv1_rx, translator_up_tx, stats_sender.clone()).await {
+                Ok(abortable) => abortable,
+                Err(e) => {
+                    error!("Impossible to initialize translator: {e}");
+                    // Impossible to start the proxy so we restart proxy
+                    ProxyState::update_translator_state(TranslatorState::Down);
+                    ProxyState::update_tp_state(TpState::Down);
+                    return;
+                }
+            };
 
         let (from_jdc_to_share_accounter_send, from_jdc_to_share_accounter_recv) = channel(10);
         let (from_share_accounter_to_jdc_send, from_share_accounter_to_jdc_recv) = channel(10);
