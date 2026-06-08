@@ -434,7 +434,8 @@ impl Downstream {
         // `handle_message` in `IsServer` trait + calls `handle_request`
         // TODO: Map err from V1Error to Error::V1Error
 
-        let response = self_.safe_lock(|s| s.handle_message(message_sv1.clone()))?;
+        let response =
+            self_.safe_lock(|s| s.handle_message(message_sv1.clone()).map_err(Box::new))?;
         match response {
             Ok(res) => {
                 if let Some(r) = res {
@@ -460,12 +461,12 @@ impl Downstream {
                 }
             }
             Err(e) => {
-                if matches!(e, sv1_api::error::Error::InvalidSubmission) {
+                if matches!(e.as_ref(), sv1_api::error::Error::InvalidSubmission) {
                     Self::reject_invalid_submit(self_, &message_sv1).await?;
                     return Ok(());
                 }
                 error!("{e}");
-                Err(Error::V1Protocol(Box::new(e)))
+                Err(Error::V1Protocol(e))
             }
         }
     }

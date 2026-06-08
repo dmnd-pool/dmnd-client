@@ -1,4 +1,4 @@
-mod downstream;
+pub(crate) mod downstream;
 
 mod error;
 mod proxy;
