@@ -40,6 +40,23 @@ lazy_static! {
     static ref SUBMIT_FAIL_COUNTER: AtomicU32 = AtomicU32::new(0);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UpstreamExtranonceLayout {
+    len: usize,
+    range0_len: usize,
+    range2_len: usize,
+}
+
+impl UpstreamExtranonceLayout {
+    fn from_extranonce(extranonce: &ExtendedExtranonce) -> Self {
+        Self {
+            len: extranonce.get_len(),
+            range0_len: extranonce.get_range0_len(),
+            range2_len: extranonce.get_range2_len(),
+        }
+    }
+}
+
 /// Bridge between the SV2 `Upstream` and SV1 `Downstream` responsible for the following messaging
 /// translation:
 /// 1. SV1 `mining.submit` -> SV2 `SubmitSharesExtended`
@@ -67,6 +84,8 @@ pub struct Bridge {
     future_jobs: Vec<NewExtendedMiningJob<'static>>,
     last_p_hash: Option<SetNewPrevHash<'static>>,
     target: Arc<Mutex<Vec<u8>>>,
+    upstream_channel_id: u32,
+    upstream_extranonce_layout: UpstreamExtranonceLayout,
 }
 
 impl Bridge {
@@ -103,10 +122,15 @@ impl Bridge {
         channel_id: u32,
     ) -> Result<Arc<Mutex<Self>>, Error<'static>> {
         info!("Creating new bridge for channel_id {}:", channel_id);
+        let upstream_extranonce_layout = UpstreamExtranonceLayout::from_extranonce(&extranonces);
         let ids = Arc::new(Mutex::new(GroupId::new()));
-        let upstream_target: [u8; 32] =  target.safe_lock(|t| {
-    t.clone().try_into().expect("Internal error: this operation can not fail because Vec<U8> can always be converted into [u8; 32]")
-}).map_err(|e| Error::TargetError(RolesLogicError::PoisonLock(e.to_string())))?;
+        let upstream_target: [u8; 32] = target
+            .safe_lock(|t| {
+                t.clone().try_into().expect(
+                    "Internal error: this operation can not fail because Vec<U8> can always be converted into [u8; 32]",
+                )
+            })
+            .map_err(|e| Error::TargetError(RolesLogicError::PoisonLock(e.to_string())))?;
         let upstream_target: Target = upstream_target.into();
         Ok(Arc::new(Mutex::new(Self {
             tx_sv2_submit_shares_ext,
@@ -124,7 +148,35 @@ impl Bridge {
             future_jobs: vec![],
             last_p_hash: None,
             target,
+            upstream_channel_id: channel_id,
+            upstream_extranonce_layout,
         })))
+    }
+
+    pub fn restore_upstream_channel(
+        &mut self,
+        extranonces: ExtendedExtranonce,
+        channel_id: u32,
+    ) -> ProxyResult<'static, ()> {
+        let restored_layout = UpstreamExtranonceLayout::from_extranonce(&extranonces);
+        if self.upstream_extranonce_layout != restored_layout {
+            return Err(Error::InvalidExtranonce(format!(
+                "restored upstream extranonce layout changed for channel {channel_id}: expected len/range0/range2 {}/{}/{} got {}/{}/{}",
+                self.upstream_extranonce_layout.len,
+                self.upstream_extranonce_layout.range0_len,
+                self.upstream_extranonce_layout.range2_len,
+                restored_layout.len,
+                restored_layout.range0_len,
+                restored_layout.range2_len,
+            )));
+        }
+
+        info!(
+            "Restored bridge upstream channel id from {} to {}",
+            self.upstream_channel_id, channel_id
+        );
+        self.upstream_channel_id = channel_id;
+        Ok(())
     }
 
     #[allow(clippy::result_large_err)]
@@ -296,8 +348,20 @@ impl Bridge {
                 &share_id, &channel_id, &job_id
             );
         }
-        let (tx_sv2_submit_shares_ext, target_mutex) = self_
-            .safe_lock(|s| (s.tx_sv2_submit_shares_ext.clone(), s.target.clone()))
+        let (
+            tx_sv2_submit_shares_ext,
+            target_mutex,
+            upstream_channel_id,
+            upstream_extranonce_prefix_len,
+        ) = self_
+            .safe_lock(|s| {
+                (
+                    s.tx_sv2_submit_shares_ext.clone(),
+                    s.target.clone(),
+                    s.upstream_channel_id,
+                    s.upstream_extranonce_layout.range0_len,
+                )
+            })
             .map_err(|_| Error::BridgeMutexPoisoned)?;
         let upstream_target: [u8; 32] =  target_mutex
             .safe_lock(|t| t.clone())
@@ -309,6 +373,13 @@ impl Bridge {
         dbg_target.reverse();
         debug!("Pool target: {:?}", dbg_target.as_hex());
         let mut upstream_target: Target = upstream_target.into();
+        debug!(
+            "Bridge validating SV1 submit before translation: downstream_channel_id={} sv1_job_id={} share_id={} current_upstream_channel_id={}",
+            channel_id,
+            job_id,
+            share_id,
+            upstream_channel_id,
+        );
         let translated_share = match self_
             .safe_lock(|s| {
                 let job_id = share.job_id.parse::<u32>().expect("Invalid job_id");
@@ -366,15 +437,50 @@ impl Bridge {
             }
         };
 
-        let res = self_
+        debug!(
+            "Bridge validating translated SubmitSharesExtended locally: channel_id={} job_id={} sequence_number={} nonce={} ntime={} upstream_channel_id={}",
+            translated_share.channel_id,
+            translated_share.job_id,
+            translated_share.sequence_number,
+            translated_share.nonce,
+            translated_share.ntime,
+            upstream_channel_id,
+        );
+        let share_extranonce_hex = translated_share.extranonce.to_vec().as_hex().to_string();
+        let (res, factory_extranonce_prefix) = self_
             .safe_lock(|s| {
                 // Ordering::Relaxed is safe here because we only need simple counter updates.
                 // No need for strict ordering since it just tracks failures.
                 SUBMIT_FAIL_COUNTER.store(0, Ordering::Relaxed);
-                s.channel_factory
-                    .on_submit_shares_extended(translated_share.clone())
+                let factory_extranonce_prefix = s
+                    .channel_factory
+                    .extranonce_from_downstream_extranonce(
+                        translated_share.extranonce.to_vec().try_into().expect(
+                            "Internal error: share extranonce bytes must fit in Extranonce",
+                        ),
+                    )
+                    .and_then(|full_extranonce| {
+                        full_extranonce
+                            .to_vec()
+                            .get(..upstream_extranonce_prefix_len)
+                            .map(|prefix| prefix.to_vec())
+                    });
+                let result = s
+                    .channel_factory
+                    .on_submit_shares_extended(translated_share.clone());
+                (result, factory_extranonce_prefix)
             })
             .map_err(|_| Error::BridgeMutexPoisoned)?;
+        let factory_extranonce_prefix_hex = factory_extranonce_prefix
+            .map(|prefix| prefix.as_hex().to_string())
+            .unwrap_or_else(|| "<missing>".to_string());
+        debug!(
+            "Bridge checked SubmitSharesExtended extranonce locally: channel_id={} job_id={} share_extranonce={} factory_extranonce_prefix={}",
+            translated_share.channel_id,
+            translated_share.job_id,
+            share_extranonce_hex,
+            factory_extranonce_prefix_hex,
+        );
 
         match res {
             Ok(OnNewShare::SendErrorDownstream(e)) => {
@@ -398,11 +504,21 @@ impl Bridge {
                         &share_id, &channel_id, &job_id
                     );
                 }
-                let upstream_share = match s {
+                let mut upstream_share = match s {
                     Share::Extended(share) => share,
                     // We are in an extended channel shares are extended
                     Share::Standard(_) => unreachable!(),
                 };
+                debug!(
+                    "Bridge forwarding accepted SubmitSharesExtended upstream: local_channel_id={} restored_upstream_channel_id={} job_id={} sequence_number={} share_extranonce={} factory_extranonce_prefix={}",
+                    upstream_share.channel_id,
+                    upstream_channel_id,
+                    upstream_share.job_id,
+                    upstream_share.sequence_number,
+                    upstream_share.extranonce.to_vec().as_hex(),
+                    factory_extranonce_prefix_hex,
+                );
+                upstream_share.channel_id = upstream_channel_id;
 
                 if let Ok(allowed_by_rate_limit) = allow_submit_share() {
                     if !allowed_by_rate_limit {
@@ -646,6 +762,12 @@ impl Bridge {
         // convert to non segwit jobs so we dont have to depend if miner's support segwit or not
         self_
             .safe_lock(|s| {
+                debug!(
+                    "Bridge registering NewExtendedMiningJob in local factory: channel_id={} job_id={} is_future={}",
+                    sv2_new_extended_mining_job.channel_id,
+                    sv2_new_extended_mining_job.job_id,
+                    sv2_new_extended_mining_job.is_future(),
+                );
                 s.channel_factory
                     .on_new_extended_mining_job(sv2_new_extended_mining_job.as_static().clone())
             })
@@ -895,6 +1017,48 @@ mod test {
             .channel_factory
             .on_submit_shares_extended(translated)
             .unwrap()
+    }
+
+    #[test]
+    fn restoring_upstream_channel_updates_bridge_without_reopening_downstreams() {
+        let extranonces = ExtendedExtranonce::new(0..16, 16..18, 18..32);
+        let bridge = test_utils::create_bridge(extranonces).unwrap();
+
+        bridge
+            .safe_lock(|bridge| {
+                let first_downstream = bridge.on_new_sv1_connection(1_000_000_000_000.0).unwrap();
+                assert_eq!(bridge.upstream_channel_id, 1);
+
+                bridge
+                    .restore_upstream_channel(ExtendedExtranonce::new(0..16, 16..18, 18..32), 42)
+                    .unwrap();
+
+                assert_eq!(bridge.upstream_channel_id, 42);
+                assert!(bridge
+                    .channel_factory
+                    .update_target_for_channel(first_downstream.channel_id, [255; 32].into())
+                    .is_some());
+
+                let second_downstream = bridge.on_new_sv1_connection(2_000_000_000_000.0).unwrap();
+                assert_ne!(first_downstream.channel_id, second_downstream.channel_id);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn restoring_upstream_channel_rejects_changed_extranonce_layout() {
+        let extranonces = ExtendedExtranonce::new(0..16, 16..18, 18..32);
+        let bridge = test_utils::create_bridge(extranonces).unwrap();
+
+        bridge
+            .safe_lock(|bridge| {
+                let err = bridge
+                    .restore_upstream_channel(ExtendedExtranonce::new(0..16, 16..19, 19..32), 42)
+                    .unwrap_err();
+                assert!(matches!(err, Error::InvalidExtranonce(_)));
+                assert_eq!(bridge.upstream_channel_id, 1);
+            })
+            .unwrap();
     }
 
     #[test]

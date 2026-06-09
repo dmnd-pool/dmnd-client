@@ -57,7 +57,6 @@ pub struct JobDeclarator {
     sender: TSender<StandardEitherFrame<PoolMessages<'static>>>,
     allocated_tokens: Vec<AllocateMiningJobTokenSuccess<'static>>,
     req_ids: Id,
-    min_extranonce_size: u16,
     // (Sent DeclareMiningJob, is future, template id, merkle path)
     last_declare_mining_jobs_sent: HashMap<u32, Option<LastDeclareJob>>,
     pub last_set_new_prev_hash: Option<SetNewPrevHash<'static>>,
@@ -100,8 +99,6 @@ impl JobDeclarator {
             info!("JD CONNECTED");
         }
 
-        let min_extranonce_size = crate::MIN_EXTRANONCE_SIZE;
-
         let task_manager = TaskManager::initialize();
         let abortable = task_manager
             .safe_lock(|t| t.get_aborter())
@@ -111,7 +108,6 @@ impl JobDeclarator {
             sender,
             allocated_tokens: vec![],
             req_ids: Id::new(),
-            min_extranonce_size,
             last_declare_mining_jobs_sent: HashMap::with_capacity(2),
             last_set_new_prev_hash: None,
             future_jobs: HashMap::with_hasher(BuildNoHashHasher::default()),
@@ -241,8 +237,8 @@ impl JobDeclarator {
         }
         super::IS_CUSTOM_JOB_SET.store(false, std::sync::atomic::Ordering::Release);
         // now as u64 unix time
-        let (id, _, sender) = self_mutex
-            .safe_lock(|s| (s.req_ids.next(), s.min_extranonce_size, s.sender.clone()))
+        let (id, sender) = self_mutex
+            .safe_lock(|s| (s.req_ids.next(), s.sender.clone()))
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
 
         let template_transactions = tx_list_.to_vec();
@@ -433,7 +429,7 @@ impl JobDeclarator {
                             }
                         };
                         if sender.send(sv2_frame.into()).await.is_err() {
-                            error!("Job declarator failed to send message");
+                            error!("Job declarator failed to send message AAAAA");
                             ProxyState::update_jd_state(JdState::Down);
                             break;
                         };
@@ -447,7 +443,7 @@ impl JobDeclarator {
                 }
             }
         });
-        TaskManager::add_allocate_tokens(task_manager, main_task.into())
+        TaskManager::add_main_task(task_manager, main_task.into())
             .await
             .map_err(|_| Error::JobDeclaratorTaskManagerFailed)
     }
@@ -477,14 +473,15 @@ impl JobDeclarator {
                         && s.last_set_new_prev_hash != Some(set_new_prev_hash.clone())
                     //it means that a new prev_hash is arrived while the previous hasn't exited the loop yet
                     {
-                        s.set_new_prev_hash_counter -= 1;
+                        s.set_new_prev_hash_counter = s.set_new_prev_hash_counter.saturating_sub(1);
                         Some(None)
                     } else {
                         s.future_jobs
                             .remove(&id)
                             .map(|(job, merkle_path, template, pool_outs)| {
-                                s.future_jobs = HashMap::with_hasher(BuildNoHashHasher::default());
-                                s.set_new_prev_hash_counter -= 1;
+                                s.future_jobs.clear();
+                                s.set_new_prev_hash_counter =
+                                    s.set_new_prev_hash_counter.saturating_sub(1);
                                 Some((job, s.up.clone(), merkle_path, template, pool_outs))
                             })
                     }
@@ -555,7 +552,7 @@ impl JobDeclarator {
                 .expect("Infallible operation");
 
             if sender.send(frame.into()).await.is_err() {
-                error!("Job declarator failed to send message");
+                error!("Job declarator failed to send message BBBB");
                 ProxyState::update_jd_state(JdState::Down);
             }
         }

@@ -95,6 +95,7 @@ struct ConfigFile {
     tp_address: Option<String>,
     api_base_url: Option<String>,
     pool_addresses: Option<Vec<String>>,
+    restore_channel: Option<String>,
     interval: Option<u64>,
     delay: Option<u64>,
     downstream_hashrate: Option<String>,
@@ -130,6 +131,7 @@ impl ConfigFile {
             tp_address: None,
             api_base_url: None,
             pool_addresses: None,
+            restore_channel: None,
             interval: None,
             delay: None,
             downstream_hashrate: None,
@@ -166,6 +168,7 @@ pub struct Configuration {
     tp_address: Option<String>,
     api_base_url: Option<String>,
     pool_addresses: Vec<String>,
+    restore_channel: Option<Vec<u8>>,
     interval: u64,
     delay: u64,
     downstream_hashrate: f32,
@@ -228,6 +231,7 @@ and make that test pass."
         tp_address: Option<String>,
         api_base_url: Option<String>,
         pool_addresses: Vec<String>,
+        restore_channel: Option<Vec<u8>>,
         interval: u64,
         delay: u64,
         downstream_hashrate: f32,
@@ -275,6 +279,7 @@ and make that test pass."
             tp_address,
             api_base_url,
             pool_addresses,
+            restore_channel,
             interval,
             delay,
             downstream_hashrate,
@@ -361,10 +366,11 @@ and make that test pass."
             None,
             None,
             Vec::new(),
+            None,
             120_000,
             0,
             DEFAULT_SV1_HASHPOWER,
-            crate::translator::downstream::diff_management::NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY,
+            crate::translator::NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY,
             "info".to_string(),
             "off".to_string(),
             false,
@@ -430,6 +436,10 @@ and make that test pass."
             "local" => "http://localhost:8787".to_string(),
             _ => unreachable!(),
         }
+    }
+
+    pub fn restore_channel() -> Option<Vec<u8>> {
+        Self::cfg().restore_channel.clone()
     }
 
     pub async fn pool_address() -> Option<Vec<SocketAddr>> {
@@ -661,6 +671,10 @@ and make that test pass."
                 "DMND_CLIENT_POOL_ADDRESSES",
             ],
         );
+        let restore_channel = config
+            .restore_channel
+            .or_else(|| std::env::var("RESTORE_CHANNEL").ok())
+            .map(Self::parse_restore_channel);
 
         let miner_name = args
             .miner_name
@@ -749,9 +763,7 @@ and make that test pass."
                     .ok()
                     .and_then(|s| parse_downstream_min_difficulty(&s).ok())
             })
-            .unwrap_or(
-                crate::translator::downstream::diff_management::NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY,
-            );
+            .unwrap_or(crate::translator::NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY);
         println!("Using downstream minimum difficulty: {downstream_min_difficulty}");
 
         let listening_addr = args.listening_addr.or(config.listening_addr).or_else(|| {
@@ -873,6 +885,7 @@ and make that test pass."
             tp_address,
             api_base_url,
             pool_addresses,
+            restore_channel,
             interval,
             delay,
             downstream_hashrate,
@@ -902,6 +915,39 @@ and make that test pass."
             rpc_fee_delta,
             api_tx_token,
         )
+    }
+
+    fn parse_restore_channel(value: String) -> Vec<u8> {
+        let trimmed = value.trim();
+        if let Some(hex) = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("hex:"))
+        {
+            return Self::parse_restore_channel_hex(hex).unwrap_or_else(|error| panic!("{error}"));
+        }
+
+        value.into_bytes()
+    }
+
+    fn parse_restore_channel_hex(hex: &str) -> Result<Vec<u8>, String> {
+        if hex.len() % 2 != 0 {
+            return Err(
+                "Invalid restore_channel hex value: expected an even number of hex digits"
+                    .to_string(),
+            );
+        }
+
+        hex.as_bytes()
+            .chunks(2)
+            .map(|pair| {
+                let pair = std::str::from_utf8(pair).map_err(|_| {
+                    "Invalid restore_channel hex value: expected ASCII hex digits".to_string()
+                })?;
+                u8::from_str_radix(pair, 16).map_err(|_| {
+                    format!("Invalid restore_channel hex byte `{pair}`: expected 00 through ff")
+                })
+            })
+            .collect()
     }
 }
 

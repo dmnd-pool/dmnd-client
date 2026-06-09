@@ -5,7 +5,10 @@ use crate::{
 };
 use tokio::time::{timeout, Duration};
 
-use super::{job_declarator::JobDeclarator, mining_upstream::Upstream as UpstreamMiningNode};
+use super::{
+    job_declarator::JobDeclarator,
+    mining_upstream::{Upstream as UpstreamMiningNode, UpstreamChannelFactory},
+};
 use crate::jd_client::error::Error as JdClientError;
 use roles_logic_sv2::{
     channel_logic::channel_factory::{OnNewShare, PoolChannelFactory, Share},
@@ -23,11 +26,11 @@ use tokio::{
     sync::mpsc::{Receiver as TReceiver, Sender as TSender},
     task,
 };
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use codec_sv2::{StandardEitherFrame, StandardSv2Frame};
 
-use bitcoin::{consensus::Decodable, TxOut};
+use bitcoin::{consensus::Decodable, hex::DisplayHex, TxOut};
 
 pub type Message = MiningDeviceMessages<'static>;
 pub type StdFrame = StandardSv2Frame<Message>;
@@ -60,20 +63,130 @@ pub enum DownstreamMiningNodeStatus {
 }
 
 impl DownstreamMiningNodeStatus {
-    fn set_channel(&mut self, channel: PoolChannelFactory) -> bool {
+    fn set_channel(&mut self, channel: UpstreamChannelFactory) -> bool {
+        let UpstreamChannelFactory {
+            factory,
+            channel_id,
+            target,
+            extranonce_prefix,
+            extranonce_size,
+        } = channel;
+        let incoming_channel_ids = factory.get_extended_channels_ids();
         match self {
             DownstreamMiningNodeStatus::Paired(up) => {
-                let self_ = Self::ChannelOpened((channel, up.clone()));
+                debug!(
+                    "JD downstream installing channel factory from Paired state: incoming channel ids {:?}",
+                    incoming_channel_ids
+                );
+                let self_ = Self::ChannelOpened((factory, up.clone()));
                 let _ = std::mem::replace(self, self_);
                 true
             }
-            DownstreamMiningNodeStatus::ChannelOpened(_) => false,
+            DownstreamMiningNodeStatus::ChannelOpened((old, _up)) => {
+                let existing_channel_ids = old.get_extended_channels_ids();
+                info!(
+                    "JD downstream restoring channel on existing factory: existing channel ids {:?}, incoming channel ids {:?}",
+                    existing_channel_ids,
+                    incoming_channel_ids,
+                );
+
+                if old.get_extranonce_len() != factory.get_extranonce_len() {
+                    error!(
+                        "JD downstream restored channel extranonce layout changed: existing len {} incoming len {}",
+                        old.get_extranonce_len(),
+                        factory.get_extranonce_len(),
+                    );
+                    return false;
+                }
+
+                for existing_channel_id in existing_channel_ids {
+                    old.close_channel(existing_channel_id);
+                }
+
+                let extranonce: Extranonce = match extranonce_prefix.try_into() {
+                    Ok(extranonce) => extranonce,
+                    Err(_) => {
+                        error!(
+                            "JD downstream failed to restore channel {}: invalid extranonce prefix",
+                            channel_id
+                        );
+                        return false;
+                    }
+                };
+                if old
+                    .replicate_upstream_extended_channel_only_jd(
+                        target.clone(),
+                        extranonce,
+                        channel_id,
+                        extranonce_size,
+                    )
+                    .is_none()
+                {
+                    error!(
+                        "JD downstream failed to restore channel {} on existing factory",
+                        channel_id
+                    );
+                    return false;
+                }
+
+                let mut upstream_target = target.clone().into();
+                old.set_target(&mut upstream_target);
+                old.update_target_for_channel(channel_id, target.into());
+                debug!(
+                    "JD downstream restored channel on existing factory: channel_id={} channel ids {:?}",
+                    channel_id,
+                    old.get_extended_channels_ids(),
+                );
+                true
+            }
             DownstreamMiningNodeStatus::SoloMinerPaired() => {
+                debug!(
+                    "JD downstream installing solo channel factory from SoloMinerPaired state: incoming channel ids {:?}",
+                    incoming_channel_ids
+                );
+                let self_ = Self::SoloMinerChannelOpend(factory);
+                let _ = std::mem::replace(self, self_);
+                true
+            }
+            DownstreamMiningNodeStatus::SoloMinerChannelOpend(old) => {
+                warn!(
+                    "JD downstream refused solo channel factory replacement: existing channel ids {:?}, incoming channel ids {:?}",
+                    old.get_extended_channels_ids(),
+                    incoming_channel_ids
+                );
+                false
+            }
+        }
+    }
+
+    fn set_solo_channel(&mut self, channel: PoolChannelFactory) -> bool {
+        let incoming_channel_ids = channel.get_extended_channels_ids();
+        match self {
+            DownstreamMiningNodeStatus::SoloMinerPaired() => {
+                debug!(
+                    "JD downstream installing solo channel factory from SoloMinerPaired state: incoming channel ids {:?}",
+                    incoming_channel_ids
+                );
                 let self_ = Self::SoloMinerChannelOpend(channel);
                 let _ = std::mem::replace(self, self_);
                 true
             }
-            DownstreamMiningNodeStatus::SoloMinerChannelOpend(_) => false,
+            DownstreamMiningNodeStatus::SoloMinerChannelOpend(old) => {
+                warn!(
+                    "JD downstream refused solo channel factory replacement: existing channel ids {:?}, incoming channel ids {:?}",
+                    old.get_extended_channels_ids(),
+                    incoming_channel_ids
+                );
+                false
+            }
+            DownstreamMiningNodeStatus::Paired(_)
+            | DownstreamMiningNodeStatus::ChannelOpened(_) => {
+                warn!(
+                    "JD downstream refused solo channel factory install in pooled mode: incoming channel ids {:?}",
+                    incoming_channel_ids
+                );
+                false
+            }
         }
     }
 
@@ -205,14 +318,31 @@ impl DownstreamMiningNode {
                         return;
                     }
                 };
-                if let Ok(factory) = UpstreamMiningNode::take_channel_factory(upstream).await {
-                    if self_mutex
-                        .safe_lock(|s| {
-                            s.status.set_channel(factory);
-                        })
-                        .is_err()
-                    {
-                        error!("Jd can not get channel factory");
+                loop {
+                    let factory =
+                        match UpstreamMiningNode::take_channel_factory(upstream.clone()).await {
+                            Ok(factory) => factory,
+                            Err(e) => {
+                                error!("Jd can not get channel factory: {e}");
+                                ProxyState::update_downstream_state(
+                                    DownstreamType::JdClientMiningDownstream,
+                                );
+                                return;
+                            }
+                        };
+
+                    match self_mutex.safe_lock(|s| s.status.set_channel(factory)) {
+                        Ok(true) => debug!("Jd mining downstream channel factory refreshed"),
+                        Ok(false) => {
+                            warn!("Jd mining downstream channel factory refresh was ignored")
+                        }
+                        Err(_) => {
+                            error!("Jd can not set channel factory");
+                            ProxyState::update_downstream_state(
+                                DownstreamType::JdClientMiningDownstream,
+                            );
+                            return;
+                        }
                     }
                 }
             }
@@ -323,7 +453,46 @@ impl DownstreamMiningNode {
             Ok(SendTo::Respond(message)) => Self::send(&self_mutex, message).await?,
             Ok(SendTo::None(None)) => (),
             Ok(m) => unreachable!("Unexpected message type: {:?}", m),
-            Err(Error::ShareDoNotMatchAnyJob) => warn!("Error: ShareDoNotMatchAnyJob"),
+            Err(Error::ShareDoNotMatchAnyJob) => {
+                let last_template_id = self_mutex.safe_lock(|s| s.last_template_id).ok();
+                match incoming.as_ref() {
+                    Some(Mining::SubmitSharesExtended(share)) => {
+                        let factory_extranonce_prefix = self_mutex
+                            .safe_lock(|s| {
+                                s.status
+                                    .get_channel()
+                                    .ok()
+                                    .and_then(|channel| {
+                                        channel.get_extranonce_prefix(share.channel_id)
+                                    })
+                            })
+                            .ok()
+                            .flatten()
+                            .map(|prefix| prefix.as_hex().to_string())
+                            .unwrap_or_else(|| "<missing>".to_string());
+                        warn!(
+                            "JD downstream local share validation failed: ShareDoNotMatchAnyJob channel_id={} job_id={} sequence_number={} nonce={} ntime={} share_extranonce={} factory_extranonce_prefix={} last_template_id={:?}",
+                            share.channel_id,
+                            share.job_id,
+                            share.sequence_number,
+                            share.nonce,
+                            share.ntime,
+                            share.extranonce.to_vec().as_hex(),
+                            factory_extranonce_prefix,
+                            last_template_id,
+                        )
+                    }
+                    Some(message) => warn!(
+                        "JD downstream local share validation failed: ShareDoNotMatchAnyJob incoming={:?} last_template_id={:?}",
+                        message,
+                        last_template_id,
+                    ),
+                    None => warn!(
+                        "JD downstream local share validation failed: ShareDoNotMatchAnyJob incoming=None last_template_id={:?}",
+                        last_template_id,
+                    ),
+                }
+            }
             Err(e) => return Err(JdClientError::RolesSv2Logic(e)),
         }
         Ok(())
@@ -536,7 +705,7 @@ impl
                 error!("Signature + extranonce lens exceed 32 bytes");
             })?;
 
-            self.status.set_channel(channel_factory);
+            self.status.set_solo_channel(channel_factory);
 
             let request_id = m.request_id;
             let hash_rate = m.nominal_hash_rate;
@@ -584,12 +753,32 @@ impl
         &mut self,
         m: SubmitSharesExtended,
     ) -> Result<SendTo<UpstreamMiningNode>, Error> {
-        match self
+        debug!(
+            "JD downstream validating SubmitSharesExtended with local PoolChannelFactory: channel_id={} job_id={} sequence_number={} nonce={} ntime={} share_extranonce={} last_template_id={}",
+            m.channel_id,
+            m.job_id,
+            m.sequence_number,
+            m.nonce,
+            m.ntime,
+            m.extranonce.to_vec().as_hex(),
+            self.last_template_id,
+        );
+        let channel = self
             .status
             .get_channel()
-            .map_err(|_| Error::NotFoundChannelId)?
-            .on_submit_shares_extended(m.clone())?
-        {
+            .map_err(|_| Error::NotFoundChannelId)?;
+        let factory_extranonce_prefix = channel
+            .get_extranonce_prefix(m.channel_id)
+            .map(|prefix| prefix.as_hex().to_string())
+            .unwrap_or_else(|| "<missing>".to_string());
+        debug!(
+            "JD downstream validating SubmitSharesExtended against local PoolChannelFactory channel ids {:?}; factory_extranonce_prefix={}",
+            channel.get_extended_channels_ids(),
+            factory_extranonce_prefix,
+        );
+        let data = channel.get_additional_coinbase_script_data(m.channel_id, m.job_id);
+        debug!("get_additional_coinbase_script_data result: {:?}", data);
+        match channel.on_submit_shares_extended(m.clone())? {
             OnNewShare::SendErrorDownstream(s) => {
                 error!("Share do not meet downstream target");
                 Ok(SendTo::Respond(Mining::SubmitSharesError(s)))
@@ -680,3 +869,72 @@ impl
     }
 }
 impl IsMiningDownstream for DownstreamMiningNode {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use roles_logic_sv2::{
+        channel_logic::channel_factory::ExtendedChannelKind,
+        job_creator::JobsCreators,
+        mining_sv2::{ExtendedExtranonce, Extranonce, Target},
+    };
+
+    fn upstream_channel_factory(channel_id: u32) -> UpstreamChannelFactory {
+        let prefix_len = 16;
+        let extranonce_size = 16;
+        let ids = Arc::new(Mutex::new(roles_logic_sv2::utils::GroupId::new()));
+        let extranonces = ExtendedExtranonce::new(
+            0..prefix_len,
+            prefix_len..prefix_len,
+            prefix_len..prefix_len + extranonce_size as usize,
+        );
+        let creator = JobsCreators::new((prefix_len + extranonce_size as usize) as u8);
+        let target = Target::new(u128::MAX, u128::MAX);
+        let channel_kind = ExtendedChannelKind::ProxyJd {
+            upstream_target: target,
+        };
+        let mut channel_factory =
+            PoolChannelFactory::new(ids, extranonces, creator, 1.0, channel_kind, vec![], vec![])
+                .unwrap();
+        let target: binary_sv2::U256<'static> = vec![0xff; 32].try_into().unwrap();
+        let extranonce_prefix = vec![channel_id as u8; prefix_len];
+        let extranonce: Extranonce = extranonce_prefix.clone().try_into().unwrap();
+        channel_factory
+            .replicate_upstream_extended_channel_only_jd(
+                target.clone(),
+                extranonce,
+                channel_id,
+                extranonce_size,
+            )
+            .unwrap();
+        UpstreamChannelFactory {
+            factory: channel_factory,
+            channel_id,
+            target,
+            extranonce_prefix,
+            extranonce_size,
+        }
+    }
+
+    #[tokio::test]
+    async fn set_channel_replaces_existing_pooled_factory() {
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let upstream = UpstreamMiningNode::new(crate::MIN_EXTRANONCE_SIZE, sender)
+            .await
+            .unwrap();
+        let mut status = DownstreamMiningNodeStatus::Paired(upstream.clone());
+
+        assert!(status.set_channel(upstream_channel_factory(4)));
+        {
+            let channel = status.get_channel().unwrap();
+            assert_eq!(channel.get_extended_channels_ids(), vec![4]);
+        }
+
+        assert!(status.set_channel(upstream_channel_factory(1)));
+        {
+            let channel = status.get_channel().unwrap();
+            assert_eq!(channel.get_extended_channels_ids(), vec![1]);
+        }
+        assert!(Arc::ptr_eq(&status.get_upstream().unwrap(), &upstream));
+    }
+}

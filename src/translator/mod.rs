@@ -9,7 +9,7 @@ use bitcoin::Address;
 use error::Error;
 
 use roles_logic_sv2::{parsers::Mining, utils::Mutex};
-use tracing::error;
+use tracing::{error, info};
 
 use std::sync::Arc;
 use tokio::sync::mpsc::channel;
@@ -25,6 +25,7 @@ use tokio::sync::mpsc::{Receiver as TReceiver, Sender as TSender};
 
 use self::upstream::diff_management::UpstreamDifficultyConfig;
 mod task_manager;
+pub(crate) use downstream::diff_management::NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY;
 use task_manager::TaskManager;
 
 pub async fn start(
@@ -35,7 +36,7 @@ pub async fn start(
         Option<Address>,
     )>,
     stats_sender: crate::api::stats::StatsSender,
-    signature: String,
+    _signature: String,
 ) -> Result<AbortOnDrop, Error<'static>> {
     let task_manager = TaskManager::initialize(pool_connection.clone());
     let abortable = task_manager
@@ -104,7 +105,6 @@ pub async fn start(
         target.clone(),
         diff_config.clone(),
         send_to_up,
-        signature,
     )
     .await?;
 
@@ -124,7 +124,8 @@ pub async fn start(
         let target = target.clone();
         let task_manager = task_manager.clone();
         tokio::task::spawn(async move {
-            let (extended_extranonce, up_id) = match rx_sv2_extranonce.recv().await {
+            let result = rx_sv2_extranonce.recv().await;
+            let (extended_extranonce, up_id) = match result {
                 Some((extended_extranonce, up_id)) => (extended_extranonce, up_id),
                 None => {
                     error!("Failed to receive from rx_sv2_extranonce");
@@ -134,15 +135,17 @@ pub async fn start(
             };
 
             loop {
-                let target: [u8; 32] =  match target.safe_lock(|t| t.clone()) {
-                    Ok(target) => target.try_into().expect("Internal error: this operation cannot fail because Vec<u8> can always be converted into [u8; 32]"),
+                let target_bytes: [u8; 32] = match target.safe_lock(|t| t.clone()) {
+                    Ok(target) => target.try_into().expect(
+                        "Internal error: this operation cannot fail because Vec<u8> can always be converted into [u8; 32]",
+                    ),
                     Err(e) => {
                         error!("{}", Error::TargetError(roles_logic_sv2::Error::PoisonLock(e.to_string())));
-                        break
+                        return;
                     }
                 };
 
-                if target != [0; 32] {
+                if target_bytes != [0; 32] {
                     break;
                 };
                 tokio::task::yield_now().await;
@@ -153,7 +156,7 @@ pub async fn start(
                 tx_sv2_submit_shares_ext,
                 tx_sv1_notify.clone(),
                 extended_extranonce,
-                target,
+                target.clone(),
                 up_id,
             ) {
                 Ok(b) => b,
@@ -181,7 +184,7 @@ pub async fn start(
             let downstream_aborter = match downstream::Downstream::accept_connections(
                 tx_sv1_bridge,
                 tx_sv1_notify,
-                b,
+                b.clone(),
                 diff_config,
                 downstreams,
                 stats_sender,
@@ -210,6 +213,29 @@ pub async fn start(
             {
                 error!("{}", Error::TranslatorTaskManagerFailed);
             }
+            while let Some((extended_extranonce, up_id)) = rx_sv2_extranonce.recv().await {
+                let restore_result = b.safe_lock(|bridge| {
+                    bridge.restore_upstream_channel(extended_extranonce, up_id)
+                });
+                match restore_result {
+                    Ok(Ok(())) => {
+                        info!("Translator bridge restored upstream channel id {up_id}");
+                    }
+                    Ok(Err(e)) => {
+                        error!("Failed to restore translator bridge upstream channel: {e}");
+                        ProxyState::update_translator_state(TranslatorState::Down);
+                        return;
+                    }
+                    Err(e) => {
+                        error!("Translator bridge mutex poisoned while restoring upstream channel: {e}");
+                        ProxyState::update_translator_state(TranslatorState::Down);
+                        return;
+                    }
+                }
+            }
+
+            error!("Failed to receive from rx_sv2_extranonce");
+            ProxyState::update_translator_state(TranslatorState::Down);
         })
     };
     TaskManager::add_startup_task(task_manager.clone(), startup_task.into())
