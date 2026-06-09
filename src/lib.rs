@@ -17,6 +17,7 @@ use crate::shared::utils::AbortOnDrop;
 use key_utils::Secp256k1PublicKey;
 use lazy_static::lazy_static;
 use proxy_state::{PoolState, ProxyState, TpState, TranslatorState};
+use roles_logic_sv2::utils::Mutex;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     OnceLock,
@@ -69,10 +70,10 @@ pub(crate) struct DownstreamConnection {
 pub(crate) type DownstreamHandoffSender = tokio::sync::mpsc::Sender<DownstreamConnection>;
 
 lazy_static! {
-    static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<String>> =
-        roles_logic_sv2::utils::Mutex::new(Configuration::tp_address());
-    static ref ACTIVE_POOL_ADDRESS: roles_logic_sv2::utils::Mutex<Option<SocketAddr>> =
-        roles_logic_sv2::utils::Mutex::new(None); // Connected pool address
+    static ref TP_ADDRESS: Mutex<Option<String>> =
+        Mutex::new(Configuration::tp_address());
+    static ref ACTIVE_POOL_ADDRESS: Mutex<Option<SocketAddr>> =
+        Mutex::new(None); // Connected pool address
 }
 
 lazy_static! {

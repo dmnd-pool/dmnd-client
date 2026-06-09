@@ -32,7 +32,7 @@ use tokio::{
     },
     task,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::task_manager::TaskManager;
 use crate::{
@@ -43,6 +43,8 @@ use crate::{
 use bitcoin::BlockHash;
 
 pub static IS_NEW_JOB_HANDLED: AtomicBool = AtomicBool::new(true);
+pub(super) const RESTORE_CHANNEL_USER_ID_PREFIX: &[u8] = b"RESTORE-CHANNEL";
+
 /// Represents the currently active `prevhash` of the mining job being worked on OR being submitted
 /// from the Downstream role.
 #[derive(Debug, Clone)]
@@ -65,6 +67,7 @@ pub struct Upstream {
     last_job_id: Option<u32>,
     /// Bytes used as implicit first part of `extranonce`.
     extranonce_prefix: Option<Vec<u8>>,
+    restore_channel: Option<Vec<u8>>,
     /// Sends SV2 `SetNewPrevHash` messages to be translated (along with SV2 `NewExtendedMiningJob`
     /// messages) into SV1 `mining.notify` messages. Received and translated by the `Bridge`.
     tx_sv2_set_new_prev_hash: tokio::sync::mpsc::Sender<SetNewPrevHash<'static>>,
@@ -90,7 +93,6 @@ pub struct Upstream {
     // than the configured percentage
     pub(super) difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
     pub sender: TSender<Mining<'static>>,
-    signature: String,
     sent_up: u32,
     rejected: u32,
     toa: Vec<std::time::Instant>,
@@ -119,22 +121,22 @@ impl Upstream {
         target: Arc<Mutex<Vec<u8>>>,
         difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
         sender: TSender<Mining<'static>>,
-        signature: String,
     ) -> ProxyResult<'static, Arc<Mutex<Self>>> {
+        let restore_channel = crate::Configuration::restore_channel();
         Ok(Arc::new(Mutex::new(Self {
-            extranonce_prefix: None,
+            extranonce_prefix: restore_channel.clone(),
             tx_sv2_set_new_prev_hash,
             tx_sv2_new_ext_mining_job,
             channel_id: None,
             job_id: None,
             last_job_id: None,
             min_extranonce_size,
+            restore_channel,
             upstream_extranonce1_size: crate::UPSTREAM_EXTRANONCE1_SIZE,
             tx_sv2_extranonce,
             target,
             difficulty_config,
             sender,
-            signature,
             sent_up: 0,
             rejected: 0,
             toa: Vec::new(),
@@ -183,32 +185,57 @@ impl Upstream {
 
     /// Setups the connection with the SV2 Upstream role (most typically a SV2 Pool).
     async fn connect(self_: Arc<Mutex<Self>>) -> ProxyResult<'static, ()> {
-        let sender = self_
-            .safe_lock(|s| s.sender.clone())
-            .map_err(|_e| Error::TranslatorUpstreamMutexPoisoned)?;
-
-        // Send open channel request
-        let nominal_hash_rate = self_
-            .safe_lock(|u| {
-                u.difficulty_config
-                    .safe_lock(|c| c.channel_nominal_hashrate)
-                    .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)
+        let (sender, open_channel) = self_
+            .safe_lock(|s| {
+                let sender = s.sender.clone();
+                let restore_channel = s.restore_channel.clone();
+                let open_channel = s.next_open_channel_message(restore_channel)?;
+                Ok::<_, RolesLogicError>((sender, open_channel))
             })
-            .map_err(|_e| Error::TranslatorUpstreamMutexPoisoned)??;
-        let user_identity = "ABC".to_string().try_into().expect("Internal error: this operation can not fail because the string ABC can always be converted into Inner");
-        let open_channel = Mining::OpenExtendedMiningChannel(OpenExtendedMiningChannel {
-            request_id: 0, // TODO
-            user_identity, // TODO
-            nominal_hash_rate,
-            max_target: u256_max(),
-            min_extranonce_size: crate::MIN_EXTRANONCE2_SIZE,
-        });
+            .map_err(|_e| Error::TranslatorUpstreamMutexPoisoned)?
+            .map_err(Error::RolesSv2Logic)?;
 
         if sender.send(open_channel).await.is_err() {
             error!("Failed to send message");
             return Err(Error::AsyncChannelError);
         };
         Ok(())
+    }
+
+    fn next_open_channel_message(
+        &mut self,
+        extranonce_prefix: Option<Vec<u8>>,
+    ) -> Result<Mining<'static>, RolesLogicError> {
+        self.extranonce_prefix = extranonce_prefix.clone();
+        let nominal_hash_rate = self
+            .difficulty_config
+            .safe_lock(|c| c.channel_nominal_hashrate)
+            .map_err(|e| RolesLogicError::PoisonLock(e.to_string()))?;
+        let user_identity = match extranonce_prefix.as_ref() {
+            Some(inner) => {
+                let mut user_identity =
+                    Vec::with_capacity(RESTORE_CHANNEL_USER_ID_PREFIX.len() + inner.len());
+                user_identity.extend_from_slice(RESTORE_CHANNEL_USER_ID_PREFIX);
+                user_identity.extend_from_slice(inner);
+                info!(
+                    "Opening upstream extended channel restore with extranonce size {:?}",
+                    inner
+                );
+                user_identity
+            }
+            None => b"ABC".to_vec(),
+        }
+        .try_into()
+        .expect("Internal error: restore channel user identity length must fit in B0255");
+        Ok(Mining::OpenExtendedMiningChannel(
+            OpenExtendedMiningChannel {
+                request_id: 0,
+                user_identity,
+                nominal_hash_rate,
+                max_target: u256_max(),
+                min_extranonce_size: crate::MIN_EXTRANONCE2_SIZE,
+            },
+        ))
     }
 
     fn handle_token_updates(
@@ -534,12 +561,10 @@ impl Upstream {
                         }
                     };
 
-                    let (channel_id, signature) = match self_.safe_lock(|s| {
-                        s.channel_id
-                            .ok_or(RolesLogicError::NotFoundChannelId)
-                            .map(|channel_id| (channel_id, s.signature.clone()))
-                    }) {
-                        Ok(Ok(values)) => values,
+                    let channel_id = match self_
+                        .safe_lock(|s| s.channel_id.ok_or(RolesLogicError::NotFoundChannelId))
+                    {
+                        Ok(Ok(channel_id)) => channel_id,
                         Ok(Err(e)) => {
                             error!("{}", Error::RolesSv2Logic(e));
                             let _ = result_tx.send(Err(
@@ -576,11 +601,21 @@ impl Upstream {
                         }
                     };
 
+                    let original_channel_id = share.channel_id;
+                    let original_sequence_number = share.sequence_number;
+                    debug!(
+                        "Translator upstream rewriting SubmitSharesExtended for current pool channel: original_channel_id={} current_channel_id={} job_id={} original_sequence_number={} assigned_sequence_number={}",
+                        original_channel_id,
+                        channel_id,
+                        share.job_id,
+                        original_sequence_number,
+                        sequence_number,
+                    );
                     share.channel_id = channel_id;
                     share.sequence_number = sequence_number;
-                    let mut extranonce = signature.as_bytes().to_vec();
-                    extranonce.extend_from_slice(&share.extranonce.to_vec());
-                    share.extranonce = extranonce.try_into().unwrap();
+                    //let mut extranonce = signature.as_bytes().to_vec();
+                    //extranonce.extend_from_slice(&share.extranonce.to_vec());
+                    //share.extranonce = extranonce.try_into().unwrap();
 
                     let message = roles_logic_sv2::parsers::Mining::SubmitSharesExtended(share);
 
@@ -721,16 +756,23 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
     /// role in a SV1 `mining.subscribe` message response.
     fn handle_open_extended_mining_channel_success(
         &mut self,
-        mut m: roles_logic_sv2::mining_sv2::OpenExtendedMiningChannelSuccess,
+        m: roles_logic_sv2::mining_sv2::OpenExtendedMiningChannelSuccess,
     ) -> Result<SendTo<Downstream>, RolesLogicError> {
         info!(
             "Handling OpenExtendedMiningChannelSuccess message from Pool for Channel Id: {}",
             m.channel_id
         );
-        let mut prefix = m.extranonce_prefix.to_vec();
-        prefix.extend_from_slice(self.signature.as_bytes());
-        m.extranonce_prefix = prefix.try_into().unwrap();
-        m.extranonce_size -= self.signature.len() as u16;
+        let raw_extranonce_prefix = m.extranonce_prefix.to_vec();
+        if let Some(inner) = self.extranonce_prefix.as_ref() {
+            if raw_extranonce_prefix.as_slice() != inner.as_slice() {
+                error!(
+                    "Restore channel extranonce prefix mismatch for Channel Id {}: expected {:?}, received {:?}. Clearing restore state so the next reconnect can open a fresh channel.",
+                    m.channel_id, inner, raw_extranonce_prefix
+                );
+                panic!()
+            }
+            self.restore_channel = None;
+        }
         let tproxy_e1_len =
             proxy_extranonce1_len(m.extranonce_size as usize, self.min_extranonce_size.into())
                 as u16;
@@ -754,7 +796,6 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
             .safe_lock(|t| *t = m.target.to_vec())
             .map_err(|e| RolesLogicError::PoisonLock(e.to_string()))?;
         self.channel_id = Some(m.channel_id);
-        self.extranonce_prefix = Some(m.extranonce_prefix.to_vec());
         let m = Mining::OpenExtendedMiningChannelSuccess(m.into_static());
         Ok(SendTo::None(Some(m)))
     }
@@ -946,12 +987,18 @@ mod tests {
     use tokio::time::{timeout, Duration};
 
     async fn test_upstream() -> Arc<Mutex<Upstream>> {
+        test_upstream_with_sender(mpsc::channel(1).0, None).await
+    }
+
+    async fn test_upstream_with_sender(
+        sender: TSender<Mining<'static>>,
+        restore_channel: Option<Vec<u8>>,
+    ) -> Arc<Mutex<Upstream>> {
         let (tx_sv2_set_new_prev_hash, _rx_sv2_set_new_prev_hash) = mpsc::channel(1);
         let (tx_sv2_new_ext_mining_job, _rx_sv2_new_ext_mining_job) = mpsc::channel(1);
         let (tx_sv2_extranonce, _rx_sv2_extranonce) = mpsc::channel(1);
-        let (sender, _receiver) = mpsc::channel(1);
 
-        Upstream::new(
+        let upstream = Upstream::new(
             tx_sv2_set_new_prev_hash,
             tx_sv2_new_ext_mining_job,
             crate::MIN_EXTRANONCE_SIZE - 1,
@@ -961,10 +1008,112 @@ mod tests {
                 UpstreamDifficultyConfig::new(crate::CHANNEL_DIFF_UPDTATE_INTERVAL, 0.0).0,
             )),
             sender,
-            "sig".to_string(),
         )
         .await
-        .unwrap()
+        .unwrap();
+        upstream
+            .safe_lock(|u| {
+                u.extranonce_prefix = restore_channel.clone();
+                u.restore_channel = restore_channel;
+            })
+            .unwrap();
+        upstream
+    }
+
+    fn open_success(
+        channel_id: u32,
+        extranonce_prefix: Vec<u8>,
+        extranonce_size: u16,
+    ) -> roles_logic_sv2::mining_sv2::OpenExtendedMiningChannelSuccess<'static> {
+        roles_logic_sv2::mining_sv2::OpenExtendedMiningChannelSuccess {
+            request_id: 0,
+            channel_id,
+            target: u256_max(),
+            extranonce_size,
+            extranonce_prefix: extranonce_prefix
+                .try_into()
+                .expect("test extranonce prefix must fit in B032"),
+        }
+    }
+
+    #[tokio::test]
+    async fn first_connect_sends_normal_open_channel_identity() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let upstream = test_upstream_with_sender(sender, None).await;
+
+        Upstream::connect(upstream).await.unwrap();
+
+        let message = timeout(Duration::from_millis(250), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match message {
+            Mining::OpenExtendedMiningChannel(open) => {
+                assert_eq!(open.user_identity.to_vec(), b"ABC");
+                assert_eq!(open.request_id, 0);
+                assert_eq!(open.min_extranonce_size, crate::MIN_EXTRANONCE2_SIZE);
+            }
+            other => panic!("expected OpenExtendedMiningChannel, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_sends_restore_identity_from_stored_prefix() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let restore_channel = vec![1; 16];
+        let upstream = test_upstream_with_sender(sender, Some(restore_channel.clone())).await;
+        let difficulty_config = upstream.safe_lock(|u| u.difficulty_config.clone()).unwrap();
+        difficulty_config
+            .safe_lock(|c| c.channel_nominal_hashrate = 42.0)
+            .unwrap();
+
+        Upstream::connect(upstream).await.unwrap();
+
+        let message = timeout(Duration::from_millis(250), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match message {
+            Mining::OpenExtendedMiningChannel(open) => {
+                let mut expected_user_identity = RESTORE_CHANNEL_USER_ID_PREFIX.to_vec();
+                expected_user_identity.extend_from_slice(&restore_channel);
+                assert_eq!(open.user_identity.to_vec(), expected_user_identity);
+                assert_eq!(open.request_id, 0);
+                assert_eq!(open.nominal_hash_rate, 42.0);
+                assert_eq!(open.min_extranonce_size, crate::MIN_EXTRANONCE2_SIZE);
+            }
+            other => panic!("expected OpenExtendedMiningChannel, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn open_success_without_restore_keeps_restore_state_empty() {
+        let upstream = test_upstream_with_sender(mpsc::channel(1).0, None).await;
+        let pool_prefix = vec![10; 16];
+        let success = open_success(21, pool_prefix, 16);
+
+        upstream
+            .safe_lock(|u| u.handle_open_extended_mining_channel_success(success))
+            .unwrap()
+            .unwrap();
+
+        assert!(upstream.safe_lock(|u| u.restore_channel.is_none()).unwrap());
+    }
+
+    #[tokio::test]
+    async fn restored_success_updates_channel_id_and_clears_restore_state() {
+        let previous_prefix = vec![31; 16];
+        let upstream =
+            test_upstream_with_sender(mpsc::channel(1).0, Some(previous_prefix.clone())).await;
+        let success = open_success(55, previous_prefix.clone(), 16);
+
+        upstream
+            .safe_lock(|u| u.handle_open_extended_mining_channel_success(success))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(upstream.safe_lock(|u| u.channel_id).unwrap(), Some(55));
+        assert!(upstream.safe_lock(|u| u.restore_channel.is_none()).unwrap());
     }
 
     #[tokio::test]
@@ -1084,7 +1233,6 @@ mod tests {
             Arc::new(Mutex::new(vec![0; 32])),
             difficulty_config.clone(),
             sender,
-            "sig".to_string(),
         )
         .await
         .unwrap();
