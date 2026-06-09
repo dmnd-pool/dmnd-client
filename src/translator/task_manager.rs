@@ -25,13 +25,13 @@ pub struct TaskManager {
 }
 
 impl TaskManager {
-    #[allow(unused_variables)]
     pub fn initialize(
-        // We need this to be alive for all the live of the translator
+        // Keep this alive for the translator lifetime.
         up_connection: Sender<(Sender<Message>, Receiver<Message>, Option<Address>)>,
     ) -> Arc<Mutex<Self>> {
         let (sender, mut receiver) = mpsc::channel(10);
         let handle = tokio::task::spawn(async move {
+            let _up_connection = up_connection;
             let mut tasks = vec![];
             while let Some(task) = receiver.recv().await {
                 tasks.push(task);
@@ -40,8 +40,6 @@ impl TaskManager {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(1000)).await;
             }
-            #[allow(unreachable_code)]
-            drop(up_connection)
         });
         Arc::new(Mutex::new(Self {
             send_task: sender,

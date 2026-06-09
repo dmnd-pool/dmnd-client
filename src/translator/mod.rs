@@ -1,4 +1,4 @@
-mod downstream;
+pub(crate) mod downstream;
 
 mod error;
 mod proxy;
@@ -35,7 +35,6 @@ pub async fn start(
         Option<Address>,
     )>,
     stats_sender: crate::api::stats::StatsSender,
-    signature: String,
 ) -> Result<AbortOnDrop, Error<'static>> {
     let task_manager = TaskManager::initialize(pool_connection.clone());
     let abortable = task_manager
@@ -104,7 +103,6 @@ pub async fn start(
         target.clone(),
         diff_config.clone(),
         send_to_up,
-        signature,
     )
     .await?;
 

@@ -90,7 +90,6 @@ pub struct Upstream {
     // than the configured percentage
     pub(super) difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
     pub sender: TSender<Mining<'static>>,
-    signature: String,
     sent_up: u32,
     rejected: u32,
     toa: Vec<std::time::Instant>,
@@ -119,7 +118,6 @@ impl Upstream {
         target: Arc<Mutex<Vec<u8>>>,
         difficulty_config: Arc<Mutex<UpstreamDifficultyConfig>>,
         sender: TSender<Mining<'static>>,
-        signature: String,
     ) -> ProxyResult<'static, Arc<Mutex<Self>>> {
         Ok(Arc::new(Mutex::new(Self {
             extranonce_prefix: None,
@@ -134,7 +132,6 @@ impl Upstream {
             target,
             difficulty_config,
             sender,
-            signature,
             sent_up: 0,
             rejected: 0,
             toa: Vec::new(),
@@ -534,11 +531,9 @@ impl Upstream {
                         }
                     };
 
-                    let (channel_id, signature) = match self_.safe_lock(|s| {
-                        s.channel_id
-                            .ok_or(RolesLogicError::NotFoundChannelId)
-                            .map(|channel_id| (channel_id, s.signature.clone()))
-                    }) {
+                    let channel_id = match self_
+                        .safe_lock(|s| s.channel_id.ok_or(RolesLogicError::NotFoundChannelId))
+                    {
                         Ok(Ok(values)) => values,
                         Ok(Err(e)) => {
                             error!("{}", Error::RolesSv2Logic(e));
@@ -578,9 +573,6 @@ impl Upstream {
 
                     share.channel_id = channel_id;
                     share.sequence_number = sequence_number;
-                    let mut extranonce = signature.as_bytes().to_vec();
-                    extranonce.extend_from_slice(&share.extranonce.to_vec());
-                    share.extranonce = extranonce.try_into().unwrap();
 
                     let message = roles_logic_sv2::parsers::Mining::SubmitSharesExtended(share);
 
@@ -721,16 +713,12 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
     /// role in a SV1 `mining.subscribe` message response.
     fn handle_open_extended_mining_channel_success(
         &mut self,
-        mut m: roles_logic_sv2::mining_sv2::OpenExtendedMiningChannelSuccess,
+        m: roles_logic_sv2::mining_sv2::OpenExtendedMiningChannelSuccess,
     ) -> Result<SendTo<Downstream>, RolesLogicError> {
         info!(
             "Handling OpenExtendedMiningChannelSuccess message from Pool for Channel Id: {}",
             m.channel_id
         );
-        let mut prefix = m.extranonce_prefix.to_vec();
-        prefix.extend_from_slice(self.signature.as_bytes());
-        m.extranonce_prefix = prefix.try_into().unwrap();
-        m.extranonce_size -= self.signature.len() as u16;
         let tproxy_e1_len =
             proxy_extranonce1_len(m.extranonce_size as usize, self.min_extranonce_size.into())
                 as u16;
@@ -961,7 +949,6 @@ mod tests {
                 UpstreamDifficultyConfig::new(crate::CHANNEL_DIFF_UPDTATE_INTERVAL, 0.0).0,
             )),
             sender,
-            "sig".to_string(),
         )
         .await
         .unwrap()
@@ -1084,7 +1071,6 @@ mod tests {
             Arc::new(Mutex::new(vec![0; 32])),
             difficulty_config.clone(),
             sender,
-            "sig".to_string(),
         )
         .await
         .unwrap();

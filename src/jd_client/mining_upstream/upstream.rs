@@ -412,7 +412,7 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
             vec![],
         )
         .inspect_err(|_| {
-            error!("Signature + extranonce lens exceed 32 bytes");
+            error!("Channel extranonce ranges exceed 32 bytes");
         })?;
         let extranonce: Extranonce = m
             .extranonce_prefix

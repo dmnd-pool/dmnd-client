@@ -17,18 +17,7 @@ use stratum_apps::stratum_core::common_messages_sv2::{
     Protocol, MESSAGE_TYPE_SETUP_CONNECTION, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
 };
 
-fn ensure_port_free_or_skip(address: &str) -> bool {
-    match TcpListener::bind(address) {
-        Ok(_) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            eprintln!("skipping: {address} is in use");
-            false
-        }
-        Err(e) => panic!("failed to probe {address}: {e}"),
-    }
-}
-
-async fn wait_for_port_to_be_bound(address: &str) {
+async fn wait_for_port_to_be_bound(address: SocketAddr) {
     let started = std::time::Instant::now();
     loop {
         match TcpListener::bind(address) {
@@ -47,20 +36,12 @@ async fn wait_for_port_to_be_bound(address: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn library_init_sv2_setup_connection() {
-    if !ensure_port_free_or_skip("127.0.0.1:20000") {
-        return;
-    }
-    if !ensure_port_free_or_skip("127.0.0.1:20001") {
-        return;
-    }
-    if !ensure_port_free_or_skip("127.0.0.1:20002") {
-        return;
-    }
-
-    let proxy_target: SocketAddr = "127.0.0.1:20000".parse().unwrap();
-    let mock_pool_mining_addr: SocketAddr = "127.0.0.1:20001".parse().unwrap();
-    let mock_pool_jd_addr: SocketAddr = "127.0.0.1:20002".parse().unwrap();
+    let proxy_target = get_available_address();
+    let mock_pool_mining_addr = get_available_address();
+    let mock_pool_jd_addr = get_available_address();
     let tp_sniffer_addr = get_available_address();
+    let sv1_listen_addr = get_available_address();
+    let api_server_port = get_available_address().port().to_string();
     let (template_provider, template_provider_addr) =
         start_template_provider(Some(1), DifficultyLevel::Low);
 
@@ -87,7 +68,7 @@ async fn library_init_sv2_setup_connection() {
         Some(30),
     );
     pool_sniffer.start();
-    wait_for_port_to_be_bound("127.0.0.1:20000").await;
+    wait_for_port_to_be_bound(proxy_target).await;
 
     let jd_pool_sniffer = Sniffer::new(
         "proxy-pool-jd",
@@ -101,7 +82,7 @@ async fn library_init_sv2_setup_connection() {
         let jd_pool_sniffer = jd_pool_sniffer.clone();
         tokio::spawn(async move {
             loop {
-                if let Ok(listener) = TcpListener::bind("127.0.0.1:20000") {
+                if let Ok(listener) = TcpListener::bind(proxy_target) {
                     drop(listener);
                     jd_pool_sniffer.start();
                     break;
@@ -125,10 +106,11 @@ async fn library_init_sv2_setup_connection() {
         Some("test_token".to_string()),
         Some(tp_sniffer_addr.to_string()),
         None,
-        vec![mock_pool_mining_addr.to_string()],
+        vec![proxy_target.to_string()],
         120_000,
         0,
         100_000_000_000_000.0,
+        131_072.0,
         "info".to_string(),
         "off".to_string(),
         false,
@@ -137,16 +119,15 @@ async fn library_init_sv2_setup_connection() {
         false,
         false,
         true,
-        None,
+        Some(sv1_listen_addr.to_string()),
         None,
         250,
         16_384,
         None,
         250,
-        "3001".to_string(),
+        api_server_port,
         false,
         false,
-        "DDxDD".to_string(),
         None,
         "http://127.0.0.1:8332".to_string(),
         "user".to_string(),

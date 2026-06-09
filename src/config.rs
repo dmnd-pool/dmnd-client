@@ -74,8 +74,6 @@ struct Args {
     #[clap(long, short = 'u')]
     auto_update: bool,
     #[clap(long)]
-    signature: Option<String>,
-    #[clap(long)]
     miner_name: Option<String>,
     #[clap(long)]
     rpc_url: Option<String>,
@@ -187,7 +185,6 @@ pub struct Configuration {
     api_server_port: String,
     monitor: bool,
     auto_update: bool,
-    signature: String,
     miner_name: Option<String>,
     prioritizing_txs_config: Option<BitcoindRpcConfig>,
     missing_prioritizing_txs_variables: Vec<&'static str>,
@@ -249,7 +246,6 @@ and make that test pass."
         api_server_port: String,
         monitor: bool,
         auto_update: bool,
-        signature: String,
         miner_name: Option<String>,
         rpc_url: String,
         rpc_user: String,
@@ -296,7 +292,6 @@ and make that test pass."
             api_server_port,
             monitor,
             auto_update,
-            signature,
             miner_name,
             prioritizing_txs_config,
             missing_prioritizing_txs_variables,
@@ -382,7 +377,6 @@ and make that test pass."
             "3001".to_string(),
             false,
             false,
-            "DDxDD".to_string(),
             None,
             "http://127.0.0.1:8332".to_string(),
             "user".to_string(),
@@ -566,10 +560,6 @@ and make that test pass."
         Self::cfg().auto_update
     }
 
-    pub fn signature() -> String {
-        Self::cfg().signature.clone()
-    }
-
     pub fn miner_name() -> Option<String> {
         Self::cfg().miner_name.clone()
     }
@@ -623,22 +613,6 @@ and make that test pass."
             .or(config.token)
             .or_else(|| std::env::var("TOKEN").ok());
         println!("User token configured: {}", token.is_some());
-
-        let signature = match args.signature {
-            Some(s) => {
-                if s.len() == 2 {
-                    println!("Signature provided: DDx{s}");
-                    format!("DDx{s}")
-                } else {
-                    println!("Invalid signature provided, using DDxDD");
-                    "DDxDD".to_string()
-                }
-            }
-            None => {
-                println!("Signature not provided, using DDxDD");
-                "DDxDD".to_string()
-            }
-        };
 
         let tp_address = args
             .tp_address
@@ -894,7 +868,6 @@ and make that test pass."
             api_server_port,
             monitor,
             auto_update,
-            signature,
             miner_name,
             rpc_url,
             rpc_user,

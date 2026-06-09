@@ -185,7 +185,10 @@ impl TemplateRx {
             Some(AllocateMiningJobTokenSuccess {
                 request_id: 0,
                 mining_job_token: vec![0; 32].try_into().expect("Internal error: this operation can not fail because the vec![0; 32] can always be converted into Inner"),
-                coinbase_output_max_additional_size: 100,
+                coinbase_output_max_additional_size: miner_coinbase_output
+                    .len()
+                    .try_into()
+                    .expect("miner coinbase output size should fit in u32"),
                 coinbase_output: miner_coinbase_output.to_vec().try_into().expect("Internal error: this operation can not fail because the Vec can always be converted into Inner"),
                 async_mining_allowed: true,
             })
@@ -208,6 +211,7 @@ impl TemplateRx {
         let miner_coinbase_output = self_mutex
             .safe_lock(|s| s.miner_coinbase_output.clone())
             .map_err(|_| Error::TemplateRxMutexCorrupted)?;
+        let miner_name = crate::config::Configuration::miner_name();
         let main_task = {
             let self_mutex = self_mutex.clone();
             //? check
@@ -311,15 +315,14 @@ impl TemplateRx {
                                         pending_new_template = Some(m);
                                         continue;
                                     }
-                                    if let Some(miner_name) =
-                                        crate::config::Configuration::miner_name()
-                                    {
-                                        assert!(miner_name.len() < 75);
-                                        crate::shared::miner_tag::tag_new_template(
-                                            &mut m,
-                                            miner_name.as_str(),
-                                        );
-                                    };
+                                    if let Err(e) = crate::shared::miner_tag::tag_new_template(
+                                        &mut m,
+                                        miner_name.as_deref(),
+                                    ) {
+                                        error!("Invalid miner tag coinbase script data: {e}");
+                                        ProxyState::update_tp_state(TpState::Down);
+                                        break;
+                                    }
                                     let new_phash = super::IS_NEW_PHASH_ARRIVED
                                         .load(std::sync::atomic::Ordering::Acquire);
                                     let last_is_future = match self_mutex
@@ -747,7 +750,8 @@ mod tests {
     ) {
         let frame = recv_std_frame(&mut from_client).await;
         with_decoded_message(frame, |message| match message {
-            PoolMessages::TemplateDistribution(TemplateDistribution::CoinbaseOutputDataSize(_)) => {
+            PoolMessages::TemplateDistribution(TemplateDistribution::CoinbaseOutputDataSize(m)) => {
+                assert_eq!(m.coinbase_output_max_additional_size, 1);
             }
             other => panic!("unexpected coinbase size message: {other:?}"),
         });
