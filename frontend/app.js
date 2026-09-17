@@ -2,9 +2,14 @@ const MAX_BLOCK_WEIGHT = 4_000_000;
 const API_POLL_INTERVAL = 4_000;
 // The event stream does not announce tip changes; this poll retires stale candidates.
 const TEMPLATE_REFRESH_INTERVAL = 5_000;
+// The node's prioritised list only moves when a background poll changes it, so
+// refreshing faster than this just re-reads the same answer.
+const ACCELERATIONS_REFRESH_INTERVAL = 30_000;
 
 const ROUTES = {
   "/dashboard/overview": "Overview",
+  "/dashboard/accelerations": "mempool.space accelerations",
+  "/dashboard/rsk": "RSK merge mining",
 };
 
 // Ranking criteria; keys are the backend policy names. `value` is null when a
@@ -91,6 +96,14 @@ const state = {
   capabilities: null,
   polling: false,
   prioritizing: false,
+  miningActivity: {
+    accelerations: null,
+    rsk: null,
+    accelerationError: null,
+    rskError: null,
+    accelerationLoading: false,
+    rskLoading: false,
+  },
   // The proxy's API_TX_TOKEN. Guards the job declaration and prioritisation
   // endpoints alike, so both features read it from here.
   apiToken: localStorage.getItem("demand-tx-token") || "",
@@ -212,6 +225,8 @@ function renderShell() {
     <aside id="sidebar" class="sidebar">
       <nav class="sidebar-nav" aria-label="Dashboard navigation">
         ${sidebarLink("/dashboard/overview", "dashboard", "Dashboard")}
+        ${sidebarLink("/dashboard/accelerations", "trend", "mempool.space accelerations")}
+        ${sidebarLink("/dashboard/rsk", "layers", "RSK merge mining")}
       </nav>
     </aside>
     <div class="main-shell">
@@ -265,7 +280,9 @@ function navigate(route, replace = false) {
 
 function renderRoute() {
   closeModal();
-  renderOverview();
+  closePanel();
+  if (state.route === "/dashboard/overview") renderOverview();
+  else renderActivityPage();
 }
 
 async function apiRequest(path, options = {}) {
@@ -306,6 +323,9 @@ function handleRejectedToken(error) {
   closeModal();
   closePanel();
   state.templates = [];
+  state.miningActivity.accelerations = null;
+  state.miningActivity.rsk = null;
+  renderMiningActivity();
   renderTemplatesSection();
   return true;
 }
@@ -414,10 +434,8 @@ async function pollStats() {
   };
   state.stats.error =
     requests[0].status === "rejected" ? requests[0].reason?.message : null;
-  if (state.route === "/dashboard/overview") {
-    updateStatsUI();
-    loadMiners();
-  }
+  updateStatsUI();
+  if (state.route === "/dashboard/overview") loadMiners();
 }
 
 function renderOverview() {
@@ -483,6 +501,7 @@ function renderOverview() {
   renderTemplatesSection();
   renderMiners();
   renderLogs();
+  renderMiningActivity();
   if (!state.templatesLoaded && state.apiToken) loadTemplates();
   loadMiners();
 }
@@ -497,6 +516,320 @@ function statCard(id, iconName, label, value, footTitle, footMuted, hint = "") {
     }</div><div class="stat-value" data-stat-value>${value}</div></div></div></div>
     <div><div class="stat-foot-title"><span data-stat-foot-title>${footTitle}</span></div><div class="stat-foot-muted" data-stat-foot-muted>${footMuted}</div></div>
   </article>`;
+}
+
+function activityEmpty(message) {
+  return `<div class="tplx-empty">${escapeHtml(message)}</div>`;
+}
+
+function activityTxid(txid) {
+  return `<span class="activity-hash"><a href="https://mempool.space/tx/${encodeURIComponent(txid)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(txid)}"><code>${escapeHtml(shortHash(txid, 10, 8))}</code> ↗</a><button class="icon-btn btn ghost" type="button" data-copy="${escapeHtml(txid)}" aria-label="Copy transaction ID">${icon("copy", 13)}</button></span>`;
+}
+
+function renderActivityPage() {
+  const isRsk = state.route === "/dashboard/rsk";
+  const page = currentPageElement();
+  page.className = "page compact-top activity-page";
+  page.innerHTML = `<section class="page-header">
+    <div><h1 class="page-title">${escapeHtml(ROUTES[state.route])}</h1>
+      <p class="activity-description">${isRsk ? "Mine RSK alongside Bitcoin with the same mining power." : "Transactions paid for on mempool.space, boosted on your node so they are included in your blocks."}</p>
+    </div>
+    <div class="page-header-actions">
+      ${isRsk ? "" : `<a class="btn" href="https://mempool.space/accelerator" target="_blank" rel="noopener noreferrer">${icon("globe", 15)} Accelerator</a>
+      <button class="btn primary" type="button" data-action="open-prioritize">${icon("pin", 15)} Prioritise transaction</button>`}
+      <button class="btn" type="button" data-action="refresh-mining-activity">${icon("refresh", 15)} Refresh</button>
+    </div>
+  </section>
+  <section id="activity-stats" class="stats-grid" aria-label="${isRsk ? "RSK statistics" : "Acceleration statistics"}"></section>
+  <section class="card activity-card" aria-label="${isRsk ? "RSK activity" : "Accelerated transactions"}">
+    <div id="${isRsk ? "rsk" : "accelerations"}-content"></div>
+  </section>`;
+  updateStatsUI();
+  renderMiningActivity();
+  loadMiningActivity();
+  if (!isRsk && !state.templatesLoaded && state.apiToken) loadTemplates();
+}
+
+function activityNeedsToken(root) {
+  if (state.apiToken) return false;
+  root.innerHTML =
+    state.capabilities?.templates === false
+      ? activityEmpty("Set API_TX_TOKEN on the client to view mining activity.")
+      : `<div class="tplx-gate"><p class="tplx-gate-lead">Enter your API token to view this page.</p>${tokenFormHtml()}</div>`;
+  return true;
+}
+
+function renderActivityStats(values = []) {
+  const root = document.querySelector("#activity-stats");
+  if (!root) return;
+  const definitions =
+    state.route === "/dashboard/rsk"
+      ? [
+          ["checkCircle", "Block candidates", "Found since the client started"],
+          ["upload", "Awaiting collection", "Candidates queued for the bridge to collect"],
+          ["layers", "Last activated template", "Last RSK job activated by the client"],
+        ]
+      : [
+          ["trend", "Tracked transactions", "mempool.space accelerations tracked on your node"],
+          ["checkCircle", "In your mempool", "Available for block selection"],
+          [
+            "layers",
+            "In active template",
+            "Accelerated transactions in the template accepted by the pool",
+          ],
+          ["plus", "Total fee adjustment", "Virtual fee adjustment, in satoshis"],
+        ];
+  if (root.dataset.statsRoute !== state.route) {
+    root.innerHTML = definitions
+      .map(([symbol, label, description], index) =>
+        statCard(`activity-stat-${index}`, symbol, label, "—", description, ""),
+      )
+      .join("");
+    root.dataset.statsRoute = state.route;
+  }
+  definitions.forEach((_, index) => {
+    const value = root.querySelector(
+      `#activity-stat-${index} [data-stat-value]`,
+    );
+    if (value) value.textContent = values[index] ?? "—";
+  });
+}
+
+function renderMiningActivity() {
+  renderActivityStats();
+  const accelerationRoot = document.querySelector("#accelerations-content");
+  const rskRoot = document.querySelector("#rsk-content");
+  if (accelerationRoot) renderAccelerations(accelerationRoot);
+  if (rskRoot) renderRskActivity(rskRoot);
+}
+
+const accelerationMarkup = new WeakMap();
+
+function updateAccelerationContent(root, html) {
+  // Keep the table and keyboard focus intact when polling returns unchanged data.
+  if (accelerationMarkup.get(root) === html) return;
+  const scroll = root.querySelector(".activity-table-scroll");
+  const position = scroll ? [scroll.scrollLeft, scroll.scrollTop] : null;
+  const focused = root.contains(document.activeElement)
+    ? document.activeElement
+    : null;
+  const copy = focused?.dataset.copy;
+  const href = focused?.getAttribute("href");
+  root.innerHTML = html;
+  accelerationMarkup.set(root, html);
+  const replacement = [...root.querySelectorAll("[data-copy], a[href]")].find(
+    (element) =>
+      known(copy)
+        ? element.dataset.copy === copy
+        : href && element.getAttribute("href") === href,
+  );
+  replacement?.focus({ preventScroll: true });
+  const nextScroll = root.querySelector(".activity-table-scroll");
+  if (position && nextScroll) nextScroll.scrollTo(...position);
+}
+
+function renderAccelerations(accelerationRoot) {
+  // The token prompt writes its own markup, so invalidate the table cache.
+  if (!state.apiToken) accelerationMarkup.delete(accelerationRoot);
+  if (activityNeedsToken(accelerationRoot)) return;
+  const activity = state.miningActivity;
+  if (state.capabilities?.transaction_prioritization === false) {
+    updateAccelerationContent(
+      accelerationRoot,
+      activityEmpty("Transaction prioritisation is not configured on this client."),
+    );
+  } else if (activity.accelerationError) {
+    updateAccelerationContent(
+      accelerationRoot,
+      activityEmpty(`Could not load accelerations: ${activity.accelerationError}`),
+    );
+  } else if (activity.accelerations === null) {
+    updateAccelerationContent(
+      accelerationRoot,
+      activityEmpty("Loading accelerations…"),
+    );
+  } else {
+    const entries = Object.entries(activity.accelerations).sort(
+      ([left], [right]) => left.localeCompare(right),
+    );
+    const inMempool = entries.filter(([, tx]) => tx.in_mempool).length;
+    const totalAdjustment = entries.reduce(
+      (total, [, tx]) => total + (Number(tx.fee_delta) || 0),
+      0,
+    );
+    const template = state.templates.find(
+      (candidate) => candidate.template_id === state.activeDeclaration,
+    );
+    const included = template?.mempool_space_included?.length;
+    renderActivityStats([
+      formatNumber(entries.length),
+      `${formatNumber(inMempool)} / ${formatNumber(entries.length)}`,
+      included === undefined ? "—" : formatNumber(included),
+      `${totalAdjustment > 0 ? "+" : ""}${formatNumber(totalAdjustment)} sats`,
+    ]);
+    updateAccelerationContent(
+      accelerationRoot,
+      `<h2 class="validation-title activity-section-title">Accelerated transactions</h2>` +
+      (entries.length
+        ? `<div class="activity-table-scroll"><table class="pz-table"><thead><tr><th>Transaction</th><th class="right">Fee adjustment</th><th>Local status</th></tr></thead><tbody>${entries
+            .map(
+              ([txid, tx]) => `<tr>
+        <td>${activityTxid(txid)}</td>
+        <td class="right nowrap">${tx.fee_delta > 0 ? "+" : ""}${formatNumber(tx.fee_delta)} sats</td>
+        <td><span class="badge ${tx.in_mempool ? "success" : ""}">${tx.in_mempool ? "In mempool" : "Not in mempool"}</span></td>
+      </tr>`,
+            )
+            .join("")}</tbody></table></div>`
+        : activityEmpty("No accelerated transactions right now.")),
+    );
+  }
+}
+
+const rskSeen = { template: null, proofs: null };
+
+function rskShellHtml() {
+  const node = (key, glyph, label) =>
+    `<li class="rsk-node" data-node="${key}">
+      <span class="rsk-node-glyph" aria-hidden="true">${glyph}</span>
+      <span class="rsk-node-body"><span class="rsk-node-label">${label}</span>
+      <span class="rsk-node-value" data-value="${key}">—</span>
+      <span class="rsk-node-note" data-note="${key}"></span></span>
+    </li>`;
+  return `<ol class="rsk-strip" aria-label="Merge mining status">
+      ${node("work", "R", "Cached RSK work")}
+      <li class="rsk-link" data-link="work" aria-hidden="true"></li>
+      ${node("job", "₿", "Last activated job")}
+      <li class="rsk-link" data-link="job" aria-hidden="true"></li>
+      ${node("candidates", "✓", "Candidates")}
+    </ol>
+    <p class="rsk-strip-hint" data-rsk-hint></p>`;
+}
+
+function rskSetNode(root, key, live, value, note = "") {
+  const element = root.querySelector(`[data-node="${key}"]`);
+  if (!element) return;
+  element.classList.toggle("is-live", live);
+  element.querySelector(`[data-value="${key}"]`).textContent = value;
+  element.querySelector(`[data-note="${key}"]`).textContent = note;
+}
+
+function rskFlash(root, key) {
+  const element = root.querySelector(`[data-value="${key}"]`);
+  if (!element) return;
+  element.classList.remove("is-bumped");
+  void element.offsetWidth; // restart the animation on a repeat change
+  element.classList.add("is-bumped");
+}
+
+function renderRskActivity(rskRoot) {
+  if (activityNeedsToken(rskRoot)) return;
+  const activity = state.miningActivity;
+  if (activity.rskError) {
+    rskRoot.innerHTML = activityEmpty(
+      `Could not load RSK activity: ${activity.rskError}`,
+    );
+    return;
+  }
+  if (!activity.rsk) {
+    rskRoot.innerHTML = activityEmpty("Loading RSK activity…");
+    return;
+  }
+  const { configured, job_declaration, activity: rsk } = activity.rsk;
+  const hasJob = known(rsk.active_template_id);
+  renderActivityStats([
+    formatNumber(rsk.proofs_found),
+    formatNumber(rsk.pending_proofs),
+    hasJob ? `#${formatNumber(rsk.active_template_id)}` : "—",
+  ]);
+
+  if (!rskRoot.querySelector(".rsk-strip")) {
+    rskRoot.innerHTML = rskShellHtml();
+    rskSeen.template = rskSeen.proofs = null;
+  }
+
+  rskSetNode(rskRoot, "work", rsk.work_available,
+    rsk.work_available ? "Ready" : "None",
+    rsk.work_available ? "from the bridge" : "waiting");
+  rskSetNode(rskRoot, "job", hasJob,
+    hasJob ? `#${formatNumber(rsk.active_template_id)}` : "—",
+    hasJob ? "template" : "none");
+  rskSetNode(rskRoot, "candidates", rsk.observer_ready,
+    formatNumber(rsk.proofs_found),
+    rsk.pending_proofs
+      ? `${formatNumber(rsk.pending_proofs)} awaiting bridge`
+      : "found");
+  rskRoot
+    .querySelector('[data-node="candidates"]')
+    ?.classList.toggle("has-results", rsk.proofs_found > 0);
+
+  const live = {
+    work: rsk.work_available,
+    job: hasJob,
+    candidates: rsk.observer_ready,
+  };
+  for (const [from, to] of [["work", "job"], ["job", "candidates"]])
+    rskRoot
+      .querySelector(`[data-link="${from}"]`)
+      ?.classList.toggle("is-flowing", live[from] && live[to]);
+
+  if (rskSeen.template !== null && rsk.active_template_id !== rskSeen.template)
+    rskFlash(rskRoot, "job");
+  if (rskSeen.proofs !== null && rsk.proofs_found > rskSeen.proofs)
+    rskFlash(rskRoot, "candidates");
+  rskSeen.template = rsk.active_template_id;
+  rskSeen.proofs = rsk.proofs_found;
+
+  // Only ever says what to do next, and only when something needs doing.
+  const hint = rskRoot.querySelector("[data-rsk-hint]");
+  if (hint)
+    hint.textContent = !configured
+      ? "Connect an RSK bridge to get started."
+      : !job_declaration
+        ? "Connect a Template Provider to get started."
+        : !rsk.work_available
+          ? "Waiting for RSK work from the bridge."
+          : !hasJob
+            ? "Waiting for your next mining job."
+            : "";
+}
+
+const ACTIVITY_SOURCES = {
+  "/dashboard/accelerations": ["acceleration", "/api/tx/prioritized"],
+  "/dashboard/rsk": ["rsk", "/api/merge-mining/status"],
+};
+
+async function loadMiningActivity(only) {
+  const source = ACTIVITY_SOURCES[state.route];
+  // Only the page being looked at is worth fetching, and only its own half.
+  if (!state.apiToken || !source) return;
+  const [kind, path] = source;
+  if (only && only !== kind) return;
+  const activity = state.miningActivity;
+  if (activity[`${kind}Loading`]) return;
+  if (
+    kind === "acceleration" &&
+    state.capabilities?.transaction_prioritization === false
+  )
+    return;
+  const token = state.apiToken;
+  const dataKey = kind === "acceleration" ? "accelerations" : "rsk";
+  activity[`${kind}Loading`] = true;
+  try {
+    const data = await envelopeRequest(path, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (token !== state.apiToken) return;
+    activity[dataKey] = kind === "acceleration" ? (data.mempool_space ?? {}) : data;
+    activity[`${kind}Error`] = null;
+  } catch (error) {
+    if (token !== state.apiToken) return;
+    if (handleRejectedToken(error)) return;
+    activity[dataKey] = null;
+    activity[`${kind}Error`] = error.message;
+  } finally {
+    activity[`${kind}Loading`] = false;
+    renderMiningActivity();
+  }
 }
 
 function updateStatsUI() {
@@ -665,6 +998,7 @@ const CLICK_ACTIONS = {
   },
   "dismiss-toast": (event, target) => target.closest(".toast")?.remove(),
   "refresh-templates": () => loadTemplates(),
+  "refresh-mining-activity": () => loadMiningActivity(),
   "open-prioritize": () => openPrioritizePanel(),
   "open-auto-declare": () => openAutoDeclareModal(),
   "copy-modal-text": () => copyWithToast(state.modalCopyText),
@@ -816,6 +1150,7 @@ async function fetchTemplates() {
   }
   state.templatesLoaded = true;
   renderTemplatesSection();
+  if (document.querySelector("#accelerations-content")) renderMiningActivity();
 }
 
 function noticeNewTemplate() {
@@ -1244,7 +1579,7 @@ function renderPaper(template, { declared, sort, now }) {
       </div>
       ${
         (template.prioritized_included || []).length
-          ? `<span class="p3-prio" title="${formatNumber(template.prioritized_included.length)} transaction${template.prioritized_included.length === 1 ? "" : "s"} you asked bitcoind to prioritise ${template.prioritized_included.length === 1 ? "is" : "are"} in this template">${icon("pin", 10)} ${formatNumber(template.prioritized_included.length)} prioritised</span>`
+          ? `<span class="p3-prio" title="${formatNumber(template.prioritized_included.length)} locally prioritised transaction${template.prioritized_included.length === 1 ? "" : "s"} ${template.prioritized_included.length === 1 ? "is" : "are"} in this template">${icon("pin", 10)} ${formatNumber(template.prioritized_included.length)} prioritised</span>`
           : ""
       }
       ${
@@ -1416,7 +1751,9 @@ async function submitApiToken(form, token) {
   }
   saveApiToken(token);
   closePanel();
+  renderMiningActivity();
   loadTemplates();
+  loadMiningActivity();
 }
 
 // Prioritise a transaction, or say what is stopping it: what the proxy was
@@ -1459,6 +1796,7 @@ function openPrioritizePanel() {
   }
   openPanel({
     title: "Prioritise a transaction",
+    description: "Free. This changes the transaction priority ONLY on your node and does not require you to pay an extra fee.",
     body: `<form id="prio-panel-form" class="panel-form">
         <label class="panel-field">
           <span class="panel-label">Transaction <span class="muted">txid</span></span>
@@ -1484,10 +1822,6 @@ function setPrioritizingUI(busy) {
   button.textContent = busy ? "Sending…" : "Prioritise transaction";
 }
 
-// ---------------------------------------------------------------------------
-// Prioritised transactions. The fee delta affects the template bitcoind builds
-// *next*. Endpoints authenticate with API_TX_TOKEN, kept in this browser only.
-// ---------------------------------------------------------------------------
 
 // Submit a raw transaction and have bitcoind prioritise it.
 // One transaction should not be prioritised by both bitcoind and mempool.space, so check the former first.
@@ -1683,6 +2017,7 @@ function templateTransactionsTable(template) {
   }
 
   const prioritized = new Set(template.prioritized_included || []);
+  const accelerated = new Set(template.mempool_space_included || []);
 
   // Prioritised first, then by fee; the rest keep the node's order.
   const rows = [...transactions]
@@ -1695,7 +2030,7 @@ function templateTransactionsTable(template) {
     .map((transaction) => {
       const isPrioritized = prioritized.has(transaction.txid);
       return `<tr class="${isPrioritized ? "pz-row-prio" : ""}">
-      <td><span class="inline" style="gap:.35rem">${isPrioritized ? `<span class="tplx-row-mark" title="You asked bitcoind to prioritise this one">${icon("pin", 11)}</span>` : ""}<span class="txid-value" title="${escapeHtml(transaction.txid)}">${escapeHtml(shortHash(transaction.txid, 12, 6))}</span><button class="icon-btn btn ghost" type="button" data-copy="${escapeHtml(transaction.txid)}" aria-label="Copy transaction ID">${icon("copy", 13)}</button></span></td>
+      <td><span class="inline" style="gap:.35rem">${isPrioritized ? `<span class="tplx-row-mark" title="${accelerated.has(transaction.txid) ? "mempool.space acceleration" : "Locally prioritised"}">${icon(accelerated.has(transaction.txid) ? "trend" : "pin", 11)}</span>` : ""}<span class="txid-value" title="${escapeHtml(transaction.txid)}">${escapeHtml(shortHash(transaction.txid, 12, 6))}</span><button class="icon-btn btn ghost" type="button" data-copy="${escapeHtml(transaction.txid)}" aria-label="Copy transaction ID">${icon("copy", 13)}</button>${accelerated.has(transaction.txid) ? '<span class="badge success">mempool.space</span>' : ""}</span></td>
       <td class="right">${transaction.fee_sat === null || transaction.fee_sat === undefined ? '<span class="muted">—</span>' : formatBtc(transaction.fee_sat)}</td>
       <td class="right">${transaction.fee_rate_sat_per_vb === null || transaction.fee_rate_sat_per_vb === undefined ? '<span class="muted">—</span>' : formatNumber(transaction.fee_rate_sat_per_vb, 2)}</td>
       <td class="right">${formatNumber(transaction.vsize)}</td>
@@ -1731,6 +2066,7 @@ async function resolveCapabilities() {
 function startDashboard() {
   renderShell();
   pollStats();
+  loadMiningActivity();
   if (state.apiToken) loadTemplates();
   if (state.polling) return;
   state.polling = true;
@@ -1739,11 +2075,18 @@ function startDashboard() {
     if (visible()) pollStats();
   }, API_POLL_INTERVAL);
   setInterval(() => {
-    if (visible() && state.apiToken) loadTemplates();
+    if (!visible() || !state.apiToken) return;
+    loadTemplates();
+    // Cheap and genuinely fast-moving: a candidate can turn up any second.
+    loadMiningActivity("rsk");
   }, TEMPLATE_REFRESH_INTERVAL);
+  setInterval(() => {
+    if (visible() && state.apiToken) loadMiningActivity("acceleration");
+  }, ACCELERATIONS_REFRESH_INTERVAL);
   document.addEventListener("visibilitychange", () => {
     if (!visible()) return;
     pollStats();
+    loadMiningActivity();
     if (state.apiToken) loadTemplates();
   });
 }

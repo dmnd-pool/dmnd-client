@@ -7,12 +7,12 @@ use std::{
     collections::HashMap,
     error::Error as StdError,
     fmt,
-    sync::{Arc, LazyLock},
-    time::Duration,
+    sync::{Arc, LazyLock, Mutex},
+    time::{Duration, Instant},
 };
 
 use crate::{
-    api::bitcoin_rpc::{BitcoindRpc, BitcoindRpcError},
+    api::bitcoin_rpc::{BitcoindRpc, BitcoindRpcError, PrioTx},
     dashboard::{assets::static_handler, open_dashboard},
     router::Router,
     Configuration,
@@ -35,6 +35,23 @@ const BAD_TRANSACTIONS_CLEAR_INTERVAL: Duration = Duration::from_secs(3 * 60 * 6
 pub(crate) static START_TX_PRIO: AtomicBool = AtomicBool::new(true);
 static PRIORITIZED_TRANSACTIONS_POLL_LOCK: LazyLock<Arc<tokio::sync::Mutex<()>>> =
     LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
+
+const NODE_PRIORITIZED_VIEW_MAX_AGE: Duration = Duration::from_secs(30);
+
+/// The last reading of the node's prioritized transactions, and when it was taken. This is used to avoid repeated calls to `getprioritisetransaction` for every API request.
+static NODE_PRIORITIZED_VIEW: Mutex<Option<(HashMap<Txid, PrioTx>, Instant)>> = Mutex::new(None);
+
+pub(crate) fn set_node_prioritized_view(transactions: Option<&HashMap<Txid, PrioTx>>) {
+    if let Ok(mut view) = NODE_PRIORITIZED_VIEW.lock() {
+        *view = transactions.map(|transactions| (transactions.clone(), Instant::now()));
+    }
+}
+
+pub(crate) fn node_prioritized_view() -> Option<HashMap<Txid, PrioTx>> {
+    let view = NODE_PRIORITIZED_VIEW.lock().ok()?;
+    let (transactions, taken_at) = view.as_ref()?;
+    (taken_at.elapsed() <= NODE_PRIORITIZED_VIEW_MAX_AGE).then(|| transactions.clone())
+}
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,6 +177,10 @@ pub(crate) async fn start(
     let app = AxumRouter::new()
         .route("/api/health", get(Api::health_check))
         .route("/api/capabilities", get(Api::get_capabilities))
+        .route(
+            "/api/merge-mining/status",
+            get(Api::get_merge_mining_status),
+        )
         .route(
             "/api/coinbase/op-return",
             post(crate::merge_mining::set_pair_api),

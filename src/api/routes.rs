@@ -21,10 +21,11 @@ fn template_payload(
     snapshot: &crate::block_templates::TemplateSnapshot,
     with_transactions: bool,
 ) -> serde_json::Value {
+    let accelerated =
+        crate::prioritized_transactions::MEMPOOL_DOT_SPACE_ACCELERATED.snapshot_txids();
     let mut prioritized =
         crate::prioritized_transactions::PRIORITIZED_TRANSACTIONS.snapshot_txids();
-    prioritized
-        .extend(crate::prioritized_transactions::MEMPOOL_DOT_SPACE_ACCELERATED.snapshot_txids());
+    prioritized.extend(accelerated.iter().copied());
     let prioritized_included: Vec<String> = snapshot
         .transactions
         .iter()
@@ -68,6 +69,9 @@ fn template_payload(
         "total_weight": snapshot.total_weight,
         "received_at": snapshot.received_at,
         "prioritized_included": prioritized_included,
+        "mempool_space_included": snapshot.transactions.iter()
+            .filter(|tx| accelerated.contains(&tx.txid))
+            .map(|tx| tx.txid.to_string()).collect::<Vec<_>>(),
     });
     if with_transactions {
         payload["transactions"] = json!(transactions);
@@ -231,6 +235,29 @@ impl Api {
         }))))
     }
 
+    pub async fn get_merge_mining_status(
+        State(state): State<AppState>,
+        headers: HeaderMap,
+    ) -> impl IntoResponse {
+        if let Some(refusal) = check_authorization(&state, &headers) {
+            return refusal;
+        }
+        match crate::merge_mining::dashboard_snapshot() {
+            Ok(snapshot) => (
+                StatusCode::OK,
+                Json(APIResponse::success(Some(json!({
+                    "configured": crate::merge_mining::configured(),
+                    "job_declaration": Configuration::tp_address().is_some(),
+                    "activity": snapshot,
+                })))),
+            ),
+            Err(error) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(APIResponse::error(Some(error.to_string()))),
+            ),
+        }
+    }
+
     /// Candidates for the current tip, newest first.
     pub async fn get_recent_templates(
         State(state): State<AppState>,
@@ -374,6 +401,7 @@ impl Api {
                     .unwrap_or(0);
                 let fee_delta = current_fee_delta + fee_delta;
                 crate::prioritized_transactions::PRIORITIZED_TRANSACTIONS.record(txid, fee_delta);
+                crate::api::set_node_prioritized_view(None);
                 info!("transaction prioritized in bitcoind: {txid}");
                 (
                     StatusCode::OK,
@@ -460,6 +488,7 @@ impl Api {
         for store in stores {
             store.remove(txid);
         }
+        crate::api::set_node_prioritized_view(None);
 
         Ok(())
     }
@@ -491,17 +520,26 @@ impl Api {
             );
         }
 
-        let _prioritized_transactions_guard = PRIORITIZED_TRANSACTIONS_POLL_LOCK.lock().await;
-        let transactions = match prioritizing_txs.rpc.get_prioritised_transactions().await {
-            Ok(transactions) => transactions,
-            Err(e) => {
-                error!(error = %e, "failed to fetch prioritized transactions from bitcoind");
-                return (
-                    e.status_code(),
-                    Json(APIResponse::<CategorizedPrioritizedTransactions>::error(
-                        Some(e.to_string()),
-                    )),
-                );
+        let transactions = match crate::api::node_prioritized_view() {
+            Some(transactions) => transactions,
+            None => {
+                let _prioritized_transactions_guard =
+                    PRIORITIZED_TRANSACTIONS_POLL_LOCK.lock().await;
+                match prioritizing_txs.rpc.get_prioritised_transactions().await {
+                    Ok(transactions) => {
+                        crate::api::set_node_prioritized_view(Some(&transactions));
+                        transactions
+                    }
+                    Err(e) => {
+                        error!(error = %e, "failed to fetch prioritized transactions from bitcoind");
+                        return (
+                            e.status_code(),
+                            Json(APIResponse::<CategorizedPrioritizedTransactions>::error(
+                                Some(e.to_string()),
+                            )),
+                        );
+                    }
+                }
             }
         };
         let response = categorize_prioritized_transactions(
@@ -1137,6 +1175,43 @@ fn bearer(token: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
     headers
+}
+
+#[tokio::test]
+async fn merge_mining_status_requires_dashboard_authorization() {
+    for (token, headers, expected, message) in [
+        (
+            None,
+            bearer("api-token"),
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some("API TX TOKEN NOT SET"),
+        ),
+        (
+            Some("api-token"),
+            HeaderMap::new(),
+            StatusCode::UNAUTHORIZED,
+            Some("Unauthorized"),
+        ),
+        (
+            Some("api-token"),
+            bearer("wrong"),
+            StatusCode::UNAUTHORIZED,
+            Some("Unauthorized"),
+        ),
+        (Some("api-token"), bearer("api-token"), StatusCode::OK, None),
+    ] {
+        let response = Api::get_merge_mining_status(State(declaration_test_state(token)), headers)
+            .await
+            .into_response();
+        assert_eq!(response.status(), expected);
+        // The route answers 503 both for an unset token and for unreadable
+        // merge-mining state, so pin down which refusal this is.
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(body["message"].as_str(), message);
+    }
 }
 
 // The token gates the templates a caller can read and the criterion it can

@@ -308,6 +308,16 @@ svg {
   margin-bottom: 1rem;
 }
 
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.page-header-actions .btn { text-decoration: none; white-space: nowrap; }
+
 .page-title {
   margin: 0;
   font-size: 1.375rem;
@@ -929,6 +939,8 @@ svg {
     align-items: flex-start;
     flex-direction: column;
   }
+
+  .page-header-actions { width: 100%; }
 
   .page-title {
     font-size: 1.35rem;
@@ -1559,3 +1571,64 @@ svg {
   background: color-mix(in srgb, var(--success) 10%, transparent);
 }
 .pz-table tr.pz-row-prio td:first-child { font-weight: 600; }
+
+.activity-card { min-width: 0; padding: 1rem; }
+.activity-card h2 { margin: 0; font-size: inherit; }
+.activity-description {
+  color: var(--muted-foreground);
+  font-size: .8rem;
+  line-height: 1.5;
+  margin: .6rem 0 1rem;
+}
+.activity-hash {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  white-space: nowrap;
+}
+.activity-table-scroll { max-height: 18rem; margin-top: .75rem; overflow: auto; }
+.activity-table-scroll .pz-table { margin-top: 0; }
+.activity-table-scroll th { position: sticky; top: 0; background: var(--card); z-index: 1; }
+.activity-page .activity-table-scroll { max-height: 60vh; }
+
+.activity-section-title { margin: 0 0 1rem; }
+.activity-page .stat-value { overflow-wrap: anywhere; }
+
+/* Merge mining status. Every state is driven by a snapshot field, so the strip
+   only moves when the client does. */
+.rsk-strip { display: flex; align-items: stretch; gap: 0; list-style: none; margin: 0 0 .75rem; padding: 0; }
+.rsk-node { flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: .6rem; padding: .8rem .9rem; border: 1px solid var(--border); border-radius: .7rem; background: var(--card); transition: border-color .2s, background .2s; }
+.rsk-node-glyph { display: grid; place-items: center; width: 2rem; height: 2rem; flex-shrink: 0; border: 1px solid var(--border); border-radius: 50%; font-size: .85rem; color: var(--muted-foreground); transition: color .2s, border-color .2s; }
+.rsk-node-body { min-width: 0; display: flex; flex-direction: column; }
+.rsk-node-label { font-size: .7rem; color: var(--muted-foreground); }
+.rsk-node-value { font-size: 1.05rem; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+.rsk-node-note { font-size: .65rem; color: var(--muted-foreground); }
+.rsk-node.is-live { border-color: color-mix(in srgb, var(--success) 35%, var(--border)); background: color-mix(in srgb, var(--success) 5%, var(--card)); }
+.rsk-node.is-live .rsk-node-glyph { color: var(--success); border-color: var(--success); }
+.rsk-node.has-results .rsk-node-value { color: var(--positive); }
+.rsk-node-value.is-bumped { animation: rsk-bump .9s ease-out; }
+
+/* A link flows only when the nodes on both sides are live, so the first dim
+   node in the row is the thing that needs attention. */
+.rsk-link { flex: 0 1 2rem; min-width: .8rem; align-self: center; height: 2px; background-image: repeating-linear-gradient(90deg, var(--border) 0 5px, transparent 5px 11px); background-size: 11px 2px; }
+.rsk-link.is-flowing { background-image: repeating-linear-gradient(90deg, var(--success) 0 5px, transparent 5px 11px); animation: rsk-flow 1s linear infinite; }
+@keyframes rsk-flow { to { background-position: 11px 0; } }
+@keyframes rsk-bump { 0% { color: var(--success); transform: scale(1.14); } 100% { transform: none; } }
+
+.rsk-strip-hint { font-size: .8rem; color: var(--muted-foreground); margin: 0 0 1rem; }
+.rsk-strip-hint:empty { display: none; }
+
+@media (max-width: 720px) {
+  .rsk-strip { flex-direction: column; }
+  .rsk-link { flex-basis: 1rem; height: 1rem; width: 2px; margin-left: 1.85rem; background-image: repeating-linear-gradient(180deg, var(--border) 0 5px, transparent 5px 11px); background-size: 2px 11px; }
+  .rsk-link.is-flowing { background-image: repeating-linear-gradient(180deg, var(--success) 0 5px, transparent 5px 11px); animation-name: rsk-flow-vertical; }
+  @keyframes rsk-flow-vertical { to { background-position: 0 11px; } }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rsk-link.is-flowing, .rsk-node-value.is-bumped { animation: none; }
+}
+
+.activity-hash a { color: inherit; text-decoration: none; }
+.activity-hash a:hover { text-decoration: underline; color: var(--info); }
+.activity-hash a:focus-visible { outline: 2px solid var(--info); outline-offset: 3px; }
