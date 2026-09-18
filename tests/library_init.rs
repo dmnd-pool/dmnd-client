@@ -128,6 +128,7 @@ async fn library_init_sv2_setup_connection() {
         api_server_port,
         false,
         false,
+        false,
         None,
         "http://127.0.0.1:8332".to_string(),
         "user".to_string(),

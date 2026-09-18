@@ -5,6 +5,7 @@ use errors::Error;
 use std::sync::Arc;
 use tracing::error;
 
+use binary_sv2::GetSize;
 use dashmap::DashMap;
 use demand_share_accounting_ext::*;
 use parser::{PoolExtMessages, ShareAccountingMessages};
@@ -64,6 +65,7 @@ fn relay_up(
                 );
             };
             let msg = PoolExtMessages::Mining(msg);
+            crate::api::stats::record_sent(msg.get_size());
             if up_sender.send(msg).await.is_err() {
                 break;
             }
@@ -79,6 +81,7 @@ fn relay_down(
 ) -> AbortOnDrop {
     let task = tokio::spawn(async move {
         while let Some(msg) = up_receiver.recv().await {
+            crate::api::stats::record_received(msg.get_size());
             match msg {
                 PoolExtMessages::ShareAccountingMessages(msg) => {
                     if let ShareAccountingMessages::ShareOk(msg) = msg {

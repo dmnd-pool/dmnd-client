@@ -28,9 +28,11 @@ use tracing::{error, info, warn};
 mod api;
 mod auto_update;
 mod config;
+mod dashboard;
 mod debug_timing;
 mod ingress;
 pub use config::Configuration;
+mod block_templates;
 pub mod jd_client;
 mod merge_mining;
 mod minin_pool_connection;
@@ -238,6 +240,7 @@ async fn initialize_proxy(
                 continue;
             }
         };
+        block_templates::reset();
 
         let (downs_sv1_tx, downs_sv1_rx) = channel(crate::DOWNSTREAM_ACCEPT_BUFFER_SIZE);
         let downstream_handoff = downs_sv1_tx.clone();

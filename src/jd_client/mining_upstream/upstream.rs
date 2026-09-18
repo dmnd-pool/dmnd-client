@@ -606,6 +606,7 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
                 "Set custom mining job success {}, for template {}",
                 m.job_id, request.template_id
             );
+            crate::block_templates::declaration_accepted(request.template_id);
             IS_CUSTOM_JOB_SET.store(true, std::sync::atomic::Ordering::Release);
             Ok(SendTo::None(None))
         } else {
@@ -623,6 +624,7 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
         m: roles_logic_sv2::mining_sv2::SetCustomMiningJobError,
     ) -> Result<roles_logic_sv2::handlers::mining::SendTo<Downstream>, RolesLogicError> {
         if let Some(request) = self.template_to_job_id.take_request(m.request_id) {
+            crate::block_templates::declaration_rejected(request.template_id);
             warn!(
                 template_id = request.template_id,
                 request_id = m.request_id,

@@ -57,6 +57,17 @@ The Template Provider listens on port **8336** by default — you'll need that i
 
 **✅ Verify:** the sv2-tp log should show a successful IPC connection to Bitcoin Core and new templates being generated as blocks arrive.
 
+### Dashboard
+
+The client serves a local dashboard at `http://127.0.0.1:3001` (set the port with `--api-server-port`). It shows pool and miner status and the block templates sv2-tp is offering, and lets you ask bitcoind to prioritise a transaction. It opens in a browser on start; set `HEADFUL=false` to stop that.
+
+Use the sidebar to open the **mempool.space accelerations** or **RSK merge mining** page. Both need the client's `API_TX_TOKEN`.
+
+- **mempool.space accelerations:** This page shows the accelerated transactions the client has fetched from mempool.space.
+- **RSK merge mining:** This page shows whether merge mining is running and how many RSK candidates your miners have found. A candidate is a proof that meets the RSK target; the bridge collects them and sends them to RSK.
+
+The RSK page refreshes every five seconds, the accelerations page every thirty. Neither refreshes while you are looking at another page or another tab.
+
 ## 4. Run the DMND Client
 
 ### 4.1 Download the DMND Stratum V2 Client

@@ -129,6 +129,22 @@ struct ContextState {
 struct FoundState {
     pending: VecDeque<FoundJob>,
     recent: VecDeque<(String, String)>,
+    total_found: u64,
+}
+
+#[derive(Default, Serialize)]
+pub(crate) struct MergeMiningSnapshot {
+    observer_ready: bool,
+    work_available: bool,
+    active_template_id: Option<u64>,
+    proofs_found: u64,
+    pending_proofs: usize,
+}
+
+pub(crate) fn dashboard_snapshot() -> Result<MergeMiningSnapshot, MergeMiningError> {
+    GLOBAL
+        .get()
+        .map_or_else(|| Ok(MergeMiningSnapshot::default()), MergeMining::snapshot)
 }
 
 #[derive(Clone)]
@@ -270,6 +286,41 @@ impl std::fmt::Display for MergeMiningError {
 }
 
 impl MergeMining {
+    fn snapshot(&self) -> Result<MergeMiningSnapshot, MergeMiningError> {
+        let context = self
+            .core
+            .context
+            .lock()
+            .map_err(|_| MergeMiningError::StateUnavailable)?;
+        let work_available = context
+            .desired
+            .as_ref()
+            .is_some_and(|pair| is_rsk_payload(&pair.payload));
+        let active_template_id = context
+            .active_binding
+            .and_then(|id| context.jobs.get(&id))
+            .filter(|job| {
+                context
+                    .templates
+                    .get(&job.template_generation)
+                    .is_some_and(|template| is_rsk_payload(&template.desired.payload))
+            })
+            .map(|job| job.template_id);
+        drop(context);
+        let found = self
+            .core
+            .found
+            .lock()
+            .map_err(|_| MergeMiningError::StateUnavailable)?;
+        Ok(MergeMiningSnapshot {
+            observer_ready: self.core.observer_ready.load(Ordering::Acquire),
+            work_available,
+            active_template_id,
+            proofs_found: found.total_found,
+            pending_proofs: found.pending.len(),
+        })
+    }
+
     fn new() -> Self {
         let core = Arc::new(Core {
             context: Mutex::new(ContextState::default()),
@@ -1226,6 +1277,7 @@ fn process_candidate(core: &Core, observation: ShareObservation, context: Candid
         }
     }
     debug!(template_id = job.template_id, bitcoin_block_hash = %job.bitcoin_block_hash_hex, "queued RSK merge-mining proof candidate");
+    found.total_found = found.total_found.saturating_add(1);
     found.pending.push_back(job);
 }
 
@@ -2654,6 +2706,43 @@ mod tests {
         assert_eq!(second.header_nonce, 2);
         assert!(first.id < second.id);
         assert!(merge.take_found_job().expect("queue").is_none());
+    }
+
+    #[test]
+    fn dashboard_snapshot_reports_state_without_consuming_it() {
+        let merge = MergeMining::new();
+
+        let idle = merge.snapshot().expect("idle snapshot");
+        assert!(!idle.work_available);
+        assert!(idle.active_template_id.is_none());
+        assert_eq!(idle.proofs_found, 0);
+        assert_eq!(idle.pending_proofs, 0);
+
+        merge
+            .set_desired_pair(PAYLOAD_HEX, EASY_TARGET)
+            .expect("valid pair");
+        merge
+            .apply_to_template(&mut template(93), RESERVED_COINBASE_OUTPUT_BYTES as usize)
+            .expect("active template");
+        merge.bind_job(43, 93, Vec::new(), Vec::new());
+        let binding = merge.claim_job_binding(43).expect("active binding");
+        merge.set_active_job_binding(Some(binding));
+        let (observation, context) = candidate(EASY_TARGET, Vec::new(), 1, 1);
+        process_candidate(&merge.core, observation, context);
+
+        let active = merge.snapshot().expect("active snapshot");
+        assert!(active.work_available);
+        assert_eq!(active.active_template_id, Some(93));
+        assert_eq!(active.proofs_found, 1);
+        assert_eq!(active.pending_proofs, 1);
+
+        // The bridge stays the only consumer: reading the dashboard twice must
+        // leave the queue for it, and draining it must not rewrite the total.
+        assert_eq!(merge.snapshot().expect("repeat snapshot").pending_proofs, 1);
+        assert!(merge.take_found_job().expect("queue").is_some());
+        let drained = merge.snapshot().expect("drained snapshot");
+        assert_eq!(drained.pending_proofs, 0);
+        assert_eq!(drained.proofs_found, 1);
     }
 
     #[test]

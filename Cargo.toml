@@ -68,10 +68,8 @@ noise_sv2 = { git = "https://github.com/demand-open-source/stratum" }
 codec_sv2 = { git = "https://github.com/demand-open-source/stratum", features = ["noise_sv2", "with_buffer_pool"] }
 sv1_api = { git = "https://github.com/demand-open-source/stratum" }
 
-
-
-
-
+rust-embed = "8.7.2"
+mime_guess = "2.0.5"
 
 [dev-dependencies]
 rand = "0.8.5"

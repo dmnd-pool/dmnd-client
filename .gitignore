@@ -2,3 +2,6 @@
 /logs
 *.dump
 *.pem
+.DS_Store
+config.toml
+/template-provider

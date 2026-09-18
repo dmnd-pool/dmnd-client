@@ -3,8 +3,7 @@ use super::{
     utils::get_cpu_and_memory_usage,
     AppState, PRIORITIZED_TRANSACTIONS_POLL_LOCK,
 };
-use crate::config::Configuration;
-use crate::proxy_state::ProxyState;
+use crate::{config::Configuration, proxy_state::ProxyState};
 use axum::{
     extract::{Path, State},
     http::{header::AUTHORIZATION, HeaderMap, StatusCode},
@@ -12,12 +11,79 @@ use axum::{
     Json,
 };
 use bitcoin::Txid;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use tracing::{error, info, warn};
 
-#[cfg(test)]
-use serde_json::json;
+/// Render one received template for the dashboard.
+fn template_payload(
+    snapshot: &crate::block_templates::TemplateSnapshot,
+    with_transactions: bool,
+) -> serde_json::Value {
+    let accelerated =
+        crate::prioritized_transactions::MEMPOOL_DOT_SPACE_ACCELERATED.snapshot_txids();
+    let mut prioritized =
+        crate::prioritized_transactions::PRIORITIZED_TRANSACTIONS.snapshot_txids();
+    prioritized.extend(accelerated.iter().copied());
+    let prioritized_included: Vec<String> = snapshot
+        .transactions
+        .iter()
+        .filter(|tx| prioritized.contains(&tx.txid))
+        .map(|tx| tx.txid.to_string())
+        .collect();
+
+    let mut priced_tx_count: usize = 0;
+    let mut transactions = Vec::with_capacity(if with_transactions {
+        snapshot.transactions.len()
+    } else {
+        0
+    });
+
+    for tx in &snapshot.transactions {
+        if tx.fee_sat.is_some() {
+            priced_tx_count += 1;
+        }
+        if with_transactions {
+            transactions.push(json!({
+                "txid": tx.txid.to_string(),
+                "weight": tx.weight,
+                "vsize": tx.vsize,
+                "fee_sat": tx.fee_sat,
+                "fee_rate_sat_per_vb": tx.fee_sat.map(|fee| fee as f64 / tx.vsize.max(1) as f64),
+            }));
+        }
+    }
+
+    let mut payload = json!({
+        "available": true,
+        "template_id": snapshot.template_id,
+        "future_template": snapshot.future_template,
+        "version": snapshot.version,
+        "height": snapshot.height,
+        "coinbase_value_sat": snapshot.coinbase_tx_value_remaining,
+        "subsidy_sat": snapshot.subsidy_sat,
+        "total_fees_sat": snapshot.total_fees_sat,
+        "tx_count": snapshot.transactions.len(),
+        "priced_tx_count": priced_tx_count,
+        "total_weight": snapshot.total_weight,
+        "received_at": snapshot.received_at,
+        "prioritized_included": prioritized_included,
+        "mempool_space_included": snapshot.transactions.iter()
+            .filter(|tx| accelerated.contains(&tx.txid))
+            .map(|tx| tx.txid.to_string()).collect::<Vec<_>>(),
+    });
+    if with_transactions {
+        payload["transactions"] = json!(transactions);
+    }
+    payload
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeclarationPolicyRequest {
+    /// One of `highest_fees`, `block_weight`.
+    pub policy: String,
+}
 
 pub struct Api {}
 
@@ -85,26 +151,26 @@ impl Api {
         )
     }
 
-    // Retrieves the current pool information
     pub async fn get_pool_info(State(state): State<AppState>) -> impl IntoResponse {
-        let current_pool_address = state.router.current_pool;
-        let latency = *state.router.latency_rx.borrow();
+        let address = crate::ACTIVE_POOL_ADDRESS
+            .safe_lock(|address| *address)
+            .unwrap_or(None);
+        let setup_latency = *state.router.latency_rx.borrow();
 
-        match (current_pool_address, latency) {
-            (Some(address), Some(latency)) => {
-                let response_data = serde_json::json!({
+        match address {
+            Some(address) => (
+                StatusCode::OK,
+                Json(APIResponse::success(Some(serde_json::json!({
                     "address": address.to_string(),
-                    "latency": latency.as_millis().to_string()
-                });
-                (
-                    StatusCode::OK,
-                    Json(APIResponse::success(Some(response_data))),
-                )
-            }
-            (_, _) => (
+                    "latency": setup_latency.map(|latency| latency.as_millis().to_string()),
+                    "declaration_latency_ms": super::stats::declaration_latency_ms(),
+                    "bandwidth_bytes_per_sec": super::stats::bandwidth_bytes_per_sec(),
+                })))),
+            ),
+            None => (
                 StatusCode::NOT_FOUND,
                 Json(APIResponse::error(Some(
-                    "Pool information unavailable".to_string(),
+                    "not connected to a pool yet".to_string(),
                 ))),
             ),
         }
@@ -161,6 +227,124 @@ impl Api {
         }
     }
 
+    pub async fn get_capabilities(State(state): State<AppState>) -> impl IntoResponse {
+        Json(APIResponse::success(Some(json!({
+            "templates": state.api_tx_token.is_some(),
+            "transaction_prioritization": state.api_tx_token.is_some()
+                && state.prioritizing_txs.is_some()
+        }))))
+    }
+
+    pub async fn get_merge_mining_status(
+        State(state): State<AppState>,
+        headers: HeaderMap,
+    ) -> impl IntoResponse {
+        if let Some(refusal) = check_authorization(&state, &headers) {
+            return refusal;
+        }
+        match crate::merge_mining::dashboard_snapshot() {
+            Ok(snapshot) => (
+                StatusCode::OK,
+                Json(APIResponse::success(Some(json!({
+                    "configured": crate::merge_mining::configured(),
+                    "job_declaration": Configuration::tp_address().is_some(),
+                    "activity": snapshot,
+                })))),
+            ),
+            Err(error) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(APIResponse::error(Some(error.to_string()))),
+            ),
+        }
+    }
+
+    /// Candidates for the current tip, newest first.
+    pub async fn get_recent_templates(
+        State(state): State<AppState>,
+        headers: HeaderMap,
+    ) -> impl IntoResponse {
+        if let Some(refusal) = check_authorization(&state, &headers) {
+            return refusal;
+        }
+
+        let policy = crate::block_templates::declaration_policy();
+        let templates: Vec<serde_json::Value> = crate::block_templates::with_candidates(|held| {
+            held.iter()
+                .map(|snapshot| template_payload(snapshot, false))
+                .collect()
+        });
+
+        (
+            StatusCode::OK,
+            Json(APIResponse::success(Some(json!({
+                "templates": templates,
+                "candidate_limit": crate::block_templates::CANDIDATE_LIMIT,
+                // The declaration the pool has accepted
+                "active_declaration": crate::block_templates::active_declaration(),
+                "policy": policy.as_str(),
+                // What the policy resolves to
+                "policy_pick": crate::block_templates::policy_pick(policy),
+            })))),
+        )
+    }
+
+    /// Set which candidate gets auto-declared.
+    pub async fn set_declaration_policy(
+        State(state): State<AppState>,
+        headers: HeaderMap,
+        Json(request): Json<DeclarationPolicyRequest>,
+    ) -> impl IntoResponse {
+        if let Some(refusal) = check_authorization(&state, &headers) {
+            return refusal;
+        }
+
+        let Some(policy) = crate::block_templates::DeclarationPolicy::parse(&request.policy) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(APIResponse::error(Some(format!(
+                    "unknown declaration policy {:?}",
+                    request.policy
+                )))),
+            );
+        };
+        crate::block_templates::set_declaration_policy(policy);
+        info!(policy = policy.as_str(), "declaration policy changed");
+        (
+            StatusCode::OK,
+            Json(APIResponse::success(Some(json!({
+            "policy": policy.as_str(),
+            })))),
+        )
+    }
+
+    /// One received template with its full transaction list.
+    pub async fn get_template_by_id(
+        State(state): State<AppState>,
+        headers: HeaderMap,
+        Path(template_id): Path<u64>,
+    ) -> impl IntoResponse {
+        if let Some(refusal) = check_authorization(&state, &headers) {
+            return refusal;
+        }
+
+        let Some(snapshot) = crate::block_templates::by_id(template_id) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(APIResponse::error(Some(format!(
+                    "template {template_id} is no longer held; only the last {} received are kept",
+                    crate::block_templates::CANDIDATE_LIMIT
+                )))),
+            );
+        };
+
+        (
+            StatusCode::OK,
+            Json(APIResponse::success(Some(template_payload(
+                &snapshot, true,
+            )))),
+        )
+    }
+
     pub async fn prioritize_transaction(
         State(state): State<AppState>,
         headers: HeaderMap,
@@ -179,7 +363,10 @@ impl Api {
             );
         };
 
-        if !is_authorized_for_tx_prioritization(&headers, &prioritizing_txs.api_tx_token) {
+        if !is_authorized_for_tx_prioritization(
+            &headers,
+            state.api_tx_token.as_deref().unwrap_or(""),
+        ) {
             warn!("unauthorized tx prioritization request");
             return (
                 StatusCode::UNAUTHORIZED,
@@ -214,6 +401,7 @@ impl Api {
                     .unwrap_or(0);
                 let fee_delta = current_fee_delta + fee_delta;
                 crate::prioritized_transactions::PRIORITIZED_TRANSACTIONS.record(txid, fee_delta);
+                crate::api::set_node_prioritized_view(None);
                 info!("transaction prioritized in bitcoind: {txid}");
                 (
                     StatusCode::OK,
@@ -244,8 +432,10 @@ impl Api {
                 ))),
             );
         };
-
-        if !is_authorized_for_tx_prioritization(&headers, &prioritizing_txs.api_tx_token) {
+        if !is_authorized_for_tx_prioritization(
+            &headers,
+            state.api_tx_token.as_deref().unwrap_or(""),
+        ) {
             warn!("unauthorized tx priority restoration request");
             return (
                 StatusCode::UNAUTHORIZED,
@@ -298,6 +488,7 @@ impl Api {
         for store in stores {
             store.remove(txid);
         }
+        crate::api::set_node_prioritized_view(None);
 
         Ok(())
     }
@@ -316,7 +507,10 @@ impl Api {
             );
         };
 
-        if !is_authorized_for_tx_prioritization(&headers, &prioritizing_txs.api_tx_token) {
+        if !is_authorized_for_tx_prioritization(
+            &headers,
+            state.api_tx_token.as_deref().unwrap_or(""),
+        ) {
             warn!("unauthorized prioritized txs request");
             return (
                 StatusCode::UNAUTHORIZED,
@@ -326,17 +520,26 @@ impl Api {
             );
         }
 
-        let _prioritized_transactions_guard = PRIORITIZED_TRANSACTIONS_POLL_LOCK.lock().await;
-        let transactions = match prioritizing_txs.rpc.get_prioritised_transactions().await {
-            Ok(transactions) => transactions,
-            Err(e) => {
-                error!(error = %e, "failed to fetch prioritized transactions from bitcoind");
-                return (
-                    e.status_code(),
-                    Json(APIResponse::<CategorizedPrioritizedTransactions>::error(
-                        Some(e.to_string()),
-                    )),
-                );
+        let transactions = match crate::api::node_prioritized_view() {
+            Some(transactions) => transactions,
+            None => {
+                let _prioritized_transactions_guard =
+                    PRIORITIZED_TRANSACTIONS_POLL_LOCK.lock().await;
+                match prioritizing_txs.rpc.get_prioritised_transactions().await {
+                    Ok(transactions) => {
+                        crate::api::set_node_prioritized_view(Some(&transactions));
+                        transactions
+                    }
+                    Err(e) => {
+                        error!(error = %e, "failed to fetch prioritized transactions from bitcoind");
+                        return (
+                            e.status_code(),
+                            Json(APIResponse::<CategorizedPrioritizedTransactions>::error(
+                                Some(e.to_string()),
+                            )),
+                        );
+                    }
+                }
             }
         };
         let response = categorize_prioritized_transactions(
@@ -389,6 +592,30 @@ fn is_authorized_for_tx_prioritization(headers: &HeaderMap, expected_token: &str
         .is_some_and(|token| token == expected_token)
 }
 
+/// Checks if the request is authorized based on the provided headers and the expected API token.
+fn check_authorization<T: Serialize>(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Option<(StatusCode, Json<APIResponse<T>>)> {
+    let Some(expected_token) = state.api_tx_token.as_deref() else {
+        warn!("API TX TOKEN NOT SET");
+        return Some((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(APIResponse::error(Some("API TX TOKEN NOT SET".to_string()))),
+        ));
+    };
+
+    if !is_authorized_for_tx_prioritization(headers, expected_token) {
+        warn!("unauthorized API request");
+        return Some((
+            StatusCode::UNAUTHORIZED,
+            Json(APIResponse::error(Some("Unauthorized".to_string()))),
+        ));
+    }
+
+    None
+}
+
 #[derive(Serialize)]
 struct AggregateStates {
     total_connected_device: u32,
@@ -399,14 +626,14 @@ struct AggregateStates {
 }
 
 #[derive(Debug, Serialize)]
-struct APIResponse<T> {
+pub struct APIResponse<T> {
     success: bool,
     message: Option<String>,
     data: Option<T>,
 }
 
 impl<T: Serialize> APIResponse<T> {
-    fn success(data: Option<T>) -> Self {
+    pub fn success(data: Option<T>) -> Self {
         APIResponse {
             success: true,
             message: None,
@@ -414,7 +641,7 @@ impl<T: Serialize> APIResponse<T> {
         }
     }
 
-    fn error(message: Option<String>) -> Self {
+    pub fn error(message: Option<String>) -> Self {
         APIResponse {
             success: false,
             message,
@@ -449,13 +676,13 @@ async fn health_check_reports_full_translator_handoff() {
         router,
         stats_sender: crate::api::stats::StatsSender::new(),
         downstream_handoff: handoff_tx,
+        api_tx_token: Some("api-token".to_string()),
         prioritizing_txs: Some(super::PrioritizingTxs {
             rpc: std::sync::Arc::new(crate::api::bitcoin_rpc::BitcoindRpc::new(
                 "http://127.0.0.1:8332".to_string(),
                 "user".to_string(),
                 "password".to_string(),
             )),
-            api_tx_token: "api-token".to_string(),
         }),
     };
 
@@ -474,10 +701,12 @@ async fn send_tx_reports_unavailable_when_rpc_is_disabled() {
     let router = crate::router::Router::new(vec![], auth_pub_k, None, None);
 
     let (handoff_tx, _handoff_rx) = mpsc::channel(1);
+
     let state = AppState {
         router,
         stats_sender: crate::api::stats::StatsSender::new(),
         downstream_handoff: handoff_tx,
+        api_tx_token: Some("api-token".to_string()),
         prioritizing_txs: None,
     };
 
@@ -506,13 +735,13 @@ async fn send_tx_rejects_missing_api_tx_token_header() {
         router,
         stats_sender: crate::api::stats::StatsSender::new(),
         downstream_handoff: handoff_tx,
+        api_tx_token: Some("api-token".to_string()),
         prioritizing_txs: Some(super::PrioritizingTxs {
             rpc: std::sync::Arc::new(crate::api::bitcoin_rpc::BitcoindRpc::new(
                 "http://127.0.0.1:8332".to_string(),
                 "user".to_string(),
                 "password".to_string(),
             )),
-            api_tx_token: "api-token".to_string(),
         }),
     };
 
@@ -548,13 +777,13 @@ async fn prioritize_transaction_rejects_a_cached_bad_transaction() {
         router,
         stats_sender: crate::api::stats::StatsSender::new(),
         downstream_handoff: handoff_tx,
+        api_tx_token: Some("api-token".to_string()),
         prioritizing_txs: Some(super::PrioritizingTxs {
             rpc: std::sync::Arc::new(crate::api::bitcoin_rpc::BitcoindRpc::new(
                 "http://127.0.0.1:1".to_string(),
                 "user".to_string(),
                 "password".to_string(),
             )),
-            api_tx_token: "api-token".to_string(),
         }),
     };
     let mut headers = HeaderMap::new();
@@ -625,13 +854,13 @@ async fn successful_prioritization_records_the_applied_fee_delta() {
         router,
         stats_sender: crate::api::stats::StatsSender::new(),
         downstream_handoff: handoff_tx,
+        api_tx_token: Some("api-token".to_string()),
         prioritizing_txs: Some(super::PrioritizingTxs {
             rpc: std::sync::Arc::new(crate::api::bitcoin_rpc::BitcoindRpc::new(
                 format!("http://{addr}/bitcoin"),
                 "user".to_string(),
                 "password".to_string(),
             )),
-            api_tx_token: "api-token".to_string(),
         }),
     };
     let mut headers = HeaderMap::new();
@@ -711,13 +940,13 @@ async fn successful_restore_reverses_and_removes_all_cached_fee_deltas() {
         router,
         stats_sender: crate::api::stats::StatsSender::new(),
         downstream_handoff: handoff_tx,
+        api_tx_token: Some("api-token".to_string()),
         prioritizing_txs: Some(super::PrioritizingTxs {
             rpc: std::sync::Arc::new(crate::api::bitcoin_rpc::BitcoindRpc::new(
                 format!("http://{addr}/bitcoin"),
                 "user".to_string(),
                 "password".to_string(),
             )),
-            api_tx_token: "api-token".to_string(),
         }),
     };
     let mut headers = HeaderMap::new();
@@ -854,13 +1083,13 @@ async fn get_prioritized_transactions_returns_categorized_bitcoind_snapshot() {
         router,
         stats_sender: crate::api::stats::StatsSender::new(),
         downstream_handoff: handoff_tx,
+        api_tx_token: Some("api-token".to_string()),
         prioritizing_txs: Some(super::PrioritizingTxs {
             rpc: std::sync::Arc::new(crate::api::bitcoin_rpc::BitcoindRpc::new(
                 format!("http://{addr}"),
                 "user".to_string(),
                 "password".to_string(),
             )),
-            api_tx_token: "api-token".to_string(),
         }),
     };
 
@@ -920,4 +1149,185 @@ fn tx_prioritization_auth_accepts_matching_bearer_token() {
     headers.insert(AUTHORIZATION, "Bearer api-token".parse().unwrap());
 
     assert!(is_authorized_for_tx_prioritization(&headers, "api-token"));
+}
+
+#[cfg(test)]
+fn declaration_test_state(api_tx_token: Option<&str>) -> AppState {
+    let (handoff_tx, _handoff_rx) = tokio::sync::mpsc::channel(1);
+    let auth_pub_k = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
+    AppState {
+        router: crate::router::Router::new(vec![], auth_pub_k, None, None),
+        stats_sender: crate::api::stats::StatsSender::new(),
+        downstream_handoff: handoff_tx,
+        api_tx_token: api_tx_token.map(str::to_string),
+        prioritizing_txs: Some(super::PrioritizingTxs {
+            rpc: std::sync::Arc::new(crate::api::bitcoin_rpc::BitcoindRpc::new(
+                "http://127.0.0.1:8332".to_string(),
+                "user".to_string(),
+                "password".to_string(),
+            )),
+        }),
+    }
+}
+
+#[cfg(test)]
+fn bearer(token: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+    headers
+}
+
+#[tokio::test]
+async fn merge_mining_status_requires_dashboard_authorization() {
+    for (token, headers, expected, message) in [
+        (
+            None,
+            bearer("api-token"),
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some("API TX TOKEN NOT SET"),
+        ),
+        (
+            Some("api-token"),
+            HeaderMap::new(),
+            StatusCode::UNAUTHORIZED,
+            Some("Unauthorized"),
+        ),
+        (
+            Some("api-token"),
+            bearer("wrong"),
+            StatusCode::UNAUTHORIZED,
+            Some("Unauthorized"),
+        ),
+        (Some("api-token"), bearer("api-token"), StatusCode::OK, None),
+    ] {
+        let response = Api::get_merge_mining_status(State(declaration_test_state(token)), headers)
+            .await
+            .into_response();
+        assert_eq!(response.status(), expected);
+        // The route answers 503 both for an unset token and for unreadable
+        // merge-mining state, so pin down which refusal this is.
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(body["message"].as_str(), message);
+    }
+}
+
+// The token gates the templates a caller can read and the criterion it can
+// change, so all three routes refuse the same way.
+#[tokio::test]
+async fn job_declaration_routes_require_the_bearer_token() {
+    use axum::extract::{Path, State};
+    use axum::response::IntoResponse;
+
+    let wrong_token = bearer("not-the-token");
+    for headers in [HeaderMap::new(), wrong_token] {
+        let state = declaration_test_state(Some("api-token"));
+        assert_eq!(
+            Api::get_recent_templates(State(state.clone()), headers.clone())
+                .await
+                .into_response()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            Api::get_template_by_id(State(state.clone()), headers.clone(), Path(1))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            Api::set_declaration_policy(
+                State(state),
+                headers,
+                Json(DeclarationPolicyRequest {
+                    policy: "block_weight".to_string(),
+                }),
+            )
+            .await
+            .into_response()
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+}
+
+// A proxy started without a token does not serve these routes at all, rather
+// than serving them to anyone.
+#[tokio::test]
+async fn job_declaration_routes_are_disabled_without_the_api_tx_token() {
+    use axum::extract::{Path, State};
+    use axum::response::IntoResponse;
+
+    let state = declaration_test_state(None);
+    let headers = bearer("api-token");
+
+    assert_eq!(
+        Api::get_recent_templates(State(state.clone()), headers.clone())
+            .await
+            .into_response()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        Api::get_template_by_id(State(state.clone()), headers.clone(), Path(1))
+            .await
+            .into_response()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        Api::set_declaration_policy(
+            State(state),
+            headers,
+            Json(DeclarationPolicyRequest {
+                policy: "block_weight".to_string(),
+            }),
+        )
+        .await
+        .into_response()
+        .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+// The matching token gets through with no bitcoind RPC configured, and a
+// missing template is then a 404, not a 401 or a 503.
+#[tokio::test]
+async fn the_configured_token_reaches_the_job_declaration_routes() {
+    use axum::extract::{Path, State};
+    use axum::response::IntoResponse;
+
+    let state = declaration_test_state(Some("api-token"));
+    let headers = bearer("api-token");
+
+    assert_eq!(
+        Api::get_recent_templates(State(state.clone()), headers.clone())
+            .await
+            .into_response()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        Api::set_declaration_policy(
+            State(state.clone()),
+            headers.clone(),
+            Json(DeclarationPolicyRequest {
+                policy: "block_weight".to_string(),
+            }),
+        )
+        .await
+        .into_response()
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        Api::get_template_by_id(State(state), headers, Path(u64::MAX))
+            .await
+            .into_response()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
 }

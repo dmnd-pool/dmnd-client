@@ -266,12 +266,15 @@ impl JobDeclarator {
                 }
             }
         }
+        crate::block_templates::template_received(&template, &tx_list);
+
         let missing_txids = missing_prioritized_txids(&prioritized_txids, &template_txids);
         for tx in missing_txids {
             warn!("Prioritized txs missing from block. POssible cause: already have been mined. Txid: {}", tx);
         }
         let tx_ids: Seq064K<'static, U256> = Seq064K::from(tx_ids);
 
+        let template_id = template.template_id;
         let coinbase_prefix = downstream_job.coinbase_tx_prefix.clone();
         let coinbase_suffix = downstream_job.coinbase_tx_suffix.clone();
 
@@ -291,6 +294,7 @@ impl JobDeclarator {
             tx_list: tx_list_.clone(),
             downstream_job,
         };
+        crate::block_templates::declaration_sent(template_id);
         Self::update_last_declare_job_sent(self_mutex, id, last_declare)?;
         let frame: StdFrame =
             PoolMessages::JobDeclaration(JobDeclaration::DeclareMiningJob(declare_job))
@@ -425,7 +429,10 @@ impl JobDeclarator {
                                 state.last_declare_mining_jobs_sent.remove(&m.request_id)
                             })
                             .unwrap_or(None);
-                        if removed.is_some() {
+                        if let Some(Some(removed)) = removed {
+                            crate::block_templates::declaration_rejected(
+                                removed.template.template_id,
+                            );
                             super::IS_CUSTOM_JOB_SET
                                 .store(true, std::sync::atomic::Ordering::Release);
                         }
@@ -468,6 +475,7 @@ impl JobDeclarator {
         self_mutex: Arc<Mutex<Self>>,
         set_new_prev_hash: SetNewPrevHash<'static>,
     ) -> Result<(), Error> {
+        crate::block_templates::clear_for_new_tip(set_new_prev_hash.template_id);
         let task_manager = self_mutex
             .safe_lock(|s| s.task_manager.clone())
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;

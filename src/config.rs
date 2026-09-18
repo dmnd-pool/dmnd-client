@@ -71,6 +71,9 @@ struct Args {
     api_server_port: Option<String>,
     #[clap(long, short = 'm')]
     monitor: bool,
+    /// Open the dashboard in a browser on start. Off by default
+    #[clap(long)]
+    headful: bool,
     #[clap(long, short = 'u')]
     auto_update: bool,
     #[clap(long)]
@@ -110,6 +113,7 @@ struct ConfigFile {
     accept_window_ms: Option<u64>,
     api_server_port: Option<String>,
     monitor: Option<bool>,
+    headful: Option<bool>,
     auto_update: Option<bool>,
     miner_name: Option<String>,
     rpc_url: Option<String>,
@@ -144,6 +148,7 @@ impl ConfigFile {
             accept_window_ms: None,
             api_server_port: None,
             monitor: None,
+            headful: None,
             auto_update: None,
             miner_name: None,
             rpc_url: None,
@@ -180,8 +185,10 @@ pub struct Configuration {
     accept_window_ms: u64,
     api_server_port: String,
     monitor: bool,
+    headful: bool,
     auto_update: bool,
     miner_name: Option<String>,
+    api_tx_token: Option<String>,
     prioritizing_txs_config: Option<BitcoindRpcConfig>,
     missing_prioritizing_txs_variables: Vec<&'static str>,
 }
@@ -191,7 +198,6 @@ pub(crate) struct BitcoindRpcConfig {
     pub url: String,
     pub user: String,
     pub pwd: String,
-    pub api_tx_token: String,
 }
 
 impl Configuration {
@@ -240,6 +246,7 @@ and make that test pass."
         accept_window_ms: u64,
         api_server_port: String,
         monitor: bool,
+        headful: bool,
         auto_update: bool,
         miner_name: Option<String>,
         rpc_url: String,
@@ -251,6 +258,11 @@ and make that test pass."
             panic!("{error}");
         }
 
+        let configured_api_tx_token = if api_tx_token.trim().is_empty() {
+            None
+        } else {
+            Some(api_tx_token.clone())
+        };
         let (prioritizing_txs_config, missing_prioritizing_txs_variables) =
             Self::build_prioritizing_txs_config(rpc_url, rpc_user, rpc_pwd, api_tx_token);
 
@@ -279,8 +291,10 @@ and make that test pass."
             accept_window_ms,
             api_server_port,
             monitor,
+            headful,
             auto_update,
             miner_name,
+            api_tx_token: configured_api_tx_token,
             prioritizing_txs_config,
             missing_prioritizing_txs_variables,
         }
@@ -310,15 +324,7 @@ and make that test pass."
             return (None, missing);
         }
 
-        (
-            Some(BitcoindRpcConfig {
-                url,
-                user,
-                pwd,
-                api_tx_token,
-            }),
-            missing,
-        )
+        (Some(BitcoindRpcConfig { url, user, pwd }), missing)
     }
 
     pub(crate) fn init(config: Configuration) {
@@ -353,6 +359,7 @@ and make that test pass."
             Some(512),
             250,
             "3001".to_string(),
+            false,
             false,
             false,
             None,
@@ -533,12 +540,21 @@ and make that test pass."
         Self::cfg().monitor
     }
 
+    /// Whether to open a browser at the dashboard on start.
+    pub fn headful() -> bool {
+        Self::cfg().headful
+    }
+
     pub fn auto_update() -> bool {
         Self::cfg().auto_update
     }
 
     pub fn miner_name() -> Option<String> {
         Self::cfg().miner_name.clone()
+    }
+
+    pub(crate) fn api_tx_token() -> Option<String> {
+        Self::cfg().api_tx_token.clone()
     }
 
     pub(crate) fn prioritizing_txs_enabled() -> bool {
@@ -566,6 +582,9 @@ and make that test pass."
                 missing_env_variables = %missing.join(", "),
                 "PRIORITIZING TXS NOT ENABLED, missing env variable"
             );
+        }
+        if Self::cfg().api_tx_token.is_none() && Self::cfg().headful {
+            warn!("API_TX_TOKEN NOT SET.");
         }
     }
 
@@ -801,6 +820,11 @@ and make that test pass."
                 .monitor
                 .or_else(|| env_bool("MONITOR"))
                 .unwrap_or(false);
+        let headful = args.headful
+            || config
+                .headful
+                .or_else(|| env_bool("HEADFUL"))
+                .unwrap_or(true);
 
         let auto_update = if args.auto_update {
             true
@@ -836,6 +860,7 @@ and make that test pass."
             accept_window_ms,
             api_server_port,
             monitor,
+            headful,
             auto_update,
             miner_name,
             rpc_url,

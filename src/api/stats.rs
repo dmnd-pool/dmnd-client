@@ -1,7 +1,53 @@
 use serde::Serialize;
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering::Relaxed},
+};
 use tokio::sync::{mpsc, oneshot};
 use tracing::debug;
+
+pub(crate) static CONNECTION_STARTED_AT: AtomicU64 = AtomicU64::new(0);
+pub(crate) static SENT_BYTES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static RECEIVED_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Last declaration round trip in ms; 0 means none yet.
+pub(crate) static DECLARATION_MS: AtomicU64 = AtomicU64::new(0);
+
+pub fn record_sent(bytes: usize) {
+    SENT_BYTES.fetch_add(bytes as u64, Relaxed);
+}
+
+pub fn record_received(bytes: usize) {
+    RECEIVED_BYTES.fetch_add(bytes as u64, Relaxed);
+}
+
+pub fn record_declaration_latency(millis: u64) {
+    DECLARATION_MS.store(millis.max(1), Relaxed);
+}
+
+#[cfg(test)]
+pub fn clear_declaration_latency_for_tests() {
+    DECLARATION_MS.store(0, Relaxed);
+}
+
+/// Returns average bandwidth in bytes per second for the current pool connection.
+pub fn bandwidth_bytes_per_sec() -> Option<u64> {
+    let started_at = CONNECTION_STARTED_AT.load(Relaxed);
+    if started_at == 0 {
+        return None;
+    }
+    let elapsed = crate::block_templates::unix_now().saturating_sub(started_at);
+    if elapsed == 0 {
+        return None;
+    }
+    Some((SENT_BYTES.load(Relaxed) + RECEIVED_BYTES.load(Relaxed)) / elapsed)
+}
+
+pub fn declaration_latency_ms() -> Option<u64> {
+    match DECLARATION_MS.load(Relaxed) {
+        0 => None,
+        millis => Some(millis),
+    }
+}
 
 #[derive(Debug)]
 enum StatsCommand {
