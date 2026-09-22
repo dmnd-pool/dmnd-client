@@ -2,9 +2,16 @@ const MAX_BLOCK_WEIGHT = 4_000_000;
 const API_POLL_INTERVAL = 4_000;
 // The event stream does not announce tip changes; this poll retires stale candidates.
 const TEMPLATE_REFRESH_INTERVAL = 5_000;
+// The node's prioritised list only moves when a background poll changes it, so
+// refreshing faster than this just re-reads the same answer.
+const ACCELERATIONS_REFRESH_INTERVAL = 30_000;
 
 const ROUTES = {
   "/dashboard/overview": "Overview",
+  "/dashboard/accelerations": "Mempool.space accelerations",
+  "/dashboard/rsk": "RSK merge mining",
+  "/dashboard/job-history": "Declared templates",
+  "/dashboard/prioritized-history": "Prioritisation history",
 };
 
 // Ranking criteria; keys are the backend policy names. `value` is null when a
@@ -48,6 +55,14 @@ const LOG_FILTERS = [
   ["error", "Errors"],
 ];
 
+// Retention choices; this bounds the database size.
+const HISTORY_RETENTIONS = [
+  [5, "last 5 blocks"],
+  [10, "last 10 blocks"],
+  [20, "last 20 blocks"],
+  ["", "until I delete"],
+];
+
 const state = {
   route: normalizeRoute(window.location.pathname),
   mode: localStorage.getItem("demand-mode") || "light",
@@ -65,6 +80,25 @@ const state = {
   logs: [],
   logFilter: "all",
   miners: null,
+  jobs: [],
+  jobPage: 1,
+  // How many blocks of history the proxy keeps; null means until deleted by hand.
+  historyKeepBlocks: 5,
+  jobPerPage: 10,
+  jobTotal: 0,
+  jobTotalPages: 0,
+  jobsLoading: false,
+  jobsError: null,
+  // Stored prioritizations, newest first: one page of /api/prioritized-history.
+  prioritized: {
+    rows: [],
+    page: 1,
+    perPage: 10,
+    total: 0,
+    totalPages: 0,
+    loading: false,
+    error: null,
+  },
   // The newest template the poll has shown, so the next one is noticed.
   newestTemplateId: null,
   // Candidate summaries from /api/templates/recent, newest first.
@@ -91,6 +125,14 @@ const state = {
   capabilities: null,
   polling: false,
   prioritizing: false,
+  miningActivity: {
+    accelerations: null,
+    rsk: null,
+    accelerationError: null,
+    rskError: null,
+    accelerationLoading: false,
+    rskLoading: false,
+  },
   // The proxy's API_TX_TOKEN. Guards the job declaration and prioritisation
   // endpoints alike, so both features read it from here.
   apiToken: localStorage.getItem("demand-tx-token") || "",
@@ -141,7 +183,15 @@ const ICON_PATHS = {
   upload:
     '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>',
   copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
+  external:
+    '<path d="M15 3h6v6M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
   hash: '<path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/>',
+  chevronLeft: '<path d="m15 18-6-6 6-6"/>',
+  chevronRight: '<path d="m9 18 6-6-6-6"/>',
+  chevronsLeft: '<path d="m11 17-5-5 5-5M18 17l-5-5 5-5"/>',
+  chevronsRight: '<path d="m13 17 5-5-5-5M6 17l5-5-5-5"/>',
+  eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12"/><circle cx="12" cy="12" r="3"/>',
+  trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 15H6L5 6M10 11v5M14 11v5"/>',
   undo: '<path d="M3 7v6h6"/><path d="M3 13a9 9 0 1 0 3-7.7L3 8"/>',
   info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>',
   layers:
@@ -158,6 +208,7 @@ function normalizeRoute(path) {
   const clean = path.replace(/\.html$/, "").replace(/\/$/, "") || "/";
   if (clean === "/" || clean === "/dashboard") return "/dashboard/overview";
   if (clean === "/overview") return "/dashboard/overview";
+  if (clean === "/history") return "/dashboard/job-history";
   return ROUTES[clean] ? clean : "/dashboard/overview";
 }
 
@@ -188,6 +239,24 @@ function formatBytes(value) {
   return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
+const DATE_FORMAT = new Intl.DateTimeFormat("en-US", {
+  month: "long",
+  day: "numeric",
+  year: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
+function formatDate(value) {
+  if (!value) return "N/A";
+  const raw = Number(value);
+  const date = Number.isFinite(raw)
+    ? new Date(raw < 10_000_000_000 ? raw * 1000 : raw)
+    : new Date(value);
+  if (Number.isNaN(date.getTime())) return "N/A";
+  return DATE_FORMAT.format(date);
+}
+
 function shortHash(value, front = 8, back = 8) {
   const text = String(value || "");
   return text.length > front + back + 3
@@ -212,6 +281,10 @@ function renderShell() {
     <aside id="sidebar" class="sidebar">
       <nav class="sidebar-nav" aria-label="Dashboard navigation">
         ${sidebarLink("/dashboard/overview", "dashboard", "Dashboard")}
+        ${sidebarLink("/dashboard/accelerations", "trend", "Mempool.space accelerations")}
+        ${sidebarLink("/dashboard/rsk", "layers", "RSK merge mining")}
+        ${sidebarLink("/dashboard/job-history", "history", "Declared templates")}
+        ${sidebarLink("/dashboard/prioritized-history", "pin", "Prioritisation history")}
       </nav>
     </aside>
     <div class="main-shell">
@@ -265,7 +338,12 @@ function navigate(route, replace = false) {
 
 function renderRoute() {
   closeModal();
-  renderOverview();
+  closePanel();
+  if (state.route === "/dashboard/job-history") renderJobHistory();
+  else if (state.route === "/dashboard/prioritized-history")
+    renderPrioritizedHistory();
+  else if (state.route === "/dashboard/overview") renderOverview();
+  else renderActivityPage();
 }
 
 async function apiRequest(path, options = {}) {
@@ -306,7 +384,16 @@ function handleRejectedToken(error) {
   closeModal();
   closePanel();
   state.templates = [];
+  state.jobs = [];
+  state.jobsError = null;
+  state.prioritized.rows = [];
+  state.prioritized.error = null;
+  renderPrioritizedContent();
+  state.miningActivity.accelerations = null;
+  state.miningActivity.rsk = null;
+  renderMiningActivity();
   renderTemplatesSection();
+  renderJobHistoryContent();
   return true;
 }
 
@@ -414,10 +501,8 @@ async function pollStats() {
   };
   state.stats.error =
     requests[0].status === "rejected" ? requests[0].reason?.message : null;
-  if (state.route === "/dashboard/overview") {
-    updateStatsUI();
-    loadMiners();
-  }
+  updateStatsUI();
+  if (state.route === "/dashboard/overview") loadMiners();
 }
 
 function renderOverview() {
@@ -483,6 +568,7 @@ function renderOverview() {
   renderTemplatesSection();
   renderMiners();
   renderLogs();
+  renderMiningActivity();
   if (!state.templatesLoaded && state.apiToken) loadTemplates();
   loadMiners();
 }
@@ -497,6 +583,320 @@ function statCard(id, iconName, label, value, footTitle, footMuted, hint = "") {
     }</div><div class="stat-value" data-stat-value>${value}</div></div></div></div>
     <div><div class="stat-foot-title"><span data-stat-foot-title>${footTitle}</span></div><div class="stat-foot-muted" data-stat-foot-muted>${footMuted}</div></div>
   </article>`;
+}
+
+function activityEmpty(message) {
+  return `<div class="tplx-empty">${escapeHtml(message)}</div>`;
+}
+
+function activityTxid(txid) {
+  return `<span class="activity-hash"><a href="https://mempool.space/tx/${encodeURIComponent(txid)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(txid)}"><code>${escapeHtml(shortHash(txid, 10, 8))}</code> ↗</a><button class="icon-btn btn ghost" type="button" data-copy="${escapeHtml(txid)}" aria-label="Copy transaction ID">${icon("copy", 13)}</button></span>`;
+}
+
+function renderActivityPage() {
+  const isRsk = state.route === "/dashboard/rsk";
+  const page = currentPageElement();
+  page.className = "page compact-top activity-page";
+  page.innerHTML = `<section class="page-header">
+    <div><h1 class="page-title">${escapeHtml(ROUTES[state.route])}</h1>
+      <p class="activity-description">${isRsk ? "Mine RSK alongside Bitcoin with the same mining power." : "Transactions paid for on mempool.space, boosted on your node so they are included in your blocks."}</p>
+    </div>
+    <div class="page-header-actions">
+      ${isRsk ? "" : `<a class="btn" href="https://mempool.space/accelerator" target="_blank" rel="noopener noreferrer">${icon("globe", 15)} Accelerator</a>
+      <button class="btn primary" type="button" data-action="open-prioritize">${icon("pin", 15)} Prioritise transaction</button>`}
+      <button class="btn" type="button" data-action="refresh-mining-activity">${icon("refresh", 15)} Refresh</button>
+    </div>
+  </section>
+  <section id="activity-stats" class="stats-grid" aria-label="${isRsk ? "RSK statistics" : "Acceleration statistics"}"></section>
+  <section class="card activity-card" aria-label="${isRsk ? "RSK activity" : "Accelerated transactions"}">
+    <div id="${isRsk ? "rsk" : "accelerations"}-content"></div>
+  </section>`;
+  updateStatsUI();
+  renderMiningActivity();
+  loadMiningActivity();
+  if (!isRsk && !state.templatesLoaded && state.apiToken) loadTemplates();
+}
+
+function activityNeedsToken(root) {
+  if (state.apiToken) return false;
+  root.innerHTML =
+    state.capabilities?.templates === false
+      ? activityEmpty("Set API_TX_TOKEN on the client to view mining activity.")
+      : `<div class="tplx-gate"><p class="tplx-gate-lead">Enter your API token to view this page.</p>${tokenFormHtml()}</div>`;
+  return true;
+}
+
+function renderActivityStats(values = []) {
+  const root = document.querySelector("#activity-stats");
+  if (!root) return;
+  const definitions =
+    state.route === "/dashboard/rsk"
+      ? [
+          ["checkCircle", "Block candidates", "Found since the client started"],
+          ["upload", "Awaiting collection", "Candidates queued for the bridge to collect"],
+          ["layers", "Last activated template", "Last RSK job activated by the client"],
+        ]
+      : [
+          ["trend", "Tracked transactions", "mempool.space accelerations tracked on your node"],
+          ["checkCircle", "In your node", "Available for block selection"],
+          [
+            "layers",
+            "In active template",
+            "Accelerated transactions in the template accepted by the pool",
+          ],
+          ["plus", "Total fee adjustment", "Virtual fee adjustment, in satoshis"],
+        ];
+  if (root.dataset.statsRoute !== state.route) {
+    root.innerHTML = definitions
+      .map(([symbol, label, description], index) =>
+        statCard(`activity-stat-${index}`, symbol, label, "—", description, ""),
+      )
+      .join("");
+    root.dataset.statsRoute = state.route;
+  }
+  definitions.forEach((_, index) => {
+    const value = root.querySelector(
+      `#activity-stat-${index} [data-stat-value]`,
+    );
+    if (value) value.textContent = values[index] ?? "—";
+  });
+}
+
+function renderMiningActivity() {
+  renderActivityStats();
+  const accelerationRoot = document.querySelector("#accelerations-content");
+  const rskRoot = document.querySelector("#rsk-content");
+  if (accelerationRoot) renderAccelerations(accelerationRoot);
+  if (rskRoot) renderRskActivity(rskRoot);
+}
+
+const accelerationMarkup = new WeakMap();
+
+function updateAccelerationContent(root, html) {
+  // Keep the table and keyboard focus intact when polling returns unchanged data.
+  if (accelerationMarkup.get(root) === html) return;
+  const scroll = root.querySelector(".activity-table-scroll");
+  const position = scroll ? [scroll.scrollLeft, scroll.scrollTop] : null;
+  const focused = root.contains(document.activeElement)
+    ? document.activeElement
+    : null;
+  const copy = focused?.dataset.copy;
+  const href = focused?.getAttribute("href");
+  root.innerHTML = html;
+  accelerationMarkup.set(root, html);
+  const replacement = [...root.querySelectorAll("[data-copy], a[href]")].find(
+    (element) =>
+      known(copy)
+        ? element.dataset.copy === copy
+        : href && element.getAttribute("href") === href,
+  );
+  replacement?.focus({ preventScroll: true });
+  const nextScroll = root.querySelector(".activity-table-scroll");
+  if (position && nextScroll) nextScroll.scrollTo(...position);
+}
+
+function renderAccelerations(accelerationRoot) {
+  // The token prompt writes its own markup, so invalidate the table cache.
+  if (!state.apiToken) accelerationMarkup.delete(accelerationRoot);
+  if (activityNeedsToken(accelerationRoot)) return;
+  const activity = state.miningActivity;
+  if (state.capabilities?.transaction_prioritization === false) {
+    updateAccelerationContent(
+      accelerationRoot,
+      activityEmpty("Transaction prioritisation is not configured on this client."),
+    );
+  } else if (activity.accelerationError) {
+    updateAccelerationContent(
+      accelerationRoot,
+      activityEmpty(`Could not load accelerations: ${activity.accelerationError}`),
+    );
+  } else if (activity.accelerations === null) {
+    updateAccelerationContent(
+      accelerationRoot,
+      activityEmpty("Loading accelerations…"),
+    );
+  } else {
+    const entries = Object.entries(activity.accelerations).sort(
+      ([left], [right]) => left.localeCompare(right),
+    );
+    const inMempool = entries.filter(([, tx]) => tx.in_mempool).length;
+    const totalAdjustment = entries.reduce(
+      (total, [, tx]) => total + (Number(tx.fee_delta) || 0),
+      0,
+    );
+    const template = state.templates.find(
+      (candidate) => candidate.template_id === state.activeDeclaration,
+    );
+    const included = template?.mempool_space_included?.length;
+    renderActivityStats([
+      formatNumber(entries.length),
+      `${formatNumber(inMempool)} / ${formatNumber(entries.length)}`,
+      included === undefined ? "—" : formatNumber(included),
+      `${totalAdjustment > 0 ? "+" : ""}${formatNumber(totalAdjustment)} sats`,
+    ]);
+    updateAccelerationContent(
+      accelerationRoot,
+      `<h2 class="validation-title activity-section-title">Accelerated transactions</h2>` +
+      (entries.length
+        ? `<div class="activity-table-scroll"><table class="pz-table"><thead><tr><th>Transaction</th><th class="right">Fee adjustment</th><th>Local status</th></tr></thead><tbody>${entries
+            .map(
+              ([txid, tx]) => `<tr>
+        <td>${activityTxid(txid)}</td>
+        <td class="right nowrap">${tx.fee_delta > 0 ? "+" : ""}${formatNumber(tx.fee_delta)} sats</td>
+        <td><span class="badge ${tx.in_mempool ? "success" : ""}">${tx.in_mempool ? "In mempool" : "Not in mempool"}</span></td>
+      </tr>`,
+            )
+            .join("")}</tbody></table></div>`
+        : activityEmpty("No accelerated transactions right now.")),
+    );
+  }
+}
+
+const rskSeen = { template: null, proofs: null };
+
+function rskShellHtml() {
+  const node = (key, glyph, label) =>
+    `<li class="rsk-node" data-node="${key}">
+      <span class="rsk-node-glyph" aria-hidden="true">${glyph}</span>
+      <span class="rsk-node-body"><span class="rsk-node-label">${label}</span>
+      <span class="rsk-node-value" data-value="${key}">—</span>
+      <span class="rsk-node-note" data-note="${key}"></span></span>
+    </li>`;
+  return `<ol class="rsk-strip" aria-label="Merge mining status">
+      ${node("work", "R", "Cached RSK work")}
+      <li class="rsk-link" data-link="work" aria-hidden="true"></li>
+      ${node("job", "₿", "Last activated job")}
+      <li class="rsk-link" data-link="job" aria-hidden="true"></li>
+      ${node("candidates", "✓", "Candidates")}
+    </ol>
+    <p class="rsk-strip-hint" data-rsk-hint></p>`;
+}
+
+function rskSetNode(root, key, live, value, note = "") {
+  const element = root.querySelector(`[data-node="${key}"]`);
+  if (!element) return;
+  element.classList.toggle("is-live", live);
+  element.querySelector(`[data-value="${key}"]`).textContent = value;
+  element.querySelector(`[data-note="${key}"]`).textContent = note;
+}
+
+function rskFlash(root, key) {
+  const element = root.querySelector(`[data-value="${key}"]`);
+  if (!element) return;
+  element.classList.remove("is-bumped");
+  void element.offsetWidth; // restart the animation on a repeat change
+  element.classList.add("is-bumped");
+}
+
+function renderRskActivity(rskRoot) {
+  if (activityNeedsToken(rskRoot)) return;
+  const activity = state.miningActivity;
+  if (activity.rskError) {
+    rskRoot.innerHTML = activityEmpty(
+      `Could not load RSK activity: ${activity.rskError}`,
+    );
+    return;
+  }
+  if (!activity.rsk) {
+    rskRoot.innerHTML = activityEmpty("Loading RSK activity…");
+    return;
+  }
+  const { configured, job_declaration, activity: rsk } = activity.rsk;
+  const hasJob = known(rsk.active_template_id);
+  renderActivityStats([
+    formatNumber(rsk.proofs_found),
+    formatNumber(rsk.pending_proofs),
+    hasJob ? `#${formatNumber(rsk.active_template_id)}` : "—",
+  ]);
+
+  if (!rskRoot.querySelector(".rsk-strip")) {
+    rskRoot.innerHTML = rskShellHtml();
+    rskSeen.template = rskSeen.proofs = null;
+  }
+
+  rskSetNode(rskRoot, "work", rsk.work_available,
+    rsk.work_available ? "Ready" : "None",
+    rsk.work_available ? "from the bridge" : "waiting");
+  rskSetNode(rskRoot, "job", hasJob,
+    hasJob ? `#${formatNumber(rsk.active_template_id)}` : "—",
+    hasJob ? "template" : "none");
+  rskSetNode(rskRoot, "candidates", rsk.observer_ready,
+    formatNumber(rsk.proofs_found),
+    rsk.pending_proofs
+      ? `${formatNumber(rsk.pending_proofs)} awaiting bridge`
+      : "found");
+  rskRoot
+    .querySelector('[data-node="candidates"]')
+    ?.classList.toggle("has-results", rsk.proofs_found > 0);
+
+  const live = {
+    work: rsk.work_available,
+    job: hasJob,
+    candidates: rsk.observer_ready,
+  };
+  for (const [from, to] of [["work", "job"], ["job", "candidates"]])
+    rskRoot
+      .querySelector(`[data-link="${from}"]`)
+      ?.classList.toggle("is-flowing", live[from] && live[to]);
+
+  if (rskSeen.template !== null && rsk.active_template_id !== rskSeen.template)
+    rskFlash(rskRoot, "job");
+  if (rskSeen.proofs !== null && rsk.proofs_found > rskSeen.proofs)
+    rskFlash(rskRoot, "candidates");
+  rskSeen.template = rsk.active_template_id;
+  rskSeen.proofs = rsk.proofs_found;
+
+  // Only ever says what to do next, and only when something needs doing.
+  const hint = rskRoot.querySelector("[data-rsk-hint]");
+  if (hint)
+    hint.textContent = !configured
+      ? "Connect an RSK bridge to get started."
+      : !job_declaration
+        ? "Connect a Template Provider to get started."
+        : !rsk.work_available
+          ? "Waiting for RSK work from the bridge."
+          : !hasJob
+            ? "Waiting for your next mining job."
+            : "";
+}
+
+const ACTIVITY_SOURCES = {
+  "/dashboard/accelerations": ["acceleration", "/api/tx/prioritized"],
+  "/dashboard/rsk": ["rsk", "/api/merge-mining/status"],
+};
+
+async function loadMiningActivity(only) {
+  const source = ACTIVITY_SOURCES[state.route];
+  // Only the page being looked at is worth fetching, and only its own half.
+  if (!state.apiToken || !source) return;
+  const [kind, path] = source;
+  if (only && only !== kind) return;
+  const activity = state.miningActivity;
+  if (activity[`${kind}Loading`]) return;
+  if (
+    kind === "acceleration" &&
+    state.capabilities?.transaction_prioritization === false
+  )
+    return;
+  const token = state.apiToken;
+  const dataKey = kind === "acceleration" ? "accelerations" : "rsk";
+  activity[`${kind}Loading`] = true;
+  try {
+    const data = await envelopeRequest(path, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (token !== state.apiToken) return;
+    activity[dataKey] = kind === "acceleration" ? (data.mempool_space ?? {}) : data;
+    activity[`${kind}Error`] = null;
+  } catch (error) {
+    if (token !== state.apiToken) return;
+    if (handleRejectedToken(error)) return;
+    activity[dataKey] = null;
+    activity[`${kind}Error`] = error.message;
+  } finally {
+    activity[`${kind}Loading`] = false;
+    renderMiningActivity();
+  }
 }
 
 function updateStatsUI() {
@@ -633,6 +1033,402 @@ function summaryMetric(label, value) {
   return `<div class="summary-metric"><div class="summary-metric-label">${label}</div><div class="summary-metric-value">${value}</div></div>`;
 }
 
+function detail(label, value) {
+  return `<div><div class="detail-label">${label}</div><div class="detail-value">${escapeHtml(value)}</div></div>`;
+}
+
+function renderJobHistory() {
+  const page = currentPageElement();
+  page.className = "page compact-top";
+  page.innerHTML = `<section class="page-header">
+    <div><h1 class="page-title">Declared templates</h1><p class="page-description">Every template this proxy has declared, newest first, under the block it was declared for.</p></div>
+    <div class="page-actions"><button class="tiny-setting" type="button" data-action="open-retention" id="retention-open"></button></div>
+  </section><div id="job-history-content"></div>`;
+  renderJobHistoryContent();
+  if (!state.apiToken) return;
+  loadJobHistory();
+  // Fetched once per page visit.
+  loadHistoryRetention();
+}
+
+async function loadJobHistory() {
+  state.jobsLoading = true;
+  state.jobsError = null;
+  renderJobHistoryContent();
+  try {
+    const data = await envelopeRequest(
+      `/api/job-history?page=${state.jobPage}&per_page=${state.jobPerPage}`,
+      { headers: authHeaders() },
+    );
+    state.jobs = data?.jobs || [];
+    state.jobTotal = Number(data?.total) || 0;
+    state.jobTotalPages = Number(data?.total_pages) || 0;
+  } catch (error) {
+    handleRejectedToken(error);
+    state.jobsError = error.message;
+  } finally {
+    state.jobsLoading = false;
+    renderJobHistoryContent();
+  }
+}
+
+async function loadHistoryRetention() {
+  try {
+    const data = await envelopeRequest("/api/history/retention", { headers: authHeaders() });
+    state.historyKeepBlocks = data?.keep_blocks ?? null;
+  } catch (_) {
+    // Keep the last known value.
+  }
+  renderRetentionButton();
+}
+
+async function saveHistoryRetention(value) {
+  const keep_blocks = value === "" ? null : Number(value);
+  const previous = state.historyKeepBlocks;
+  state.historyKeepBlocks = keep_blocks;
+  try {
+    await envelopeRequest("/api/history/retention", {
+      headers: authHeaders(),
+      method: "POST",
+      body: JSON.stringify({ keep_blocks }),
+    });
+    toast(
+      "Retention set",
+      keep_blocks === null
+        ? "History is kept until you delete it."
+        : `Only the last ${keep_blocks} blocks are kept. Anything older has been removed.`,
+      "success",
+    );
+    // Applied immediately by the proxy, so the list on screen is already stale.
+    loadJobHistory();
+  } catch (error) {
+    state.historyKeepBlocks = previous;
+    toast("Could not change the retention", error.message, "error");
+  }
+  // Patch the open dialog; a rejected change puts the radio back.
+  refreshRetentionModal();
+}
+
+function refreshRetentionModal() {
+  const form = document.querySelector("#retention-form");
+  if (!form) return;
+  const chosenValue = String(state.historyKeepBlocks ?? "");
+  form.querySelectorAll(".auto-declare-option").forEach((option) => {
+    const input = option.querySelector("input");
+    const chosen = input.value === chosenValue;
+    option.classList.toggle("is-chosen", chosen);
+    input.checked = chosen;
+  });
+  renderRetentionButton();
+}
+
+// Irreversible: the stored txid lists exist nowhere else.
+function openClearHistoryModal() {
+  const total = state.jobTotal;
+  if (!total) return;
+  openModal({
+    title: "Delete history",
+    description: `${formatNumber(total)} declaration${total === 1 ? "" : "s"} will be removed.`,
+    size: "",
+    body: `<p class="auto-declare-note">The transaction list each one declared exists nowhere
+        else — a candidate is dropped from memory the moment the tip moves. This cannot be undone.</p>
+      <div class="modal-actions">
+        <button class="btn" type="button" data-action="close-modal">Cancel</button>
+        <button class="btn danger" type="button" data-action="confirm-clear-history">${icon("trash", 14)} Delete all</button>
+      </div>`,
+  });
+}
+
+async function clearJobHistory() {
+  const total = state.jobTotal;
+  if (!total) return;
+  try {
+    const data = await envelopeRequest("/api/job-history", {
+      headers: authHeaders(),
+      method: "DELETE",
+    });
+    toast(
+      "History deleted",
+      `${formatNumber(data?.removed ?? total)} removed.`,
+      "success",
+    );
+    state.jobPage = 1;
+    closeModal();
+    loadJobHistory();
+  } catch (error) {
+    toast("Could not delete the history", error.message, "error");
+  }
+}
+
+const PRIORITIZED_SOURCE = {
+  manual: "Manual",
+  mempool_space: "Mempool accelerated",
+};
+
+const PRIORITIZED_COLUMNS = 5;
+
+function renderPrioritizedHistory() {
+  const page = currentPageElement();
+  page.className = "page compact-top";
+  page.innerHTML = `<section class="page-header">
+    <div><h1 class="page-title">Prioritisation history</h1><p class="page-description">Record of all prioritised transactions.</p></div>
+  </section><div id="prioritized-content"></div>`;
+  renderPrioritizedContent();
+  if (!state.apiToken) return;
+  loadPrioritizedHistory();
+}
+
+async function loadPrioritizedHistory() {
+  const view = state.prioritized;
+  view.loading = true;
+  view.error = null;
+  renderPrioritizedContent();
+  try {
+    const data = await envelopeRequest(
+      `/api/prioritized-history?page=${view.page}&per_page=${view.perPage}`,
+      { headers: authHeaders() },
+    );
+    view.rows = data?.transactions || [];
+    view.total = Number(data?.total) || 0;
+    view.totalPages = Number(data?.total_pages) || 0;
+  } catch (error) {
+    handleRejectedToken(error);
+    view.error = error.message;
+  } finally {
+    view.loading = false;
+    renderPrioritizedContent();
+  }
+}
+
+function changePrioritizedPage(action) {
+  const view = state.prioritized;
+  const totalPages = Math.max(1, view.totalPages || 1);
+  if (action === "first") view.page = 1;
+  else if (action === "previous") view.page = Math.max(1, view.page - 1);
+  else if (action === "next") view.page = Math.min(totalPages, view.page + 1);
+  else if (action === "last") view.page = totalPages;
+  loadPrioritizedHistory();
+}
+
+function renderPrioritizedContent() {
+  const root = document.querySelector("#prioritized-content");
+  if (!root) return;
+  if (activityNeedsToken(root)) return;
+  const view = state.prioritized;
+  if (view.error) {
+    root.innerHTML = `<section class="card history-error"><div>Error loading the prioritisation history: ${escapeHtml(view.error)}</div><button class="btn" type="button" data-action="refresh-prioritized">${icon("refresh", 16)} Try Again</button></section>`;
+    return;
+  }
+  const totalPages = Math.max(1, view.totalPages || 1);
+  const start = view.total ? (view.page - 1) * view.perPage + 1 : 0;
+  const end = Math.min(view.page * view.perPage, view.total);
+  root.innerHTML = `<section class="card history-card">
+    <div class="history-toolbar">
+      <button class="btn small" type="button" data-action="refresh-prioritized" ${view.loading ? "disabled" : ""}>${icon("refresh", 15)} Refresh</button>
+      <span class="muted">${view.loading ? "Loading…" : `${formatNumber(view.total)} transaction${view.total === 1 ? "" : "s"}`}</span>
+    </div>
+    <div class="table-shell"><table class="data-table history-table"><thead><tr><th>Transaction</th><th>Source</th><th class="right">Fee adjustment</th><th>Declared</th><th>Recorded</th></tr></thead><tbody>${renderPrioritizedRows()}</tbody></table></div>
+    <div class="history-pagination"><span>Showing ${start} to ${end} of ${formatNumber(view.total)} entries</span><div class="pagination-controls"><label class="nowrap">Rows per page <select id="prioritized-page-size" class="select-control"><option>10</option><option>20</option><option>30</option><option>50</option></select></label><span>Page ${view.page} of ${totalPages}</span><button class="icon-btn" data-prioritized-page="first" ${view.page <= 1 ? "disabled" : ""}>${icon("chevronsLeft", 15)}</button><button class="icon-btn" data-prioritized-page="previous" ${view.page <= 1 ? "disabled" : ""}>${icon("chevronLeft", 15)}</button><button class="icon-btn" data-prioritized-page="next" ${view.page >= totalPages ? "disabled" : ""}>${icon("chevronRight", 15)}</button><button class="icon-btn" data-prioritized-page="last" ${view.page >= totalPages ? "disabled" : ""}>${icon("chevronsRight", 15)}</button></div></div>
+  </section>`;
+  const pageSize = root.querySelector("#prioritized-page-size");
+  if (pageSize) pageSize.value = String(view.perPage);
+}
+
+function renderPrioritizedRows() {
+  const view = state.prioritized;
+  if (view.loading && !view.rows.length)
+    return `<tr><td colspan="${PRIORITIZED_COLUMNS}" class="empty-cell">Loading…</td></tr>`;
+  if (!view.rows.length)
+    return `<tr><td colspan="${PRIORITIZED_COLUMNS}" class="empty-cell">Nothing has been prioritised yet.</td></tr>`;
+
+  return view.rows
+    .map((row) => {
+      const delta = Number(row.fee_delta) || 0;
+      return `<tr>
+        <td>${activityTxid(row.txid)}</td>
+        <td class="nowrap">${escapeHtml(PRIORITIZED_SOURCE[row.source] || row.source)}</td>
+        <td class="right nowrap">${delta > 0 ? "+" : ""}${formatNumber(delta)} sats</td>
+        <td><span class="badge ${row.declared ? "success" : ""}">${row.declared ? "Yes" : "No"}</span></td>
+        <td class="nowrap muted">${escapeHtml(new Date(Number(row.created_at) * 1000).toLocaleString())}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function renderJobHistoryContent() {
+  const root = document.querySelector("#job-history-content");
+  if (!root) return;
+  if (activityNeedsToken(root)) return;
+  if (state.jobsError) {
+    root.innerHTML = `<section class="card history-error"><div>Error loading job history: ${escapeHtml(state.jobsError)}</div><button class="btn" type="button" data-action="refresh-history">${icon("refresh", 16)} Try Again</button></section>`;
+    return;
+  }
+  const totalPages = Math.max(1, state.jobTotalPages || 1);
+  const start = state.jobTotal ? (state.jobPage - 1) * state.jobPerPage + 1 : 0;
+  const end = Math.min(state.jobPage * state.jobPerPage, state.jobTotal);
+  root.innerHTML = `<section class="card history-card">
+    <div class="history-toolbar">
+      <div class="button-row" style="gap:.5rem">
+        <button class="btn small" type="button" data-action="refresh-history" ${state.jobsLoading ? "disabled" : ""}>${icon("refresh", 15)} Refresh</button>
+        <button class="btn small danger" type="button" data-action="clear-history" ${state.jobTotal ? "" : "disabled"}>${icon("trash", 14)} Delete all</button>
+      </div>
+      <span class="muted">${state.jobsLoading ? "Loading…" : `${state.jobTotal} declaration${state.jobTotal === 1 ? "" : "s"}`}</span>
+    </div>
+    <div class="table-shell"><table class="data-table history-table"><thead><tr><th>JD No</th><th>Template</th><th class="right">Fees (BTC)</th><th class="right">TXs</th><th class="right">Block fill</th><th>Channel</th><th>Mining Job Token</th><th>Declared</th><th>Actions</th></tr></thead><tbody>${renderJobRows()}</tbody></table></div>
+    <div class="history-pagination"><span>Showing ${start} to ${end} of ${state.jobTotal} entries</span><div class="pagination-controls"><label class="nowrap">Rows per page <select id="job-page-size" class="select-control"><option>10</option><option>20</option><option>30</option><option>50</option></select></label><span>Page ${state.jobPage} of ${totalPages}</span><button class="icon-btn" data-job-page="first" ${state.jobPage <= 1 ? "disabled" : ""}>${icon("chevronsLeft", 15)}</button><button class="icon-btn" data-job-page="previous" ${state.jobPage <= 1 ? "disabled" : ""}>${icon("chevronLeft", 15)}</button><button class="icon-btn" data-job-page="next" ${state.jobPage >= totalPages ? "disabled" : ""}>${icon("chevronRight", 15)}</button><button class="icon-btn" data-job-page="last" ${state.jobPage >= totalPages ? "disabled" : ""}>${icon("chevronsRight", 15)}</button></div></div>
+  </section>`;
+  const pageSize = root.querySelector("#job-page-size");
+  if (pageSize) pageSize.value = String(state.jobPerPage);
+  renderRetentionButton();
+}
+
+function renderRetentionButton() {
+  const button = document.querySelector("#retention-open");
+  if (!button) return;
+  button.innerHTML = `${icon("sliders", 13)} Retain ${escapeHtml(retentionLabel())}`;
+}
+
+function retentionLabel() {
+  const match = HISTORY_RETENTIONS.find(
+    ([value]) => String(value) === String(state.historyKeepBlocks ?? ""),
+  );
+  return match ? match[1] : "last 5 blocks";
+}
+
+function openRetentionModal() {
+  openModal({
+    title: "History",
+    description: "",
+    size: "",
+    body: `<form id="retention-form" class="auto-declare">
+      ${HISTORY_RETENTIONS.map(
+        ([
+          value,
+          label,
+        ]) => `<label class="auto-declare-option ${String(state.historyKeepBlocks ?? "") === String(value) ? "is-chosen" : ""}">
+          <input type="radio" name="keep_blocks" value="${escapeHtml(value)}" ${String(state.historyKeepBlocks ?? "") === String(value) ? "checked" : ""} />
+          <span class="auto-declare-copy"><strong>${escapeHtml(label)}</strong></span>
+        </label>`,
+      ).join("")}
+      <p class="auto-declare-note">Older blocks are dropped as they fall outside this.</p>
+    </form>`,
+  });
+}
+
+const HISTORY_COLUMNS = 9;
+
+// History rows, grouped under the block each declaration was for.
+function renderJobRows() {
+  if (state.jobsLoading && !state.jobs.length)
+    return `<tr><td colspan="${HISTORY_COLUMNS}" class="empty-cell">Loading…</td></tr>`;
+  if (!state.jobs.length)
+    return `<tr><td colspan="${HISTORY_COLUMNS}" class="empty-cell">Nothing has been declared yet.</td></tr>`;
+
+  const rows = [];
+  let block;
+
+  state.jobs.forEach((job, index) => {
+    if (index === 0 || job.height !== block) {
+      block = job.height;
+      rows.push(`<tr class="hist-block"><td colspan="${HISTORY_COLUMNS}">
+        ${icon("layers", 13)}
+        <strong>${known(block) ? `Block ${formatNumber(block)}` : "Block not recorded"}</strong>
+      </td></tr>`);
+    }
+
+    const fill = known(job.total_weight)
+      ? `${((job.total_weight / MAX_BLOCK_WEIGHT) * 100).toFixed(2)}%`
+      : '<span class="muted">—</span>';
+
+    rows.push(`<tr>
+      <td><strong>#${formatNumber(job.id)}</strong></td>
+      <td><code>${escapeHtml(job.template_id)}</code></td>
+      <td class="right">${known(job.total_fees_sat) ? formatBtc(job.total_fees_sat) : '<span class="muted">—</span>'}</td>
+      <td class="right">${formatNumber(job.txid_count)}</td>
+      <td class="right">${fill}</td>
+      <td><span class="badge">CH-${escapeHtml(job.channel_id)}</span></td>
+      <td><span class="inline" style="gap:.35rem"><code>${escapeHtml(shortHash(job.mining_job_token))}</code><button class="icon-btn btn ghost" type="button" data-copy="${escapeHtml(job.mining_job_token)}" aria-label="Copy mining job token">${icon("copy", 13)}</button></span></td>
+      <td class="muted">${escapeHtml(formatDate(job.created_at))}</td>
+      <td><button class="btn ghost small" type="button" data-view-txids="${escapeHtml(job.template_id)}">${icon("eye", 14)} View TXIDs</button></td>
+    </tr>`);
+  });
+
+  return rows.join("");
+}
+
+async function openJobTxids(templateId) {
+  openModal({
+    title: `Job TXIDs - Template ${templateId}`,
+    description: "Transaction IDs included in this job declaration",
+    size: "xlarge",
+    body: '<div class="empty-cell" style="display:grid;place-items:center">Loading transaction IDs...</div>',
+  });
+  try {
+    const data = await envelopeRequest(
+      `/api/job-txids/${encodeURIComponent(templateId)}`,
+      { headers: authHeaders() },
+    );
+    const txids = data?.txids || [];
+    state.modalCopyText = txids.join("\n");
+    openModal({
+      title: `Job TXIDs - Template ${templateId}`,
+      description: "Transaction IDs included in this job declaration",
+      size: "xlarge",
+      body: `<div class="detail-card"><h4>${icon("hash", 16)} Transaction Summary</h4><div class="details-grid">${detail("Template ID", data?.template_id ?? templateId)}${detail("Total TXIDs", data?.total ?? txids.length)}</div></div>
+      <div class="validation-head" style="margin:1rem 0"><span class="badge" data-job-txid-count>${txids.length} Transaction${txids.length === 1 ? "" : "s"}</span><div class="button-row" style="gap:.5rem"><button class="btn small" type="button" data-action="copy-modal-text">${icon("copy", 14)} Copy All</button><button class="btn small" type="button" data-export-txids="${escapeHtml(templateId)}">${icon("download", 14)} Export CSV</button></div></div>
+      <label class="panel-field" style="margin-bottom:1rem"><span class="panel-label">Search transaction IDs</span><input class="panel-input" id="job-txid-search" type="search" spellcheck="false" autocomplete="off" placeholder="Search transaction" /></label>
+      <h4>Transaction IDs</h4><div class="txid-list"><div class="empty-cell" data-job-txid-empty hidden>No matching transaction ID.</div>${txids.map((txid, index) => `<div class="txid-row" data-job-txid="${escapeHtml(txid.toLowerCase())}"><span class="badge">${index + 1}</span><span class="txid-value" title="${escapeHtml(txid)}">${escapeHtml(txid)}</span><div class="button-row"><button class="icon-btn btn ghost" data-copy="${escapeHtml(txid)}" aria-label="Copy transaction ID">${icon("copy", 14)}</button><a class="icon-btn btn ghost" href="https://mempool.space/tx/${encodeURIComponent(txid)}" target="_blank" rel="noopener noreferrer" aria-label="View on mempool.space">${icon("external", 14)}</a></div></div>`).join("")}</div>`,
+    });
+    const search = document.querySelector("#job-txid-search");
+    search?.addEventListener("input", () => {
+      const query = search.value.trim().toLowerCase();
+      const rows = [...document.querySelectorAll("[data-job-txid]")];
+      let matches = 0;
+      rows.forEach((row) => {
+        const matchesQuery = row.dataset.jobTxid.includes(query);
+        row.hidden = !matchesQuery;
+        if (matchesQuery) matches += 1;
+      });
+      const count = document.querySelector("[data-job-txid-count]");
+      if (count)
+        count.textContent = query
+          ? `${matches} of ${txids.length} shown`
+          : `${txids.length} Transaction${txids.length === 1 ? "" : "s"}`;
+      const empty = document.querySelector("[data-job-txid-empty]");
+      if (empty) empty.hidden = matches !== 0;
+    });
+    document
+      .querySelector("[data-export-txids]")
+      ?.addEventListener(
+        "click",
+        () =>
+          downloadText(
+            ["txid", ...txids].join("\n"),
+            `job-txids-${templateId}.csv`,
+            "text/csv;charset=utf-8",
+          ),
+        { once: true },
+      );
+  } catch (error) {
+    openModal({
+      title: `Job TXIDs - Template ${templateId}`,
+      description: "Transaction IDs included in this job declaration",
+      body: `<div class="history-error">Error: ${escapeHtml(error.message)}</div>`,
+    });
+  }
+}
+
+function changeJobPage(action) {
+  const totalPages = Math.max(1, state.jobTotalPages || 1);
+  if (action === "first") state.jobPage = 1;
+  else if (action === "previous")
+    state.jobPage = Math.max(1, state.jobPage - 1);
+  else if (action === "next")
+    state.jobPage = Math.min(totalPages, state.jobPage + 1);
+  else if (action === "last") state.jobPage = totalPages;
+  loadJobHistory();
+}
+
 async function copyWithToast(text) {
   try {
     await copyText(text);
@@ -664,7 +1460,13 @@ const CLICK_ACTIONS = {
       closePanel();
   },
   "dismiss-toast": (event, target) => target.closest(".toast")?.remove(),
+  "refresh-history": () => loadJobHistory(),
+  "refresh-prioritized": () => loadPrioritizedHistory(),
+  "open-retention": () => openRetentionModal(),
+  "clear-history": () => openClearHistoryModal(),
+  "confirm-clear-history": () => clearJobHistory(),
   "refresh-templates": () => loadTemplates(),
+  "refresh-mining-activity": () => loadMiningActivity(),
   "open-prioritize": () => openPrioritizePanel(),
   "open-auto-declare": () => openAutoDeclareModal(),
   "copy-modal-text": () => copyWithToast(state.modalCopyText),
@@ -704,6 +1506,17 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const jobPage = event.target.closest("[data-job-page]");
+  if (jobPage) return changeJobPage(jobPage.dataset.jobPage);
+
+  const prioritizedPage = event.target.closest("[data-prioritized-page]");
+  if (prioritizedPage)
+    return changePrioritizedPage(prioritizedPage.dataset.prioritizedPage);
+
+  const viewTxids = event.target.closest("[data-view-txids]");
+  if (viewTxids)
+    return openJobTxids(viewTxids.dataset.viewTxids);
+
   const opener = event.target.closest("[data-template-open]");
   if (opener) openTemplateTransactions(Number(opener.dataset.templateOpen));
 });
@@ -716,6 +1529,19 @@ document.addEventListener("change", async (event) => {
     // Switching sort resets the direction to descending.
     state.templateSort = { key: target.value, direction: "desc" };
     renderTemplatesSection();
+  } else if (
+    target.name === "keep_blocks" &&
+    target.closest("#retention-form")
+  ) {
+    await saveHistoryRetention(target.value);
+  } else if (target.id === "prioritized-page-size") {
+    state.prioritized.perPage = Number(target.value);
+    state.prioritized.page = 1;
+    loadPrioritizedHistory();
+  } else if (target.id === "job-page-size") {
+    state.jobPerPage = Number(target.value);
+    state.jobPage = 1;
+    loadJobHistory();
   }
 });
 
@@ -816,6 +1642,7 @@ async function fetchTemplates() {
   }
   state.templatesLoaded = true;
   renderTemplatesSection();
+  if (document.querySelector("#accelerations-content")) renderMiningActivity();
 }
 
 function noticeNewTemplate() {
@@ -1244,7 +2071,7 @@ function renderPaper(template, { declared, sort, now }) {
       </div>
       ${
         (template.prioritized_included || []).length
-          ? `<span class="p3-prio" title="${formatNumber(template.prioritized_included.length)} transaction${template.prioritized_included.length === 1 ? "" : "s"} you asked bitcoind to prioritise ${template.prioritized_included.length === 1 ? "is" : "are"} in this template">${icon("pin", 10)} ${formatNumber(template.prioritized_included.length)} prioritised</span>`
+          ? `<span class="p3-prio" title="${formatNumber(template.prioritized_included.length)} locally prioritised transaction${template.prioritized_included.length === 1 ? "" : "s"} ${template.prioritized_included.length === 1 ? "is" : "are"} in this template">${icon("pin", 10)} ${formatNumber(template.prioritized_included.length)} prioritised</span>`
           : ""
       }
       ${
@@ -1416,7 +2243,11 @@ async function submitApiToken(form, token) {
   }
   saveApiToken(token);
   closePanel();
+  renderMiningActivity();
   loadTemplates();
+  loadMiningActivity();
+  if (state.route === "/dashboard/job-history") renderJobHistory();
+  if (state.route === "/dashboard/prioritized-history") renderPrioritizedHistory();
 }
 
 // Prioritise a transaction, or say what is stopping it: what the proxy was
@@ -1459,6 +2290,7 @@ function openPrioritizePanel() {
   }
   openPanel({
     title: "Prioritise a transaction",
+    description: "Free. This changes the transaction priority ONLY on your node and does not require you to pay an extra fee.",
     body: `<form id="prio-panel-form" class="panel-form">
         <label class="panel-field">
           <span class="panel-label">Transaction <span class="muted">txid</span></span>
@@ -1484,10 +2316,6 @@ function setPrioritizingUI(busy) {
   button.textContent = busy ? "Sending…" : "Prioritise transaction";
 }
 
-// ---------------------------------------------------------------------------
-// Prioritised transactions. The fee delta affects the template bitcoind builds
-// *next*. Endpoints authenticate with API_TX_TOKEN, kept in this browser only.
-// ---------------------------------------------------------------------------
 
 // Submit a raw transaction and have bitcoind prioritise it.
 // One transaction should not be prioritised by both bitcoind and mempool.space, so check the former first.
@@ -1554,6 +2382,9 @@ async function prioritizeTransaction(txid, feeDelta) {
       `Prioritised ${txid} by ${feeDelta} sats`,
     );
     closePanel();
+    if (state.route === "/dashboard/accelerations")
+      loadMiningActivity("acceleration");
+    if (state.route === "/dashboard/prioritized-history") loadPrioritizedHistory();
   } catch (error) {
     toast("Prioritisation failed", error.message, "error");
     addLog(
@@ -1683,6 +2514,7 @@ function templateTransactionsTable(template) {
   }
 
   const prioritized = new Set(template.prioritized_included || []);
+  const accelerated = new Set(template.mempool_space_included || []);
 
   // Prioritised first, then by fee; the rest keep the node's order.
   const rows = [...transactions]
@@ -1695,7 +2527,7 @@ function templateTransactionsTable(template) {
     .map((transaction) => {
       const isPrioritized = prioritized.has(transaction.txid);
       return `<tr class="${isPrioritized ? "pz-row-prio" : ""}">
-      <td><span class="inline" style="gap:.35rem">${isPrioritized ? `<span class="tplx-row-mark" title="You asked bitcoind to prioritise this one">${icon("pin", 11)}</span>` : ""}<span class="txid-value" title="${escapeHtml(transaction.txid)}">${escapeHtml(shortHash(transaction.txid, 12, 6))}</span><button class="icon-btn btn ghost" type="button" data-copy="${escapeHtml(transaction.txid)}" aria-label="Copy transaction ID">${icon("copy", 13)}</button></span></td>
+      <td><span class="inline" style="gap:.35rem">${isPrioritized ? `<span class="tplx-row-mark" title="${accelerated.has(transaction.txid) ? "mempool.space acceleration" : "Locally prioritised"}">${icon(accelerated.has(transaction.txid) ? "trend" : "pin", 11)}</span>` : ""}<span class="txid-value" title="${escapeHtml(transaction.txid)}">${escapeHtml(shortHash(transaction.txid, 12, 6))}</span><button class="icon-btn btn ghost" type="button" data-copy="${escapeHtml(transaction.txid)}" aria-label="Copy transaction ID">${icon("copy", 13)}</button>${accelerated.has(transaction.txid) ? '<span class="badge success">mempool.space</span>' : ""}</span></td>
       <td class="right">${transaction.fee_sat === null || transaction.fee_sat === undefined ? '<span class="muted">—</span>' : formatBtc(transaction.fee_sat)}</td>
       <td class="right">${transaction.fee_rate_sat_per_vb === null || transaction.fee_rate_sat_per_vb === undefined ? '<span class="muted">—</span>' : formatNumber(transaction.fee_rate_sat_per_vb, 2)}</td>
       <td class="right">${formatNumber(transaction.vsize)}</td>
@@ -1731,6 +2563,7 @@ async function resolveCapabilities() {
 function startDashboard() {
   renderShell();
   pollStats();
+  loadMiningActivity();
   if (state.apiToken) loadTemplates();
   if (state.polling) return;
   state.polling = true;
@@ -1739,11 +2572,18 @@ function startDashboard() {
     if (visible()) pollStats();
   }, API_POLL_INTERVAL);
   setInterval(() => {
-    if (visible() && state.apiToken) loadTemplates();
+    if (!visible() || !state.apiToken) return;
+    loadTemplates();
+    // Cheap and genuinely fast-moving: a candidate can turn up any second.
+    loadMiningActivity("rsk");
   }, TEMPLATE_REFRESH_INTERVAL);
+  setInterval(() => {
+    if (visible() && state.apiToken) loadMiningActivity("acceleration");
+  }, ACCELERATIONS_REFRESH_INTERVAL);
   document.addEventListener("visibilitychange", () => {
     if (!visible()) return;
     pollStats();
+    loadMiningActivity();
     if (state.apiToken) loadTemplates();
   });
 }

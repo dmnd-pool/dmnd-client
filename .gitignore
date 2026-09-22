@@ -4,4 +4,8 @@
 *.pem
 .DS_Store
 config.toml
+*.db
+*.db-wal
+*.db-shm
+.sqlx
 /template-provider

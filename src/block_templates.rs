@@ -74,6 +74,7 @@ pub const CANDIDATE_LIMIT: usize = 3;
 static POLICY: OnceLock<RwLock<DeclarationPolicy>> = OnceLock::new();
 
 struct Pending {
+    mining_job_token: Option<Vec<u8>>,
     sent_at: Instant,
 }
 
@@ -328,6 +329,8 @@ pub fn clear_for_new_tip(template_id: u64) {
     if state.active != Some(template_id) {
         state.active = None;
     }
+    drop(state);
+    crate::db::history::prune_for_new_tip();
 }
 
 /// A `DeclareMiningJob` has gone out for this template.
@@ -339,6 +342,7 @@ pub fn declaration_sent(template_id: u64) {
         .insert(
             template_id,
             Pending {
+                mining_job_token: None,
                 sent_at: Instant::now(),
             },
         );
@@ -352,8 +356,18 @@ pub fn declaration_rejected(template_id: u64) {
         .remove(&template_id);
 }
 
-/// The pool accepted the declaration: mark it active.
-pub fn declaration_accepted(template_id: u64) {
+/// The token issued by the pool before it accepts the declaration.
+pub fn declaration_token(template_id: u64, mining_job_token: &[u8]) {
+    let mut state = state()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(pending) = state.pending.get_mut(&template_id) {
+        pending.mining_job_token = Some(mining_job_token.to_vec());
+    }
+}
+
+/// The pool accepted the declaration: mark it active and record it.
+pub fn declaration_accepted(template_id: u64, channel_id: u32, job_id: u32) {
     let mut state = state()
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -369,6 +383,15 @@ pub fn declaration_accepted(template_id: u64) {
     }
 
     crate::api::stats::record_declaration_latency(pending.sent_at.elapsed().as_millis() as u64);
+    drop(state);
+    if crate::db::pool().is_some() {
+        tokio::spawn(crate::db::history::record(
+            template_id,
+            channel_id,
+            job_id,
+            pending.mining_job_token,
+        ));
+    }
 }
 
 /// One candidate by id.
@@ -523,7 +546,7 @@ mod tests {
         record_template(20, true, 0, 0, &prefix, &[tx(1)]);
         record_template(21, false, 0, 0, &prefix, &[tx(2)]);
         declaration_sent(20);
-        declaration_accepted(20);
+        declaration_accepted(20, 0, 0);
         assert_eq!(active_declaration(), Some(20));
 
         // The tip moves to 21, so only 20 went stale.
@@ -536,13 +559,13 @@ mod tests {
         assert_eq!(active_declaration(), None, "20 belonged to the old tip");
 
         declaration_sent(20);
-        declaration_accepted(20);
+        declaration_accepted(20, 0, 0);
         assert_eq!(active_declaration(), None, "20 is not a candidate any more");
 
         // A candidate for the new tip is accepted as normal.
         record_template(31, true, 0, 0, &prefix, &[tx(2)]);
         declaration_sent(31);
-        declaration_accepted(31);
+        declaration_accepted(31, 0, 0);
         assert_eq!(active_declaration(), Some(31));
 
         // A tip naming a template that was never recorded leaves nothing.
@@ -575,7 +598,7 @@ mod tests {
         );
 
         // The pool's acceptance arrives afterwards, and still counts.
-        declaration_accepted(41);
+        declaration_accepted(41, 0, 0);
         assert_eq!(active_declaration(), Some(41));
         assert!(crate::api::stats::declaration_latency_ms().is_some());
         assert!(
@@ -584,7 +607,7 @@ mod tests {
         );
 
         // A stale acceptance cannot revive a template the tip change dropped.
-        declaration_accepted(40);
+        declaration_accepted(40, 0, 0);
         assert_eq!(active_declaration(), Some(41));
     }
 

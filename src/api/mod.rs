@@ -7,18 +7,19 @@ use std::{
     collections::HashMap,
     error::Error as StdError,
     fmt,
-    sync::{Arc, LazyLock},
-    time::Duration,
+    sync::{Arc, LazyLock, Mutex},
+    time::{Duration, Instant},
 };
 
 use crate::{
-    api::bitcoin_rpc::{BitcoindRpc, BitcoindRpcError},
+    api::bitcoin_rpc::{BitcoindRpc, BitcoindRpcError, PrioTx},
     dashboard::{assets::static_handler, open_dashboard},
+    db::prioritized,
     router::Router,
     Configuration,
 };
 use axum::{
-    routing::{get, post},
+    routing::{delete, get, post},
     Router as AxumRouter,
 };
 use bitcoin::{
@@ -27,7 +28,7 @@ use bitcoin::{
 };
 use routes::Api;
 use stats::StatsSender;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 const MEMPOOL_SPACE_API_BASE_URL: &str = "https://mempool.space/api";
 const PRIORITIZED_TRANSACTIONS_POLL_INTERVAL: Duration = Duration::from_secs(60);
@@ -35,6 +36,23 @@ const BAD_TRANSACTIONS_CLEAR_INTERVAL: Duration = Duration::from_secs(3 * 60 * 6
 pub(crate) static START_TX_PRIO: AtomicBool = AtomicBool::new(true);
 static PRIORITIZED_TRANSACTIONS_POLL_LOCK: LazyLock<Arc<tokio::sync::Mutex<()>>> =
     LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
+
+const NODE_PRIORITIZED_VIEW_MAX_AGE: Duration = Duration::from_secs(30);
+
+/// The last reading of the node's prioritized transactions, and when it was taken. This is used to avoid repeated calls to `getprioritisetransaction` for every API request.
+static NODE_PRIORITIZED_VIEW: Mutex<Option<(HashMap<Txid, PrioTx>, Instant)>> = Mutex::new(None);
+
+pub(crate) fn set_node_prioritized_view(transactions: Option<&HashMap<Txid, PrioTx>>) {
+    if let Ok(mut view) = NODE_PRIORITIZED_VIEW.lock() {
+        *view = transactions.map(|transactions| (transactions.clone(), Instant::now()));
+    }
+}
+
+pub(crate) fn node_prioritized_view() -> Option<HashMap<Txid, PrioTx>> {
+    let view = NODE_PRIORITIZED_VIEW.lock().ok()?;
+    let (transactions, taken_at) = view.as_ref()?;
+    (taken_at.elapsed() <= NODE_PRIORITIZED_VIEW_MAX_AGE).then(|| transactions.clone())
+}
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,6 +137,15 @@ pub(crate) async fn start(
     stats_sender: StatsSender,
     downstream_handoff: crate::DownstreamHandoffSender,
 ) {
+    if let Err(error) = crate::db::init().await {
+        warn!(
+            "Could not open history database `jd_history.db`: {}. Mining will continue, but \
+             history will not be stored. Check disk space and directory permissions. If the \
+             database is disposable or corrupted, stop the client, move `jd_history.db`, \
+             `jd_history.db-wal`, and `jd_history.db-shm` to a backup location, then restart.",
+            error
+        );
+    }
     let api_tx_token = Configuration::api_tx_token();
     let prioritizing_txs = Configuration::bitcoind_rpc_config().map(|config| PrioritizingTxs {
         rpc: Arc::new(BitcoindRpc::new(config.url, config.user, config.pwd)),
@@ -161,6 +188,10 @@ pub(crate) async fn start(
         .route("/api/health", get(Api::health_check))
         .route("/api/capabilities", get(Api::get_capabilities))
         .route(
+            "/api/merge-mining/status",
+            get(Api::get_merge_mining_status),
+        )
+        .route(
             "/api/coinbase/op-return",
             post(crate::merge_mining::set_pair_api),
         )
@@ -188,6 +219,17 @@ pub(crate) async fn start(
         .route("/api/templates/recent", get(Api::get_recent_templates))
         .route("/api/declaration-policy", post(Api::set_declaration_policy))
         .route("/api/templates/{template_id}", get(Api::get_template_by_id))
+        .route("/api/job-history", get(Api::get_job_history))
+        .route("/api/job-history", delete(Api::clear_job_history))
+        .route(
+            "/api/history/retention",
+            get(Api::get_history_retention).post(Api::set_history_retention),
+        )
+        .route("/api/job-txids/{template_id}", get(Api::get_job_txids))
+        .route(
+            "/api/prioritized-history",
+            get(Api::get_prioritized_history),
+        )
         // Dashboard routes
         .route("/", get(static_handler))
         .route("/{*path}", get(static_handler))
@@ -282,8 +324,14 @@ async fn reconcile_node_prioritized_transactions(
             continue;
         }
 
-        manually_prioritized.update_existing(&transaction.txid, transaction.fee_delta);
-        mempool_space_accelerated.update_existing(&transaction.txid, transaction.fee_delta);
+        for (source, store) in [
+            (prioritized::MANUAL, manually_prioritized),
+            (prioritized::MEMPOOL_SPACE, mempool_space_accelerated),
+        ] {
+            if store.update_existing(&transaction.txid, transaction.fee_delta) {
+                prioritized::record(source, &transaction.txid, transaction.fee_delta).await;
+            }
+        }
 
         if transaction.fee_delta <= 0 || transaction.in_mempool {
             continue;
@@ -384,6 +432,13 @@ async fn poll_mempool_space_accelerations(
                             crate::prioritized_transactions::MEMPOOL_DOT_SPACE_ACCELERATED
                                 .record(*txid, *fee_delta);
                         }
+                    }
+                    // Record the acceleration in the database if it is not already there. This ensures that the database reflects the current state of the node's prioritizations, even if the node was restarted or the application was restarted.
+                    if crate::prioritized_transactions::MEMPOOL_DOT_SPACE_ACCELERATED
+                        .get(txid)
+                        .is_some()
+                    {
+                        prioritized::record(prioritized::MEMPOOL_SPACE, txid, *fee_delta).await;
                     }
                     if !cached_txids.contains_key(txid) {
                         match fetch_mempool_space_transaction(&client, *txid).await {

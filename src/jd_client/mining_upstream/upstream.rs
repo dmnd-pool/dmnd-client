@@ -663,7 +663,11 @@ impl ParseUpstreamMiningMessages<Downstream, NullDownstreamMiningSelector, NoRou
                 "Set custom mining job success {}, for template {}",
                 m.job_id, request.template_id
             );
-            crate::block_templates::declaration_accepted(request.template_id);
+            crate::block_templates::declaration_accepted(
+                request.template_id,
+                m.channel_id,
+                m.job_id,
+            );
             IS_CUSTOM_JOB_SET.store(true, std::sync::atomic::Ordering::Release);
             Ok(SendTo::None(None))
         } else {

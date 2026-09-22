@@ -70,6 +70,11 @@ sv1_api = { git = "https://github.com/demand-open-source/stratum" }
 
 rust-embed = "8.7.2"
 mime_guess = "2.0.5"
+sqlx = { version = "0.8.6", features = [
+    "runtime-tokio-native-tls",
+    "sqlite",
+] }
+
 
 [dev-dependencies]
 rand = "0.8.5"

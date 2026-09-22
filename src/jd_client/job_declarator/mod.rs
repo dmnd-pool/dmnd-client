@@ -365,6 +365,7 @@ impl JobDeclarator {
                         let mut last_declare_mining_job_sent = last_declare.declare_job;
                         let is_future = last_declare.template.future_template;
                         let id = last_declare.template.template_id;
+                        crate::block_templates::declaration_token(id, new_token.inner_as_ref());
                         let merkle_path = last_declare.template.merkle_path.clone();
                         let template = last_declare.template;
                         let downstream_job = last_declare.downstream_job;

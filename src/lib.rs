@@ -29,6 +29,7 @@ mod api;
 mod auto_update;
 mod config;
 mod dashboard;
+mod db;
 mod debug_timing;
 mod ingress;
 pub use config::Configuration;
