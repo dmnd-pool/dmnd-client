@@ -270,14 +270,17 @@ impl Downstream {
         )
         .await
         {
-            error!("Failed to start receive downstream task: {e}");
-            ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
-        } else {
-            info!(
-                "dmnd-client-debug downstream_receive_task_started connection_id={} host={}",
-                connection_id, host
+            error!(
+                "Failed to register downstream receive task for connection_id={}: {e}",
+                connection_id
             );
-        };
+            ProxyState::update_downstream_state(DownstreamType::TranslatorDownstream);
+            return;
+        }
+        info!(
+            "dmnd-client-debug downstream_receive_task_started connection_id={} host={}",
+            connection_id, host
+        );
 
         if let Err(e) = start_send_to_downstream(
             task_manager.clone(),
@@ -829,7 +832,18 @@ impl Downstream {
                 Self::send_message_downstream(self_, request.respond(true).into()).await;
             }
             Err(e) => {
-                error!("Failed to forward downstream submit: {e}");
+                let connection_id = self_.safe_lock(|s| s.connection_id)?;
+                if matches!(e, Error::BridgeChannelClosed) {
+                    error!(
+                        "Bridge channel closed, cannot forward share: connection_id={} job_id={}",
+                        connection_id, request.job_id
+                    );
+                } else {
+                    error!(
+                        "Failed to forward downstream submit for connection_id={} job_id={}: {e}",
+                        connection_id, request.job_id
+                    );
+                }
                 let share = ShareInfo::new(
                     request.user_name.clone(),
                     None,
@@ -842,6 +856,9 @@ impl Downstream {
                     s.stats_sender.update_rejected_shares(s.connection_id);
                 })?;
                 Self::send_message_downstream(self_, request.respond(false).into()).await;
+                if matches!(e, Error::BridgeChannelClosed) {
+                    return Err(Error::BridgeChannelClosed);
+                }
             }
         }
 
@@ -943,9 +960,58 @@ impl Downstream {
         sender
             .send(DownstreamMessages::SubmitShares(to_send))
             .await
-            .map_err(|_| Error::AsyncChannelError)?;
+            .map_err(|_| Error::BridgeChannelClosed)?;
 
         Ok(result_rx)
+    }
+
+    pub(super) async fn teardown_session(
+        downstream: Arc<Mutex<Self>>,
+        task_manager: Arc<Mutex<TaskManager>>,
+        connection_id: u32,
+    ) {
+        if let Err(e) = downstream.safe_lock(|d| d.mark_closed()) {
+            error!("Failed to mark downstream {connection_id} closed: {e}");
+        }
+        let stats_sender = downstream.safe_lock(|d| d.stats_sender.clone()).ok();
+        if let Some(stats_sender) = stats_sender {
+            if let Err(e) = stats_sender.remove_stats_reliable(connection_id).await {
+                error!("Failed to remove downstream stats {connection_id}: {e}");
+            }
+        }
+        debug!(
+            "Downstream: Shutting down sv1 downstream session {}",
+            connection_id
+        );
+
+        if let Err(e) = Self::remove_downstream_hashrate_from_channel(&downstream) {
+            error!("Failed to remove downstream hashrate from channel: {}", e)
+        };
+
+        let worker_name = downstream
+            .safe_lock(|d| d.authorized_names.first().cloned().unwrap_or_default())
+            .unwrap_or_else(|e| {
+                error!("Failed to lock downstream: {:?}", e);
+                ProxyState::update_inconsistency(Some(1));
+                "unknown".to_string()
+            });
+
+        if !worker_name.is_empty() {
+            MonitorAPI::worker_disconnected(connection_id);
+        }
+
+        let send_kill_signal = match task_manager.safe_lock(|tm| tm.send_kill_signal.clone()) {
+            Ok(sender) => sender,
+            Err(e) => {
+                error!("Failed to lock task manager for downstream teardown: {e}");
+                ProxyState::update_inconsistency(Some(1));
+                return;
+            }
+        };
+        if send_kill_signal.send(connection_id).await.is_err() {
+            error!("Proxy can not abort downstreams tasks");
+            ProxyState::update_inconsistency(Some(1));
+        }
     }
 
     #[cfg(test)]
@@ -1992,5 +2058,28 @@ mod tests {
         assert!(recent_jobs.get_matching_job(job_2_v1).is_some());
         assert!(recent_jobs.get_matching_job(job_3_v1).is_some());
         assert!(recent_jobs.get_matching_job(job_4_v1).is_some());
+    }
+
+    #[tokio::test]
+    async fn forward_submit_share_returns_bridge_channel_closed_when_receiver_dropped() {
+        let (downstream, _, _) = test_downstream(vec!["worker".to_string()], 4, None).await;
+        let (tx, rx) = channel::<DownstreamMessages>(1);
+        drop(rx);
+        downstream
+            .safe_lock(|d| d.tx_sv1_bridge = tx)
+            .unwrap();
+
+        let submit = client_to_server::Submit {
+            user_name: "worker".to_string(),
+            job_id: "42".to_string(),
+            extra_nonce2: Extranonce::try_from(vec![1_u8; 4]).unwrap(),
+            time: HexU32Be(5609),
+            nonce: HexU32Be(11),
+            version_bits: None,
+            id: 21,
+        };
+
+        let result = Downstream::forward_submit_share(&downstream, submit).await;
+        assert!(matches!(result, Err(Error::BridgeChannelClosed)));
     }
 }
