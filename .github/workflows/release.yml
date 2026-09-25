@@ -205,32 +205,3 @@ jobs:
             sha256-checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  upload-to-ecr:
-    name: Upload Docker Image to ECR
-    needs: [create-release]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-region: ${{ secrets.AWS_REGION }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-      - name: Install Node.js dependencies for Pulumi project
-        run: npm install
-        working-directory: deployment/ecrImage/
-
-      - name: Run Pulumi Up
-        uses: pulumi/actions@v6
-        with:
-          command: up
-          stack-name: dmnd-tech-org/image/client
-          work-dir: deployment/ecrImage/
-        env:
-          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
-          VERSION: ${{ github.ref_name }}

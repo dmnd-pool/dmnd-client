@@ -1521,6 +1521,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pool_reconnect_preserves_authorized_miner_token() {
+        let token = Configuration::shared_token().unwrap();
+        let bootstrap_token = Configuration::token().unwrap();
+        // Restore process-wide configuration even if an assertion fails.
+        struct RestoreToken(Arc<Mutex<String>>, String);
+        impl Drop for RestoreToken {
+            fn drop(&mut self) {
+                self.0.safe_lock(|token| *token = self.1.clone()).unwrap();
+            }
+        }
+        let _restore = RestoreToken(token.clone(), bootstrap_token.clone());
+        let setup = crate::minin_pool_connection::get_mining_setup_connection_msg(false);
+        assert!(setup
+            .device_id
+            .inner_as_ref()
+            .ends_with(bootstrap_token.as_bytes()));
+
+        let (downstream, mut updates) = token_update_test_downstream(true, token).await;
+        assert!(downstream
+            .safe_lock(|d| d.handle_authorize(&client_to_server::Authorize {
+                id: 1,
+                name: "worker-reconnect".to_string(),
+                password: "reconnect-miner-token".to_string(),
+            }))
+            .unwrap());
+        assert_eq!(
+            timeout(Duration::from_secs(1), updates.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            "reconnect-miner-token"
+        );
+        drop(downstream);
+        drop(updates);
+
+        // A new pool transport and translator must both retain the selected miner.
+        for _ in 0..2 {
+            let setup = crate::minin_pool_connection::get_mining_setup_connection_msg(false);
+            let identity = std::str::from_utf8(setup.device_id.inner_as_ref()).unwrap();
+            assert_eq!(
+                identity.split_once("::POOLED::").unwrap().1,
+                "reconnect-miner-token"
+            );
+            let token = Configuration::shared_token().unwrap();
+            assert_eq!(
+                token.safe_lock(|t| t.clone()).unwrap(),
+                "reconnect-miner-token"
+            );
+
+            // Reconnection must not let another downstream take over the account.
+            let (downstream, mut updates) = token_update_test_downstream(false, token).await;
+            assert!(downstream
+                .safe_lock(|d| d.handle_authorize(&client_to_server::Authorize {
+                    id: 2,
+                    name: "worker-reconnected".to_string(),
+                    password: "different-miner-token".to_string(),
+                }))
+                .unwrap());
+            assert_eq!(
+                Configuration::token().as_deref(),
+                Some("reconnect-miner-token")
+            );
+            assert!(matches!(
+                updates.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn first_downstream_authorize_password_updates_upstream_token() {
         let shared_token = Arc::new(Mutex::new("configured-token".to_string()));
         let (downstream, mut rx_update_token) =

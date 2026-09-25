@@ -52,9 +52,7 @@ pub async fn start_accept_connection(
                     raw_initial_difficulty,
                     hard_minimum_difficulty,
                 );
-            let token = Arc::new(Mutex::new(
-                Configuration::token().expect("Token is not set"),
-            ));
+            let token = Configuration::shared_token().expect("Token is not set");
 
             debug!(
                 "Translator downstream startup params: hash_rate={} H/s, shares_per_second={}, raw_initial_difficulty={}, initial_difficulty={}",

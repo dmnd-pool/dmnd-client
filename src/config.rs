@@ -1,10 +1,11 @@
 use clap::Parser;
+use roles_logic_sv2::utils::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     path::PathBuf,
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 use tracing::{debug, error, info, warn};
@@ -161,7 +162,8 @@ impl ConfigFile {
 
 #[derive(Debug)]
 pub struct Configuration {
-    token: Option<String>,
+    // Miner authorization and subsequent upstream connections share this identity.
+    token: Option<Arc<Mutex<String>>>,
     tp_address: Option<String>,
     api_base_url: Option<String>,
     pool_addresses: Vec<String>,
@@ -267,7 +269,7 @@ and make that test pass."
             Self::build_prioritizing_txs_config(rpc_url, rpc_user, rpc_pwd, api_tx_token);
 
         Configuration {
-            token,
+            token: token.map(|token| Arc::new(Mutex::new(token))),
             tp_address,
             api_base_url,
             pool_addresses,
@@ -385,6 +387,14 @@ and make that test pass."
     }
 
     pub fn token() -> Option<String> {
+        Self::shared_token().map(|token| {
+            token
+                .safe_lock(|token| token.clone())
+                .expect("Mining token mutex poisoned")
+        })
+    }
+
+    pub(crate) fn shared_token() -> Option<Arc<Mutex<String>>> {
         Self::cfg().token.clone()
     }
 
