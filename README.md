@@ -76,7 +76,18 @@ Download the release binary for your platform from:
 
 https://github.com/dmnd-pool/dmnd-client/releases
 
-Verify checksums/signatures where provided — standard practice for any software that touches mining revenue.
+#### Signatures and verification
+
+Each release includes `sha256-checksums.txt`, which you can use to confirm that your downloaded binary is byte-for-byte identical to the published release artifact.
+
+Each binary also has a detached Minisign signature that verifies it as an authentic DMND release. Download the binary and its `.minisig` file, then verify the signature using [`release-signing.pub`](release-signing.pub), replacing the filename as needed:
+
+```bash
+minisign -Vm dmnd-client-linux -x dmnd-client-linux.minisig -p release-signing.pub
+```
+
+Automatic updates perform signature verification before installing a new binary.
+
 
 Make the binary executable and run it:
 

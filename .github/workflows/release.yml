@@ -28,6 +28,15 @@ jobs:
             exit 1
           }
 
+      - name: Validate release public key
+        shell: bash
+        run: |
+          public_key="$(tail -n 1 release-signing.pub)"
+          if [[ ! "$public_key" =~ ^RW[A-Za-z0-9+/]{54}$ ]]; then
+            echo "release-signing.pub does not contain a valid release public key."
+            exit 1
+          fi
+
   build-linux:
     name: Build Linux Binary
     needs: [version-check]
@@ -102,6 +111,9 @@ jobs:
     needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Download Linux Artifact
         uses: actions/download-artifact@v4
         with:
@@ -120,14 +132,77 @@ jobs:
           name: windows-artifact
           path: .
 
+      - name: Install release signing tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y minisign
+
+      - name: Sign release binaries
+        shell: bash
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          key_file="$RUNNER_TEMP/release-signing.key"
+          public_key_file="$RUNNER_TEMP/release-signing.pub"
+          trap 'rm -f "$key_file" "$public_key_file"' EXIT
+          printf '%s' "$RELEASE_SIGNING_KEY" > "$key_file"
+          chmod 600 "$key_file"
+
+          minisign -R -s "$key_file" -p "$public_key_file"
+          derived_public_key="$(tail -n 1 "$public_key_file")"
+          committed_public_key="$(tail -n 1 release-signing.pub)"
+          if [[ "$derived_public_key" != "$committed_public_key" ]]; then
+            echo "RELEASE_SIGNING_KEY does not match release-signing.pub."
+            exit 1
+          fi
+
+          for binary in \
+            dmnd-client-linux \
+            dmnd-client-macos \
+            dmnd-client-windows.exe
+          do
+            minisign -S -W \
+              -s "$key_file" \
+              -m "$binary" \
+              -x "$binary.minisig" \
+              -t "dmnd-client ${GITHUB_REF_NAME#v} $binary"
+          done
+
+      - name: Verify release signatures
+        shell: bash
+        run: |
+          for binary in \
+            dmnd-client-linux \
+            dmnd-client-macos \
+            dmnd-client-windows.exe
+          do
+            minisign -V \
+              -p release-signing.pub \
+              -m "$binary" \
+              -x "$binary.minisig"
+          done
+
+      - name: Generate SHA-256 checksums
+        run: |
+          sha256sum \
+            dmnd-client-linux \
+            dmnd-client-macos \
+            dmnd-client-windows.exe \
+            > sha256-checksums.txt
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref_name }}
           files: |
             dmnd-client-linux
+            dmnd-client-linux.minisig
             dmnd-client-macos
+            dmnd-client-macos.minisig
             dmnd-client-windows.exe
+            dmnd-client-windows.exe.minisig
+            sha256-checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

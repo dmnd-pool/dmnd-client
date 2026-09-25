@@ -39,6 +39,7 @@ toml ={ version = "0.8.22" }
 self_update = {version = "0.42.0", features = ["archive-tar"]}
 reqwest ={ version = "0.12.20"}
 tracing-appender = "0.2.4"
+minisign-verify = "0.2.5"
 
 #roles_logic_sv2 = "1.2.1"
 #sv1_api = "1.0.1"

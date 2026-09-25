@@ -1130,6 +1130,7 @@ dependencies = [
  "key-utils",
  "lazy_static",
  "mime_guess",
+ "minisign-verify",
  "nohash-hasher",
  "noise_sv2 1.2.1",
  "pid",
@@ -2235,6 +2236,12 @@ dependencies = [
  "bitcoin",
  "hex-conservative 1.0.1",
 ]
+
+[[package]]
+name = "minisign-verify"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22f9645cb765ea72b8111f36c522475d2daa0d22c957a9826437e97534bc4e9e"
 
 [[package]]
 name = "miniz_oxide"
