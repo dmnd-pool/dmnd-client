@@ -215,6 +215,15 @@ impl Bridge {
         Ok(abortable)
     }
 
+    fn is_fatal_bridge_error(e: &Error) -> bool {
+        matches!(
+            e,
+            Error::AsyncChannelError
+                | Error::UpstreamSubmitChannelClosed
+                | Error::BridgeMutexPoisoned
+        )
+    }
+
     /// Receives a `DownstreamMessages` message from the `Downstream`, handles based on the
     /// variant received.
     fn handle_downstream_messages(
@@ -235,18 +244,19 @@ impl Bridge {
                 match msg {
                     DownstreamMessages::SubmitShares(share) => {
                         if let Err(e) = Self::handle_submit_shares(self_.clone(), share).await {
-                            error!("Failed to handle SubmitShareWithChannelId: {e}");
-                            ProxyState::update_translator_state(TranslatorState::Down);
-                            break;
+                            if Self::is_fatal_bridge_error(&e) {
+                                error!("Fatal bridge error handling SubmitShareWithChannelId: {e}");
+                                ProxyState::update_translator_state(TranslatorState::Down);
+                                break;
+                            }
+                            warn!("Recoverable error handling SubmitShareWithChannelId: {e}");
                         }
                     }
                     DownstreamMessages::SetDownstreamTarget(new_target) => {
                         if let Err(e) =
                             Self::handle_update_downstream_target(self_.clone(), new_target)
                         {
-                            error!("Failed to handle SetDownstreamTarget: {e}");
-                            ProxyState::update_translator_state(TranslatorState::Down);
-                            break;
+                            warn!("Failed to handle SetDownstreamTarget (continuing): {e}");
                         };
                     }
                 };
@@ -334,7 +344,7 @@ impl Bridge {
                         result_tx,
                         Err(crate::monitor::shares::RejectionReason::JobIdNotFound),
                     );
-                    return Err(Error::RolesSv2Logic(roles_logic_sv2::Error::NoValidJob));
+                    return Ok(());
                 }
                 warn!(
                     "Failed to translate SV1 mining.submit message to SV2 SubmitSharesExtended message, attempt {}",
@@ -358,11 +368,12 @@ impl Bridge {
                 return Ok(());
             }
             Err(e) => {
+                warn!("Share translation failed with {e}");
                 Self::resolve_submit(
                     result_tx,
                     Err(crate::monitor::shares::RejectionReason::UpstreamRejected),
                 );
-                return Err(Error::RolesSv2Logic(e));
+                return Ok(());
             }
         };
 
@@ -435,7 +446,7 @@ impl Bridge {
                         e.0.result_tx,
                         Err(crate::monitor::shares::RejectionReason::UpstreamRejected),
                     );
-                    return Err(Error::AsyncChannelError);
+                    return Err(Error::UpstreamSubmitChannelClosed);
                 }
                 Ok(())
             }
@@ -454,11 +465,12 @@ impl Bridge {
             // Proxy do not have JD capabilities
             Ok(OnNewShare::ShareMeetBitcoinTarget(..)) => unreachable!(),
             Err(e) => {
+                warn!("Share rejected by channel factory: {e}");
                 Self::resolve_submit(
                     result_tx,
                     Err(crate::monitor::shares::RejectionReason::UpstreamRejected),
                 );
-                Err(Error::RolesSv2Logic(e))
+                Ok(())
             }
         }
     }
@@ -1120,5 +1132,150 @@ mod test {
             found_local_only_share,
             "expected at least one share to stay local; downstream={downstream_hits}, upstream={upstream_hits}, bitcoin={bitcoin_hits}, errors={errors}"
         );
+    }
+
+    fn bridge_submit_share_message(
+        channel_id: u32,
+        extranonce: Vec<u8>,
+        extranonce2_len: usize,
+        job_id: u32,
+        nonce: u32,
+    ) -> SubmitShareWithChannelId {
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        SubmitShareWithChannelId {
+            channel_id,
+            share: test_utils::create_sv1_submit_with_fields(job_id, extranonce2_len, TEST_NTIME, nonce),
+            extranonce,
+            extranonce2_len,
+            version_rolling_mask: None,
+            result_tx,
+        }
+    }
+
+    #[tokio::test]
+    async fn fatal_upstream_submit_channel_closes_bridge_downstream_handler() {
+        let extranonces = ExtendedExtranonce::new(0..6, 6..8, 8..16);
+        let upstream_target = [255_u8; 32];
+        let (tx_sv2_submit_shares_ext, rx_sv2_submit_shares_ext) = mpsc::channel(1);
+        drop(rx_sv2_submit_shares_ext);
+
+        let (tx_sv1_notify, _rx_sv1_notify) = broadcast::channel(1);
+        let bridge = Bridge::new(
+            tx_sv2_submit_shares_ext,
+            tx_sv1_notify,
+            extranonces,
+            Arc::new(Mutex::new(upstream_target.to_vec())),
+            1,
+        )
+        .unwrap();
+
+        let (channel_id, extranonce2_len, extranonce) = bridge
+            .safe_lock(|bridge| {
+                seed_bridge_job(bridge);
+                let opened = bridge.on_new_sv1_connection(1_000_000_000_000.0).unwrap();
+                (
+                    opened.channel_id,
+                    opened.extranonce2_len as usize,
+                    opened.extranonce,
+                )
+            })
+            .unwrap();
+
+        let upstream_nonce = bridge
+            .safe_lock(|bridge| {
+                (0..4_096).find(|nonce| {
+                    matches!(
+                        classify_submit(bridge, channel_id, extranonce2_len, *nonce),
+                        OnNewShare::SendSubmitShareUpstream(_)
+                    )
+                })
+            })
+            .unwrap()
+            .expect("expected a share that meets upstream target");
+
+        let (tx_down, rx_down) = mpsc::channel::<DownstreamMessages>(4);
+        let handler = Bridge::handle_downstream_messages(bridge, rx_down);
+
+        let share = bridge_submit_share_message(
+            channel_id,
+            extranonce,
+            extranonce2_len,
+            TEST_JOB_ID,
+            upstream_nonce,
+        );
+
+        tx_down
+            .send(DownstreamMessages::SubmitShares(share))
+            .await
+            .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), handler)
+            .await
+            .expect("bridge downstream handler should exit after fatal upstream channel error")
+            .expect("bridge downstream handler join error");
+
+        assert!(
+            tx_down
+                .send(DownstreamMessages::SetDownstreamTarget(SetDownstreamTarget {
+                    channel_id,
+                    new_target: [255; 32].into(),
+                }))
+                .await
+                .is_err(),
+            "bridge downstream channel should be closed after fatal handler exit"
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_survives_repeated_invalid_job_submits() {
+        let extranonces = ExtendedExtranonce::new(0..6, 6..8, 8..16);
+        let bridge = test_utils::create_bridge(extranonces).unwrap();
+        let channel_id = bridge
+            .safe_lock(|bridge| {
+                seed_bridge_job(bridge);
+                bridge.on_new_sv1_connection(1_000_000_000_000.0).unwrap().channel_id
+            })
+            .unwrap();
+
+        let (tx_down, rx_down) = mpsc::channel::<DownstreamMessages>(32);
+        let handler = Bridge::handle_downstream_messages(bridge, rx_down);
+
+        for nonce in 0..12 {
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            tx_down
+                .send(DownstreamMessages::SubmitShares(SubmitShareWithChannelId {
+                    channel_id,
+                    share: test_utils::create_sv1_submit_with_fields(9_999, 8, TEST_NTIME, nonce),
+                    extranonce: vec![0; 6],
+                    extranonce2_len: 8,
+                    version_rolling_mask: None,
+                    result_tx,
+                }))
+                .await
+                .unwrap();
+            assert!(matches!(
+                result_rx.await,
+                Ok(Err(crate::monitor::shares::RejectionReason::JobIdNotFound))
+            ));
+        }
+
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tx_down
+            .send(DownstreamMessages::SubmitShares(SubmitShareWithChannelId {
+                channel_id,
+                share: test_utils::create_sv1_submit_with_fields(9_998, 8, TEST_NTIME, 42),
+                extranonce: vec![0; 6],
+                extranonce2_len: 8,
+                version_rolling_mask: None,
+                result_tx,
+            }))
+            .await
+            .unwrap();
+        assert!(matches!(
+            result_rx.await,
+            Ok(Err(crate::monitor::shares::RejectionReason::JobIdNotFound))
+        ));
+
+        handler.abort();
     }
 }

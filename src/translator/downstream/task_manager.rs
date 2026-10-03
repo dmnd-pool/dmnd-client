@@ -95,12 +95,14 @@ impl TaskManager {
         self_: Arc<Mutex<Self>>,
         abortable: AbortOnDrop,
         connection_id: u32,
-    ) -> Result<(), ()> {
-        let send_task = self_.safe_lock(|s| s.send_task.clone()).unwrap();
+    ) -> Result<(), crate::translator::error::Error<'static>> {
+        let send_task = self_
+            .safe_lock(|s| s.send_task.clone())
+            .map_err(|_| crate::translator::error::Error::TranslatorTaskManagerMutexPoisoned)?;
         send_task
             .send((Some(connection_id), Task::ReceiveDownstream(abortable)))
             .await
-            .map_err(|_| ())
+            .map_err(|_| crate::translator::error::Error::TranslatorTaskManagerChannelClosed)
     }
     pub async fn add_bootstrap(
         self_: Arc<Mutex<Self>>,

@@ -28,6 +28,12 @@ pub enum Error<'a> {
     ImpossibleToOpenChannnel,
     #[allow(clippy::enum_variant_names)]
     AsyncChannelError,
+    /// The translator bridge downstream message channel (`tx_sv1_bridge`) is closed.
+    BridgeChannelClosed,
+    /// The upstream submit-share channel (`tx_sv2_submit_shares_ext`) is closed.
+    UpstreamSubmitChannelClosed,
+    /// The downstream TaskManager registration channel is closed.
+    TranslatorTaskManagerChannelClosed,
 }
 
 impl From<Infallible> for Error<'_> {
@@ -46,7 +52,14 @@ impl fmt::Display for Error<'_> {
             Error::TargetError(e) => write!(f, "TargetError {e}"),
             Error::Infallible(e) => write!(f, "Infallible {e}"),
             Error::ImpossibleToOpenChannnel => write!(f, "ImpossibleToOpenChannnel"),
-            Error::AsyncChannelError => write!(f, "AsyncChannelError"),
+            Error::AsyncChannelError => write!(f, "async channel closed"),
+            Error::BridgeChannelClosed => write!(f, "bridge channel closed (tx_sv1_bridge)"),
+            Error::UpstreamSubmitChannelClosed => {
+                write!(f, "upstream submit channel closed (tx_sv2_submit_shares_ext)")
+            }
+            Error::TranslatorTaskManagerChannelClosed => {
+                write!(f, "downstream task manager channel closed")
+            }
             Error::TranslatorUpstreamMutexPoisoned => write!(f, "TranslatorUpstreamMutexPoisoned"),
             Error::TranslatorDiffConfigMutexPoisoned => {
                 write!(f, "TranslatorDiffConfigMutexPoisoned")
