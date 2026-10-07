@@ -38,11 +38,10 @@ pub type SubmitShareResultSender = oneshot::Sender<SubmitShareResult>;
 pub struct SubmitShareWithChannelId {
     pub channel_id: u32,
     pub share: Submit<'static>,
-    // TODO why we need allow dead code here???
     #[allow(dead_code)]
-    extranonce: Vec<u8>,
+    pub(crate) extranonce: Vec<u8>,
     #[allow(dead_code)]
-    extranonce2_len: usize,
+    pub(crate) extranonce2_len: usize,
     pub version_rolling_mask: Option<HexU32Be>,
     pub result_tx: SubmitShareResultSender,
 }
