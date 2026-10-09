@@ -14,6 +14,8 @@ use demand_share_accounting_ext::{parser::ShareAccountingMessages, ShareOk};
 use jd::TokenRegistry;
 use jobs::{JobEngine, JobKey};
 use mining::{ChannelState, MiningSession};
+#[cfg(not(legacy_sv2_transport))]
+use roles_logic_sv2::binary_sv2;
 use roles_logic_sv2::{
     common_messages_sv2::{Protocol, SetupConnectionError, SetupConnectionSuccess},
     job_declaration_sv2::{

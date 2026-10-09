@@ -18,6 +18,7 @@ the other test and check requirements in this file.
 - Do not inspect related test binaries, saved output, or copies in Git history or remote repositories.
 - Exclude protected files from searches, diffs, reviews, and checks. Scope commands to permitted files.
 - These restrictions also apply to tools and delegated agents.
+- Do not change `build.rs`; it selects the protected test transport API.
 - Access requires an explicit user instruction. A general request to review or fix code does not authorize access.
 
 ## Commit message rules

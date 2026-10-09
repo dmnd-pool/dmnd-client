@@ -1,18 +1,26 @@
 use crate::support::{error, TestResult};
+#[cfg(legacy_sv2_transport)]
 use codec_sv2::{
     HandshakeRole, NoiseEncoder, StandardEitherFrame, StandardNoiseDecoder, StandardSv2Frame, State,
 };
 use demand_share_accounting_ext::parser::PoolExtMessages;
+#[cfg(not(legacy_sv2_transport))]
+use demand_sv2_connection::{
+    noise_connection_tokio::Connection, HandshakeRole, Initiator, Responder, StandardEitherFrame,
+    StandardSv2Frame,
+};
 use key_utils::{Secp256k1PublicKey, Secp256k1SecretKey};
+#[cfg(legacy_sv2_transport)]
 use noise_sv2::{Initiator, Responder};
 use serde::Serialize;
+#[cfg(legacy_sv2_transport)]
 use std::sync::Arc;
+#[cfg(legacy_sv2_transport)]
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-    sync::{mpsc, Mutex},
-    task::AbortHandle,
+    sync::Mutex,
 };
+use tokio::{net::TcpStream, sync::mpsc, task::AbortHandle};
 
 pub const AUTH_PUBLIC: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
 // Published test authority from the locked stratum pool config examples.
@@ -68,6 +76,7 @@ impl PeerConnection {
         Self::open(stream, HandshakeRole::Initiator(initiator)).await
     }
 
+    #[cfg(legacy_sv2_transport)]
     async fn open(stream: TcpStream, role: HandshakeRole) -> TestResult<Self> {
         let stream = stream.into_std()?;
         let socket = SocketGuard(stream.try_clone()?);
@@ -159,6 +168,22 @@ impl PeerConnection {
         })
     }
 
+    #[cfg(not(legacy_sv2_transport))]
+    async fn open(stream: TcpStream, role: HandshakeRole) -> TestResult<Self> {
+        let stream = stream.into_std()?;
+        let socket = SocketGuard(stream.try_clone()?);
+        let stream = TcpStream::from_std(stream)?;
+        let (receiver, sender, read, write) = Connection::new::<Message>(stream, role)
+            .await
+            .map_err(|e| error(format!("SV2 connection: {e:?}")))?;
+        Ok(Self {
+            receiver,
+            sender,
+            tasks: vec![read, write],
+            _socket: socket,
+        })
+    }
+
     pub async fn recv(&mut self) -> TestResult<Option<Message>> {
         let Some(frame) = self.receiver.recv().await else {
             return Ok(None);
@@ -195,6 +220,7 @@ impl PeerConnection {
     }
 }
 
+#[cfg(legacy_sv2_transport)]
 async fn read_handshake<const N: usize>(stream: &mut TcpStream) -> TestResult<[u8; N]> {
     let mut message = [0; N];
     stream.read_exact(&mut message).await?;

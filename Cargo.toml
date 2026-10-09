@@ -85,6 +85,9 @@ tempfile = "3.26.0"
 integration_tests_sv2 = { git = "https://github.com/stratum-mining/sv2-apps.git", branch = "main" }
 stratum-apps = { git = "https://github.com/stratum-mining/sv2-apps.git", branch = "main" }
 
+[build-dependencies]
+toml = "0.8.22"
+
 [profile.release]
 strip = true
 lto = true

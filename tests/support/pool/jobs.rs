@@ -1,5 +1,7 @@
 use super::{control::ChannelKey, transport::PeerId};
 use crate::support::{error, TestResult};
+#[cfg(not(legacy_sv2_transport))]
+use roles_logic_sv2::binary_sv2;
 use roles_logic_sv2::{
     channel_logic::channel_factory::{ExtendedChannelKind, PoolChannelFactory},
     job_creator::JobsCreators,

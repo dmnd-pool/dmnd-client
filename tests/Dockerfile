@@ -5,12 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-COPY src ./src
-COPY frontend ./frontend
-COPY tests/*.rs ./tests/
-COPY tests/support ./tests/support
-COPY release-signing.pub ./
+COPY . .
 
 ENV CARGO_PROFILE_DEV_DEBUG=0
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
