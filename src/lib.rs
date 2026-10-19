@@ -74,6 +74,8 @@ pub(crate) struct DownstreamConnection {
 pub(crate) type DownstreamHandoffSender = tokio::sync::mpsc::Sender<DownstreamConnection>;
 
 lazy_static! {
+    static ref USER_IDENTIFIER: binary_sv2::Str0255<'static> =
+        shared::user_identity::new_user_identity();
     static ref TP_ADDRESS: roles_logic_sv2::utils::Mutex<Option<String>> =
         roles_logic_sv2::utils::Mutex::new(Configuration::tp_address());
     static ref ACTIVE_POOL_ADDRESS: roles_logic_sv2::utils::Mutex<Option<SocketAddr>> =
@@ -107,6 +109,7 @@ fn supports_transaction_prioritization(environment: &str) -> bool {
 }
 
 pub async fn start(config: Configuration) {
+    lazy_static::initialize(&USER_IDENTIFIER);
     Configuration::init(config);
     start_internal().await;
 }

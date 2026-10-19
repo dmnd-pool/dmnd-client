@@ -183,10 +183,9 @@ impl Upstream {
                     .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)
             })
             .map_err(|_e| Error::TranslatorUpstreamMutexPoisoned)??;
-        let user_identity = "ABC".to_string().try_into().expect("Internal error: this operation can not fail because the string ABC can always be converted into Inner");
         let open_channel = Mining::OpenExtendedMiningChannel(OpenExtendedMiningChannel {
             request_id: 0, // TODO
-            user_identity, // TODO
+            user_identity: crate::USER_IDENTIFIER.clone(),
             nominal_hash_rate,
             max_target: u256_max(),
             min_extranonce_size: crate::MIN_EXTRANONCE2_SIZE,
@@ -1013,6 +1012,25 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn open_channel_reuses_process_user_identifier() {
+        let upstream = test_upstream().await;
+        let (sender, mut receiver) = mpsc::channel(1);
+        upstream.safe_lock(|state| state.sender = sender).unwrap();
+        let expected = crate::USER_IDENTIFIER.to_vec();
+        assert!(expected.starts_with(b"ABC"));
+        assert_eq!(expected.len(), 35);
+        assert!(expected[3..].iter().all(u8::is_ascii_hexdigit));
+
+        for _ in 0..2 {
+            Upstream::connect(upstream.clone()).await.unwrap();
+            let Some(Mining::OpenExtendedMiningChannel(request)) = receiver.recv().await else {
+                panic!("expected a mining channel request");
+            };
+            assert_eq!(request.user_identity.to_vec(), expected);
+        }
     }
 
     #[tokio::test]
