@@ -167,18 +167,38 @@ pub enum EncodableField<'a> {
 impl<'a> EncodableField<'a> {
     #[inline]
     fn encode_owned(mut self, dst: &mut [u8]) -> Result<usize, Error> {
-        match &mut self {
-            Self::Primitive(primitive) => primitive.encode(dst),
-            Self::Struct(fields) => {
-                let fields = core::mem::take(fields);
-                let mut written = 0;
-                for field in fields {
-                    written += match &field {
-                        Self::Primitive(primitive) => primitive.encode(&mut dst[written..]),
-                        Self::Struct(_) => field.encode(dst, written),
-                    }?;
-                }
-                Ok(written)
+        let mut current = match &mut self {
+            Self::Primitive(primitive) => return primitive.encode(dst),
+            Self::Struct(fields) => core::mem::take(fields).into_iter(),
+        };
+        // The root now contains only an empty Vec. Its drop has no work to do.
+        core::mem::forget(self);
+        let mut stack = Vec::new();
+        let mut written = 0;
+        loop {
+            // Borrow before advancing, so encoding does not move each primitive enum.
+            // Keep one parent stack for all nested fields.
+            if let Some(Self::Primitive(primitive)) = current.as_slice().first() {
+                written += primitive.encode(&mut dst[written..])?;
+                drop(current.next());
+                continue;
+            }
+            match current.next() {
+                Some(mut field) => match &mut field {
+                    Self::Primitive(primitive) => {
+                        written += primitive.encode(&mut dst[written..])?;
+                    }
+                    Self::Struct(fields) => {
+                        let next = core::mem::take(fields).into_iter();
+                        stack.push(core::mem::replace(&mut current, next));
+                        // Its children moved to current, so this empty Vec owns no allocation.
+                        core::mem::forget(field);
+                    }
+                },
+                None => match stack.pop() {
+                    Some(next) => current = next,
+                    None => return Ok(written),
+                },
             }
         }
     }
@@ -252,6 +272,7 @@ impl GetSize for EncodableField<'_> {
 /// to go out of scope before the data it borrows from, so a field cannot be declared before the
 /// buffer it points into.
 impl Drop for EncodableField<'_> {
+    #[inline]
     fn drop(&mut self) {
         if let Self::Struct(ps) = self {
             let mut pending = core::mem::take(ps);
