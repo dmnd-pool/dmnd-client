@@ -8,20 +8,9 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/demand-open-source/demand-share-accounting-ext"
 
 [dependencies]
-serde = { version = "1.0.89", default-features = false, optional= true }
-#binary_sv2 = "1.1.0"
-#roles_logic_sv2 = "1.2.1"
-#const_sv2 = "2.0.0"
-#framing_sv2 = "^2.0.0"
-
-roles_logic_sv2 = { git = "https://github.com/demand-open-source/stratum",subdirectory = "protocols/v2/roles-logic-sv2" }
-binary_sv2 = { git = "https://github.com/demand-open-source/stratum",subdirectory = "protocols/v2/binary_sv2" }
-framing_sv2 = { git = "https://github.com/demand-open-source/stratum",subdirectory = "protocols/v2/framing_sv2" }
-
-#binary_sv2 = { path = "../stratum/protocols/v2/binary-sv2"}
-#roles_logic_sv2 = { path = "/home/user/src/stratum/protocols/v2/roles-logic-sv2"}
-#const_sv2 = { path = "/home/user/src/stratum/protocols/v2/const-sv2"}
-#framing_sv2 = { path = "/home/user/src/stratum/protocols/v2/framing-sv2"}
+roles_logic_sv2 = { git = "https://github.com/dmnd-pool/roles-logic", rev = "95839819d259fedf80d69cbfba5eab4f7857c206" }
+binary_sv2 = "=7.0.0"
+demand-sv2-connection = { path = "../demand-sv2-connection" }
 
 [features]
 no_std = []

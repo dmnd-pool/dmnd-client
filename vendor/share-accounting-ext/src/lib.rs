@@ -6,6 +6,8 @@ extern crate alloc;
 mod activate_ext;
 mod r#const;
 mod data_types;
+mod sequence;
+pub use sequence::SequenceOwned;
 mod error_message;
 mod get_shares;
 mod get_window;

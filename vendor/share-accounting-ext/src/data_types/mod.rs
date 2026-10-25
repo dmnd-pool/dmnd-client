@@ -1,21 +1,12 @@
-use alloc::vec::Vec;
-#[cfg(not(feature = "with_serde"))]
-use binary_sv2::binary_codec_sv2;
-#[cfg(feature = "with_serde")]
-use binary_sv2::GetSize;
 use binary_sv2::{Deserialize, Serialize};
-#[cfg(not(feature = "with_serde"))]
-use core::convert::TryInto;
 mod phash;
 mod share;
 mod slice;
-
 pub use phash::PHash;
 pub use share::Share;
 pub use slice::Slice;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[already_sized]
 #[repr(C)]
 pub struct Hash256 {
     first: u64,
@@ -47,12 +38,5 @@ impl From<Hash256> for [u8; 32] {
             third[0], third[1], third[2], third[3], third[4], third[5], third[6], third[7],
             forth[0], forth[1], forth[2], forth[3], forth[4], forth[5], forth[6], forth[7],
         ]
-    }
-}
-
-#[cfg(feature = "with_serde")]
-impl GetSize for Hash256 {
-    fn get_size(&self) -> usize {
-        32
     }
 }
