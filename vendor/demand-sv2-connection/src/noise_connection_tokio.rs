@@ -45,7 +45,7 @@ impl Connection {
             let _closed = reader_closed;
             tokio::select! {
                 biased;
-                _ = reader_stop.changed() => {},
+                _ = wait_for_close(&mut reader_stop) => {},
                 _ = receiver_closed.closed() => {},
                 result = receive(reader, incoming, decrypt) => {
                     if let Err(error) = result {
@@ -61,7 +61,7 @@ impl Connection {
             let _closed = writer_closed;
             tokio::select! {
                 biased;
-                _ = writer_stop.changed() => {},
+                _ = wait_for_close(&mut writer_stop) => {},
                 result = send(writer, outgoing, encrypt) => {
                     if let Err(error) = result {
                         debug!(?error, "SV2 send stopped");
@@ -77,6 +77,10 @@ impl Connection {
             send_task.abort_handle(),
         ))
     }
+}
+
+async fn wait_for_close(receiver: &mut watch::Receiver<bool>) {
+    let _ = receiver.wait_for(|closed| *closed).await;
 }
 
 struct CloseSignal(watch::Sender<bool>);
@@ -445,5 +449,40 @@ mod tests {
         client_write.abort();
         server_read.abort();
         server_write.abort();
+    }
+
+    #[tokio::test]
+    async fn close_signal_stops_a_late_subscriber() {
+        let (closed, _) = watch::channel(false);
+        drop(CloseSignal(closed.clone()));
+        let mut receiver = closed.subscribe();
+        tokio::time::timeout(Duration::from_millis(100), wait_for_close(&mut receiver))
+            .await
+            .expect("a completed close must not wait for another signal");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn early_peer_close_releases_a_retained_sender() {
+        for _ in 0..16 {
+            let (client, mut server) = sockets().await;
+            let (initiator, responder) = roles();
+            let peer = tokio::spawn(async move {
+                handshake(&mut server, responder).await.unwrap();
+            });
+            let (mut incoming, outgoing, reader, writer) =
+                Connection::new::<Message>(client, initiator).await.unwrap();
+            peer.await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), incoming.recv())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            tokio::time::timeout(Duration::from_secs(1), outgoing.closed())
+                .await
+                .unwrap();
+            reader.abort();
+            writer.abort();
+        }
     }
 }
