@@ -38,12 +38,15 @@ impl Connection {
         let (sender, outgoing) = channel(10);
         let (closed, _) = watch::channel(false);
 
+        let receiver_closed = incoming.clone();
         let reader_closed = CloseSignal(closed.clone());
         let mut reader_stop = closed.subscribe();
         let recv_task = task::spawn(async move {
             let _closed = reader_closed;
             tokio::select! {
+                biased;
                 _ = reader_stop.changed() => {},
+                _ = receiver_closed.closed() => {},
                 result = receive(reader, incoming, decrypt) => {
                     if let Err(error) = result {
                         debug!(?error, "SV2 receive stopped");
@@ -57,6 +60,7 @@ impl Connection {
         let send_task = task::spawn(async move {
             let _closed = writer_closed;
             tokio::select! {
+                biased;
                 _ = writer_stop.changed() => {},
                 result = send(writer, outgoing, encrypt) => {
                     if let Err(error) = result {
@@ -111,10 +115,7 @@ async fn receive<Message: Serialize + GetSize + Send + 'static>(
     let mut decoder = owner.lock().await;
     loop {
         if decoder.writable_len() != 0 {
-            tokio::select! {
-                _ = incoming.closed() => return Ok(()),
-                result = reader.read_exact(decoder.writable()) => { result?; }
-            }
+            reader.read_exact(decoder.writable()).await?;
         }
         match decoder.next_transport_frame(state)? {
             Decrypted::Frame(frame, next) => {
