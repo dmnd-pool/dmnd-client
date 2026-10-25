@@ -1,0 +1,29 @@
+[package]
+name = "demand-sv2-connection"
+version = "0.0.8"
+authors = ["fi3 <email@email.org>"]
+edition = "2021"
+description = "Networking utils for SV2 roles"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/stratum-mining/stratum"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = { version = "0.1" }
+futures = "0.3.28"
+#binary_sv2 = { version = "1.2.0"}
+#codec_sv2 = { version = "1.2.1", features=["noise_sv2""] }
+#const_sv2 = {version = "2.0.0"}
+
+#binary_sv2 = { path = "../stratum/protocols/v2/binary-sv2"}
+#codec_sv2 = { path = "../stratum/protocols/v2/codec-sv2", features = ["noise_sv2"]}
+#const_sv2 = { path = "../stratum/protocols/v2/const-sv2"}
+
+binary_sv2 = { git = "https://github.com/demand-open-source/stratum",subdirectory = "protocols/v2/binary_sv2" }
+const_sv2 = { git = "https://github.com/demand-open-source/stratum",subdirectory = "protocols/v2/const_sv2" }
+codec_sv2 = { git = "https://github.com/demand-open-source/stratum",subdirectory = "protocols/v2/codec_sv2",features = ["noise_sv2"] }
+
+
+
+#[features]
+#with_serde = ["binary_sv2/with_serde", "codec_sv2/with_serde"]
