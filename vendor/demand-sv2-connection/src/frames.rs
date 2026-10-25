@@ -105,6 +105,15 @@ pub enum StandardEitherFrame<T> {
     HandShake(HandshakeMessage),
 }
 
+impl<T: Serialize + GetSize> StandardEitherFrame<T> {
+    pub fn encoded_length(&self) -> usize {
+        match self {
+            Self::Sv2(frame) => frame.encoded_length(),
+            Self::HandShake(message) => message.payload().len(),
+        }
+    }
+}
+
 impl<T> From<StandardSv2Frame<T>> for StandardEitherFrame<T> {
     fn from(frame: StandardSv2Frame<T>) -> Self {
         Self::Sv2(frame)
@@ -221,6 +230,13 @@ mod tests {
             }
         });
         assert_eq!(allocations, 0);
+        let either: StandardEitherFrame<_> = frame.into();
+        assert_eq!(
+            crate::test_support::allocations(|| {
+                assert_eq!(std::hint::black_box(&either).encoded_length(), 30);
+            }),
+            0
+        );
     }
 
     #[test]
