@@ -1,227 +1,149 @@
-use crate::Error;
-use binary_sv2::{Deserialize, Serialize};
-use futures::lock::Mutex;
+use crate::{Error, HandshakeRole, Initiator, Responder, StandardEitherFrame, StandardSv2Frame};
+use binary_sv2::{GetSize, Serialize};
+use codec_sv2::{
+    Decrypted, Handshake, NoiseDecoder, NoiseEncoder, Transport, TransportDecryptState,
+};
 use std::{sync::Arc, time::Duration};
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{tcp::OwnedReadHalf, tcp::OwnedWriteHalf, TcpListener, TcpStream},
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        watch, Mutex,
+    },
     task::{self, AbortHandle},
 };
-
-use binary_sv2::GetSize;
-use codec_sv2::{HandshakeRole, Initiator, Responder, StandardEitherFrame, StandardNoiseDecoder};
-
 use tracing::{debug, error};
 
 #[derive(Debug)]
-pub struct Connection {
-    pub state: codec_sv2::State,
-}
+pub struct Connection;
 
-impl crate::SetState for Connection {
-    async fn set_state(self_: Arc<Mutex<Self>>, state: codec_sv2::State) {
-        loop {
-            if crate::HANDSHAKE_READY.load(std::sync::atomic::Ordering::SeqCst) {
-                if let Some(mut connection) = self_.try_lock() {
-                    connection.state = state;
-                    crate::TRANSPORT_READY.store(true, std::sync::atomic::Ordering::Relaxed);
-                    break;
-                };
-            }
-            task::yield_now().await;
-        }
-    }
-}
+type Channels<Message> = (
+    Receiver<StandardEitherFrame<Message>>,
+    Sender<StandardEitherFrame<Message>>,
+    AbortHandle,
+    AbortHandle,
+);
 
 impl Connection {
     #[allow(clippy::new_ret_no_self)]
-    pub async fn new<'a, Message: Serialize + Deserialize<'a> + GetSize + Send + 'static>(
-        stream: TcpStream,
+    pub async fn new<Message: Serialize + GetSize + Send + 'static>(
+        mut stream: TcpStream,
         role: HandshakeRole,
-    ) -> Result<
-        (
-            Receiver<StandardEitherFrame<Message>>,
-            Sender<StandardEitherFrame<Message>>,
-            AbortHandle,
-            AbortHandle,
-        ),
-        Error,
-    > {
-        let address = stream.peer_addr().map_err(|_| Error::SocketClosed)?;
+    ) -> Result<Channels<Message>, Error> {
+        let transport = handshake(&mut stream, role).await?;
+        let (encrypt, decrypt) = transport.split();
+        let (reader, writer) = stream.into_split();
+        let (incoming, receiver) = channel(10);
+        let (sender, outgoing) = channel(10);
+        let (closed, _) = watch::channel(false);
 
-        let (mut reader, mut writer) = stream.into_split();
-
-        let (sender_incoming, mut receiver_incoming): (
-            Sender<StandardEitherFrame<Message>>,
-            Receiver<StandardEitherFrame<Message>>,
-        ) = channel(10);
-        let (mut sender_outgoing, mut receiver_outgoing): (
-            Sender<StandardEitherFrame<Message>>,
-            Receiver<StandardEitherFrame<Message>>,
-        ) = channel(10);
-
-        let state = codec_sv2::State::not_initialized(&role);
-
-        let connection = Arc::new(Mutex::new(Self { state }));
-
-        let cloned1 = connection.clone();
-        let cloned2 = connection.clone();
-
-        // RECEIVE AND PARSE INCOMING MESSAGES FROM TCP STREAM
+        let reader_closed = CloseSignal(closed.clone());
+        let mut reader_stop = closed.subscribe();
         let recv_task = task::spawn(async move {
-            let mut decoder = StandardNoiseDecoder::<Message>::new();
-
-            loop {
-                let writable = decoder.writable();
-                match reader.read_exact(writable).await {
-                    Ok(_) => {
-                        let mut connection = cloned1.lock().await;
-                        let decoded = decoder.next_frame(&mut connection.state);
-                        drop(connection);
-
-                        match decoded {
-                            Ok(x) => {
-                                if sender_incoming.send(x).await.is_err() {
-                                    error!("Shutting down noise stream reader!");
-                                    task::yield_now().await;
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                if let codec_sv2::Error::MissingBytes(_) = e {
-                                } else {
-                                    error!("Shutting down noise stream reader! {:#?}", e);
-                                    task::yield_now().await;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            "Disconnected from client while reading : {} - {}",
-                            e, &address
-                        );
-                        task::yield_now().await;
-                        break;
+            let _closed = reader_closed;
+            tokio::select! {
+                _ = reader_stop.changed() => {},
+                result = receive(reader, incoming, decrypt) => {
+                    if let Err(error) = result {
+                        debug!(?error, "SV2 receive stopped");
                     }
                 }
-            }
-            drop(sender_incoming);
-            drop(cloned1);
-            drop(reader);
-            let mut times = 0;
-            while !decoder.droppable() {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                if times >= 60 {
-                    error!("Irrecoverable error impossible to free decoder");
-                    std::process::exit(1);
-                }
-                times += 1;
             }
         });
 
-        // ENCODE AND SEND INCOMING MESSAGES TO TCP STREAM
+        let writer_closed = CloseSignal(closed.clone());
+        let mut writer_stop = closed.subscribe();
         let send_task = task::spawn(async move {
-            let mut encoder = codec_sv2::NoiseEncoder::<Message>::new();
-
-            loop {
-                let received = receiver_outgoing.recv().await;
-
-                match received {
-                    Some(frame) => {
-                        let mut connection = cloned2.lock().await;
-                        match encoder.encode(frame, &mut connection.state) {
-                            Ok(b) => {
-                                drop(connection);
-
-                                let b = b.as_ref();
-
-                                match (writer).write_all(b).await {
-                                    Ok(_) => (),
-                                    Err(e) => {
-                                        let _ = writer.shutdown().await;
-                                        // Just fail and force to reinitialize everything
-                                        error!(
-                                        "Disconnecting from client due to error writing: {} - {}",
-                                        e, &address
-                                    );
-                                        task::yield_now().await;
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Disconnecting from client due to error encoding: {} - {}",
-                                    e, &address
-                                );
-                                drop(connection);
-                                task::yield_now().await;
-                                break;
-                            }
-                        };
+            let _closed = writer_closed;
+            tokio::select! {
+                _ = writer_stop.changed() => {},
+                result = send(writer, outgoing, encrypt) => {
+                    if let Err(error) = result {
+                        debug!(?error, "SV2 send stopped");
                     }
-                    None => {
-                        // Just fail and force to reinitialize everything
-                        let _ = writer.shutdown().await;
-                        error!(
-                            "Disconnecting from client due to error receiving from: {}",
-                            &address
-                        );
-                        task::yield_now().await;
-                        break;
-                    }
-                };
-                crate::HANDSHAKE_READY.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            receiver_outgoing.close();
-            drop(receiver_outgoing);
-            drop(cloned2);
-            drop(writer);
-            let mut times = 0;
-            while !encoder.droppable() {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                if times >= 10 {
-                    error!("Irrecoverable error impossible to free encoder");
-                    std::process::exit(1);
                 }
-                times += 1;
             }
         });
 
-        // DO THE NOISE HANDSHAKE
-        match role {
-            HandshakeRole::Initiator(_) => {
-                debug!("Initializing as downstream for - {}", &address);
-                crate::initialize_as_downstream(
-                    connection.clone(),
-                    role,
-                    &mut sender_outgoing,
-                    &mut receiver_incoming,
-                )
-                .await?
-            }
-            HandshakeRole::Responder(_) => {
-                debug!("Initializing as upstream for - {}", &address);
-                crate::initialize_as_upstream(
-                    connection.clone(),
-                    role,
-                    &mut sender_outgoing,
-                    &mut receiver_incoming,
-                )
-                .await?
-            }
-        };
-        debug!("Noise handshake complete - {}", &address);
         Ok((
-            receiver_incoming,
-            sender_outgoing,
+            receiver,
+            sender,
             recv_task.abort_handle(),
             send_task.abort_handle(),
         ))
     }
+}
+
+struct CloseSignal(watch::Sender<bool>);
+
+impl Drop for CloseSignal {
+    fn drop(&mut self) {
+        self.0.send_replace(true);
+    }
+}
+
+async fn handshake(stream: &mut TcpStream, role: HandshakeRole) -> Result<Transport, Error> {
+    match role {
+        HandshakeRole::Initiator(initiator) => {
+            let (message, state) = Handshake::initiator(initiator).step_0()?;
+            stream.write_all(message.payload()).await?;
+            let mut reply = [0; noise_sv2::INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE];
+            stream.read_exact(&mut reply).await?;
+            Ok(state.step_2(reply)?)
+        }
+        HandshakeRole::Responder(responder) => {
+            let mut request = [0; noise_sv2::ELLSWIFT_ENCODING_SIZE];
+            stream.read_exact(&mut request).await?;
+            let (message, transport) = Handshake::responder(responder).step_1(request)?;
+            stream.write_all(message.payload()).await?;
+            Ok(transport)
+        }
+    }
+}
+
+async fn receive<Message: Serialize + GetSize + Send + 'static>(
+    mut reader: OwnedReadHalf,
+    incoming: Sender<StandardEitherFrame<Message>>,
+    mut state: TransportDecryptState,
+) -> Result<(), Error> {
+    let owner = Arc::new(Mutex::new(NoiseDecoder::new()));
+    let mut decoder = owner.lock().await;
+    loop {
+        if decoder.writable_len() != 0 {
+            tokio::select! {
+                _ = incoming.closed() => return Ok(()),
+                result = reader.read_exact(decoder.writable()) => { result?; }
+            }
+        }
+        match decoder.next_transport_frame(state)? {
+            Decrypted::Frame(frame, next) => {
+                state = next;
+                incoming
+                    .send(StandardSv2Frame::received(frame, owner.clone()).into())
+                    .await?;
+            }
+            Decrypted::Incomplete(_, next) => state = next,
+        }
+    }
+}
+
+async fn send<Message: Serialize + GetSize + Send + 'static>(
+    mut writer: OwnedWriteHalf,
+    mut outgoing: Receiver<StandardEitherFrame<Message>>,
+    mut state: codec_sv2::TransportEncryptState,
+) -> Result<(), Error> {
+    let mut encoder = NoiseEncoder::new();
+    while let Some(frame) = outgoing.recv().await {
+        let frame = match frame {
+            StandardEitherFrame::Sv2(frame) => frame,
+            StandardEitherFrame::HandShake(_) => return Err(Error::HandshakeRemoteInvalidMessage),
+        };
+        let bytes = encoder.encode_transport(frame, &mut state)?;
+        writer.write_all(bytes.as_ref()).await?;
+    }
+    writer.shutdown().await?;
+    Ok(())
 }
 
 pub async fn listen(
@@ -231,17 +153,31 @@ pub async fn listen(
     cert_validity: Duration,
     sender: Sender<(TcpStream, HandshakeRole)>,
 ) {
-    let listner = TcpListener::bind(address).await.unwrap();
-    loop {
-        if let Ok((stream, _)) = listner.accept().await {
-            let responder = Responder::from_authority_kp(
-                &authority_public_key,
-                &authority_private_key,
-                cert_validity,
-            )
-            .unwrap();
-            let role = HandshakeRole::Responder(responder);
-            let _ = sender.send((stream, role)).await;
+    let listener = match TcpListener::bind(address).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            error!(%error, "Cannot bind SV2 listener");
+            return;
+        }
+    };
+    while let Ok((stream, _)) = listener.accept().await {
+        let responder = match Responder::from_authority_kp(
+            &authority_public_key,
+            &authority_private_key,
+            cert_validity,
+        ) {
+            Ok(responder) => responder,
+            Err(error) => {
+                error!(?error, "Cannot create SV2 responder");
+                return;
+            }
+        };
+        if sender
+            .send((stream, HandshakeRole::Responder(responder)))
+            .await
+            .is_err()
+        {
+            return;
         }
     }
 }
@@ -251,7 +187,262 @@ pub async fn connect(
     authority_public_key: [u8; 32],
 ) -> Result<(TcpStream, HandshakeRole), ()> {
     let stream = TcpStream::connect(address).await.map_err(|_| ())?;
-    let initiator = Initiator::from_raw_k(authority_public_key).unwrap();
-    let role = HandshakeRole::Initiator(initiator);
-    Ok((stream, role))
+    let initiator = Initiator::from_raw_k(authority_public_key).map_err(|_| ())?;
+    Ok((stream, HandshakeRole::Initiator(initiator)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use roles_logic_sv2::{
+        bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey},
+        mining_sv2::SubmitSharesStandardOwned,
+    };
+
+    type Message = SubmitSharesStandardOwned;
+
+    fn roles() -> (HandshakeRole, HandshakeRole) {
+        let secret = [7; 32];
+        let key = SecretKey::from_slice(&secret).unwrap();
+        let pair = Keypair::from_secret_key(&Secp256k1::new(), &key);
+        let public = XOnlyPublicKey::from_keypair(&pair).0.serialize();
+        (
+            HandshakeRole::Initiator(Initiator::from_raw_k(public).unwrap()),
+            HandshakeRole::Responder(
+                Responder::from_authority_kp(&public, &secret, Duration::from_secs(60)).unwrap(),
+            ),
+        )
+    }
+
+    async fn sockets() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (client, accepted) = tokio::join!(
+            TcpStream::connect(listener.local_addr().unwrap()),
+            listener.accept(),
+        );
+        (client.unwrap(), accepted.unwrap().0)
+    }
+
+    async fn pair() -> (Channels<Message>, Channels<Message>) {
+        let (client, server) = sockets().await;
+        let (initiator, responder) = roles();
+        let (client, server) = tokio::join!(
+            Connection::new(client, initiator),
+            Connection::new(server, responder),
+        );
+        (client.unwrap(), server.unwrap())
+    }
+
+    fn frame(sequence: u32) -> StandardSv2Frame<Message> {
+        StandardSv2Frame::from_message(
+            Message {
+                channel_id: 7,
+                sequence_number: sequence,
+                job_id: 9,
+                nonce: 11,
+                ntime: 13,
+                version: 15,
+            },
+            0x42,
+            0,
+            true,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_connections_keep_handshakes_independent() {
+        let mut tasks = tokio::task::JoinSet::new();
+        for sequence in 0..24 {
+            tasks.spawn(async move {
+                let (
+                    (mut client_rx, client_tx, client_read, client_write),
+                    (mut server_rx, server_tx, server_read, server_write),
+                ) = pair().await;
+                client_tx.send(frame(sequence).into()).await.unwrap();
+                let mut received: StandardSv2Frame<Message> =
+                    server_rx.recv().await.unwrap().try_into().unwrap();
+                assert_eq!(&received.payload()[4..8], sequence.to_le_bytes());
+                server_tx.send(received.into()).await.unwrap();
+                let mut received: StandardSv2Frame<Message> =
+                    client_rx.recv().await.unwrap().try_into().unwrap();
+                assert_eq!(&received.payload()[4..8], sequence.to_le_bytes());
+                drop(received);
+                client_read.abort();
+                client_write.abort();
+                server_read.abort();
+                server_write.abort();
+            });
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(result) = tasks.join_next().await {
+                result.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn received_frame_survives_connection_cancellation() {
+        let (
+            (mut client_rx, _client_tx, client_read, client_write),
+            (_server_rx, server_tx, server_read, server_write),
+        ) = pair().await;
+        server_tx.send(frame(17).into()).await.unwrap();
+        let mut received: StandardSv2Frame<Message> =
+            client_rx.recv().await.unwrap().try_into().unwrap();
+        client_read.abort();
+        client_write.abort();
+        tokio::task::yield_now().await;
+        assert_eq!(&received.payload()[4..8], 17_u32.to_le_bytes());
+        drop(received);
+        server_read.abort();
+        server_write.abort();
+    }
+
+    #[tokio::test]
+    async fn fragmented_and_consecutive_frames_are_complete() {
+        let (client, mut server) = sockets().await;
+        let (initiator, responder) = roles();
+        let (client, server_transport) = tokio::join!(
+            Connection::new::<Message>(client, initiator),
+            handshake(&mut server, responder),
+        );
+        let (mut incoming, _outgoing, reader, writer) = client.unwrap();
+        let (mut encrypt, _) = server_transport.unwrap().split();
+        let sending = tokio::spawn(async move {
+            let mut encoder = NoiseEncoder::new();
+            for sequence in 0..3 {
+                let frame = frame(sequence);
+                let bytes = encoder.encode_transport(frame, &mut encrypt).unwrap();
+                for piece in bytes.as_ref().chunks(3) {
+                    server.write_all(piece).await.unwrap();
+                }
+            }
+        });
+        for sequence in 0..3_u32 {
+            let received = tokio::time::timeout(Duration::from_secs(3), incoming.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut received: StandardSv2Frame<Message> = received.try_into().unwrap();
+            assert_eq!(&received.payload()[4..8], sequence.to_le_bytes());
+        }
+        sending.await.unwrap();
+        reader.abort();
+        writer.abort();
+    }
+
+    #[tokio::test]
+    async fn empty_and_multi_chunk_frames_keep_stream_order() {
+        let (client, mut server) = sockets().await;
+        let (initiator, responder) = roles();
+        let (client, server_transport) = tokio::join!(
+            Connection::new::<Message>(client, initiator),
+            handshake(&mut server, responder),
+        );
+        let (mut incoming, _outgoing, reader, writer) = client.unwrap();
+        let (mut encrypt, _) = server_transport.unwrap().split();
+        let sending = tokio::spawn(async move {
+            let mut encoder = NoiseEncoder::new();
+            let mut large = vec![0xA5; 196_614];
+            large[..6].copy_from_slice(&[0, 0, 44, 0, 0, 3]);
+            let frames = [
+                StandardSv2Frame::<Message>::from_bytes(vec![0, 0, 43, 0, 0, 0]).unwrap(),
+                StandardSv2Frame::<Message>::from_bytes(large).unwrap(),
+                frame(71),
+            ];
+            for frame in frames {
+                let bytes = encoder.encode_transport(frame, &mut encrypt).unwrap();
+                for piece in bytes.as_ref().chunks(4093) {
+                    server.write_all(piece).await.unwrap();
+                }
+            }
+        });
+        for (kind, length) in [(43, 0), (44, 196_608), (0x42, 24)] {
+            let received = tokio::time::timeout(Duration::from_secs(3), incoming.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut received: StandardSv2Frame<Message> = received.try_into().unwrap();
+            assert_eq!(received.get_header().unwrap().msg_type(), kind);
+            assert_eq!(received.payload().len(), length);
+            if kind == 44 {
+                assert!(received.payload().iter().all(|byte| *byte == 0xA5));
+            }
+        }
+        sending.await.unwrap();
+        reader.abort();
+        writer.abort();
+    }
+
+    #[tokio::test]
+    async fn wrong_authority_key_rejects_handshake() {
+        let (client, server) = sockets().await;
+        let (_, responder) = roles();
+        let key = SecretKey::from_slice(&[8; 32]).unwrap();
+        let pair = Keypair::from_secret_key(&Secp256k1::new(), &key);
+        let public = XOnlyPublicKey::from_keypair(&pair).0.serialize();
+        let initiator = HandshakeRole::Initiator(Initiator::from_raw_k(public).unwrap());
+        let (client, server) = tokio::join!(
+            Connection::new::<Message>(client, initiator),
+            Connection::new::<Message>(server, responder),
+        );
+        assert!(matches!(client, Err(Error::CodecError(_))));
+        if let Ok((_, _, reader, writer)) = server {
+            reader.abort();
+            writer.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_ciphertext_closes_both_channels() {
+        let (client, mut server) = sockets().await;
+        let (initiator, responder) = roles();
+        let (client, server_transport) = tokio::join!(
+            Connection::new::<Message>(client, initiator),
+            handshake(&mut server, responder),
+        );
+        server_transport.unwrap();
+        let (mut incoming, outgoing, reader, writer) = client.unwrap();
+        server
+            .write_all(&[0; codec_sv2::ENCRYPTED_SV2_FRAME_HEADER_SIZE])
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), incoming.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        tokio::time::timeout(Duration::from_secs(3), outgoing.closed())
+            .await
+            .unwrap();
+        reader.abort();
+        writer.abort();
+    }
+
+    #[tokio::test]
+    async fn handshake_message_after_setup_closes_connection() {
+        let (
+            (mut client_rx, client_tx, client_read, client_write),
+            (_server_rx, _server_tx, server_read, server_write),
+        ) = pair().await;
+        let unexpected = framing_sv2::framing::HandshakeMessage::from_message([0; 64]);
+        client_tx.send(unexpected.into()).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), client_rx.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        tokio::time::timeout(Duration::from_secs(3), client_tx.closed())
+            .await
+            .unwrap();
+        client_read.abort();
+        client_write.abort();
+        server_read.abort();
+        server_write.abort();
+    }
 }

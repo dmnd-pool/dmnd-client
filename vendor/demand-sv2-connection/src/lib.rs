@@ -1,117 +1,88 @@
-use binary_sv2::{Deserialize, GetSize, Serialize};
-
+mod frames;
 pub mod noise_connection_tokio;
 
-use codec_sv2::{Error as CodecError, HandShakeFrame, HandshakeRole, StandardEitherFrame};
-use const_sv2::{
-    INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE, RESPONDER_EXPECTED_HANDSHAKE_MESSAGE_SIZE,
-};
-use futures::lock::Mutex;
-use std::{
-    convert::TryInto,
-    sync::{atomic::AtomicBool, Arc},
-};
-use tokio::sync::mpsc::{error::SendError, Receiver, Sender};
+pub use frames::{StandardEitherFrame, StandardSv2Frame};
+pub use noise_sv2;
+pub use noise_sv2::{Initiator, Responder};
+
+#[derive(Debug)]
+pub enum HandshakeRole {
+    Initiator(Box<Initiator>),
+    Responder(Box<Responder>),
+}
 
 #[derive(Debug)]
 pub enum Error {
     HandshakeRemoteInvalidMessage,
-    CodecError(CodecError),
+    CodecError(codec_sv2::Error),
     RecvError,
     SendError,
-    // This means that a socket that was supposed to be opened have been closed, likley by the peer
     SocketClosed,
+    Io(std::io::Error),
 }
 
-impl From<CodecError> for Error {
-    fn from(e: CodecError) -> Self {
-        Error::CodecError(e)
-    }
-}
-impl<T> From<SendError<T>> for Error {
-    fn from(_: SendError<T>) -> Self {
-        Error::SendError
+impl From<codec_sv2::Error> for Error {
+    fn from(error: codec_sv2::Error) -> Self {
+        Self::CodecError(error)
     }
 }
 
-trait SetState {
-    async fn set_state(self_: Arc<Mutex<Self>>, state: codec_sv2::State);
-}
-
-async fn initialize_as_downstream<
-    'a,
-    Message: Serialize + Deserialize<'a> + GetSize,
-    T: SetState,
->(
-    self_: Arc<Mutex<T>>,
-    role: HandshakeRole,
-    sender_outgoing: &mut Sender<StandardEitherFrame<Message>>,
-    receiver_incoming: &mut Receiver<StandardEitherFrame<Message>>,
-) -> Result<(), Error> {
-    let mut state = codec_sv2::State::initialized(role);
-
-    // Create and send first handshake message
-    let first_message = state.step_0()?;
-    sender_outgoing
-        .send(first_message.into())
-        .await
-        .map_err(|_| Error::SendError)?;
-
-    // Receive and deserialize second handshake message
-    let second_message = receiver_incoming.recv().await.ok_or(Error::RecvError)?;
-    let second_message: HandShakeFrame = second_message
-        .try_into()
-        .map_err(|_| Error::HandshakeRemoteInvalidMessage)?;
-    let second_message: [u8; INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE] = second_message
-        .get_payload_when_handshaking()
-        .try_into()
-        .map_err(|_| Error::HandshakeRemoteInvalidMessage)?;
-
-    // Create and send thirth handshake message
-    let transport_mode = state.step_2(second_message)?;
-
-    T::set_state(self_, transport_mode).await;
-    while !TRANSPORT_READY.load(std::sync::atomic::Ordering::SeqCst) {
-        std::hint::spin_loop()
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
     }
-    Ok(())
 }
 
-async fn initialize_as_upstream<'a, Message: Serialize + Deserialize<'a> + GetSize, T: SetState>(
-    self_: Arc<Mutex<T>>,
-    role: HandshakeRole,
-    sender_outgoing: &mut Sender<StandardEitherFrame<Message>>,
-    receiver_incoming: &mut Receiver<StandardEitherFrame<Message>>,
-) -> Result<(), Error> {
-    let mut state = codec_sv2::State::initialized(role);
+impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
+    fn from(_: tokio::sync::mpsc::error::SendError<T>) -> Self {
+        Self::SendError
+    }
+}
 
-    // Receive and deserialize first handshake message
-    let first_message: HandShakeFrame = receiver_incoming
-        .recv()
-        .await
-        .ok_or(Error::RecvError)?
-        .try_into()
-        .map_err(|_| Error::HandshakeRemoteInvalidMessage)?;
-    let first_message: [u8; RESPONDER_EXPECTED_HANDSHAKE_MESSAGE_SIZE] = first_message
-        .get_payload_when_handshaking()
-        .try_into()
-        .map_err(|_| Error::HandshakeRemoteInvalidMessage)?;
+#[cfg(test)]
+mod test_support {
+    use std::{
+        alloc::{GlobalAlloc, Layout, System},
+        cell::Cell,
+    };
 
-    // Create and send second handshake message
-    let (second_message, transport_mode) = state.step_1(first_message)?;
-    HANDSHAKE_READY.store(false, std::sync::atomic::Ordering::SeqCst);
-    sender_outgoing.send(second_message.into()).await?;
-
-    // This sets the state to Handshake state - this prompts the task above to move the state
-    // to transport mode so that the next incoming message will be decoded correctly
-    // It is important to do this directly before sending the fourth message
-    T::set_state(self_, transport_mode).await;
-    while !TRANSPORT_READY.load(std::sync::atomic::Ordering::SeqCst) {
-        std::hint::spin_loop()
+    thread_local! {
+        static COUNT: Cell<Option<usize>> = const { Cell::new(None) };
     }
 
-    Ok(())
+    pub struct CountingAllocator;
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            COUNT.with(|count| {
+                if let Some(value) = count.get() {
+                    count.set(Some(value + 1));
+                }
+            });
+            System.alloc(layout)
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            System.dealloc(pointer, layout);
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            COUNT.with(|count| {
+                if let Some(value) = count.get() {
+                    count.set(Some(value + 1));
+                }
+            });
+            System.realloc(pointer, layout, size)
+        }
+    }
+
+    pub fn allocations(action: impl FnOnce()) -> usize {
+        COUNT.with(|count| count.set(Some(0)));
+        action();
+        COUNT.with(|count| count.replace(None).unwrap())
+    }
 }
 
-static HANDSHAKE_READY: AtomicBool = AtomicBool::new(false);
-static TRANSPORT_READY: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: test_support::CountingAllocator = test_support::CountingAllocator;
