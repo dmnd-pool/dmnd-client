@@ -33,9 +33,10 @@ pub trait Encodable {
 
 impl<'a, T: Into<EncodableField<'a>>> Encodable for T {
     #[allow(clippy::wrong_self_convention)]
+    #[inline]
     fn to_bytes(self, dst: &mut [u8]) -> Result<usize, Error> {
         let encoded_field = self.into();
-        encoded_field.encode(dst, 0)
+        encoded_field.encode_owned(dst)
     }
 }
 
@@ -89,6 +90,7 @@ impl EncodablePrimitive<'_> {
     // The `encode` method takes the `EncodablePrimitive` variant and serializes it
     // into the destination buffer `dst`. The method returns the number of bytes written
     // . If the buffer is too small or encoding fails, it returns an error.
+    #[inline(always)]
     fn encode(&self, dst: &mut [u8]) -> Result<usize, Error> {
         match self {
             Self::U8(v) => v.to_slice(dst),
@@ -163,6 +165,24 @@ pub enum EncodableField<'a> {
 }
 
 impl<'a> EncodableField<'a> {
+    #[inline]
+    fn encode_owned(mut self, dst: &mut [u8]) -> Result<usize, Error> {
+        match &mut self {
+            Self::Primitive(primitive) => primitive.encode(dst),
+            Self::Struct(fields) => {
+                let fields = core::mem::take(fields);
+                let mut written = 0;
+                for field in fields {
+                    written += match &field {
+                        Self::Primitive(primitive) => primitive.encode(&mut dst[written..]),
+                        Self::Struct(_) => field.encode(dst, written),
+                    }?;
+                }
+                Ok(written)
+            }
+        }
+    }
+
     /// The `encode` method serializes a field into the destination buffer `dst`, starting
     /// at the provided `offset`. If the field is a structure, it encodes each contained
     /// field in order. If the buffer is too small or encoding fails, the method returns an

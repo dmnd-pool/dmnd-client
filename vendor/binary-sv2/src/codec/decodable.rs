@@ -157,6 +157,7 @@ impl SizeHint for PrimitiveMarker {
         Err(Error::UnInitializedDecoder)
     }
 
+    #[inline]
     fn size_hint_(&self, data: &[u8], offset: usize) -> Result<usize, Error> {
         match self {
             Self::U8 => u8::size_hint(data, offset),
@@ -190,6 +191,7 @@ impl SizeHint for FieldMarker {
         Err(Error::UnInitializedDecoder)
     }
 
+    #[inline]
     fn size_hint_(&self, data: &[u8], offset: usize) -> Result<usize, Error> {
         match self {
             Self::Primitive(p) => p.size_hint_(data, offset),
@@ -217,6 +219,7 @@ impl SizeHint for Vec<FieldMarker> {
         Err(Error::UnInitializedDecoder)
     }
 
+    #[inline]
     fn size_hint_(&self, data: &[u8], offset: usize) -> Result<usize, Error> {
         let mut size = 0;
         for field in self {
@@ -263,6 +266,7 @@ impl PrimitiveMarker {
     // Decodes a primitive value from a byte slice at the given offset, returning the corresponding
     // `DecodablePrimitive`. The specific decoding logic depends on the type of the primitive (e.g.,
     // `u8`, `u16`, etc.).
+    #[inline(always)]
     fn decode<'a>(
         &self,
         data: &'a mut [u8],
@@ -369,6 +373,7 @@ impl FieldMarker {
     // Depending on whether the field is primitive or structured, this method decodes the
     // corresponding data. If the field is a structure, it recursively decodes each nested field
     // and returns the resulting `DecodableField`.
+    #[inline(always)]
     pub(crate) fn decode<'a>(&self, data: &'a mut [u8]) -> Result<DecodableField<'a>, Error> {
         match self {
             Self::Primitive(p) => Ok(DecodableField::Primitive(p.decode(data, 0)?)),

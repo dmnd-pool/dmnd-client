@@ -27,10 +27,12 @@ macro_rules! impl_decodable {
     ($(($ty:ty, $marker:ident)),+ $(,)?) => {
         $(
             impl<'a> Decodable<'a> for $ty {
+                #[inline]
                 fn get_structure(_: &[u8]) -> Result<Vec<FieldMarker>, Error> {
                     Ok(vec![PrimitiveMarker::$marker.into()])
                 }
 
+                #[inline]
                 fn from_decoded_fields(
                     mut data: Vec<DecodableField<'a>>,
                 ) -> Result<Self, Error> {
@@ -47,6 +49,7 @@ macro_rules! impl_try_from_decodable_primitive {
             impl<'a> TryFrom<DecodablePrimitive<'a>> for $ty {
                 type Error = Error;
 
+                #[inline]
                 fn try_from(value: DecodablePrimitive<'a>) -> Result<Self, Self::Error> {
                     match value {
                         DecodablePrimitive::$variant(val) => Ok(val),
@@ -64,6 +67,7 @@ macro_rules! impl_try_from_decodable_primitive_owned {
             impl<'a> TryFrom<DecodablePrimitive<'a>> for $ty {
                 type Error = Error;
 
+                #[inline]
                 fn try_from(value: DecodablePrimitive<'a>) -> Result<Self, Self::Error> {
                     match value {
                         DecodablePrimitive::$owned(val) => Ok(val),
@@ -82,6 +86,7 @@ macro_rules! impl_try_from_decodable_field {
             impl<'a> TryFrom<DecodableField<'a>> for $ty {
                 type Error = Error;
 
+                #[inline]
                 fn try_from(value: DecodableField<'a>) -> Result<Self, Self::Error> {
                     match value {
                         DecodableField::Primitive(p) => p.try_into(),
