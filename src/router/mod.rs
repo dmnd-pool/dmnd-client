@@ -448,11 +448,7 @@ fn open_channel() -> Mining<'static> {
             request_id: 0,
             max_target: binary_sv2::u256_from_int(u64::MAX),
             min_extranonce_size: 8,
-            user_identity: "ABC"
-                .to_string()
-                .try_into()
-                // This can never fail
-                .expect("Failed to convert user identity to string"),
+            user_identity: crate::USER_IDENTIFIER.clone(),
             nominal_hash_rate: 0.0,
         },
     )

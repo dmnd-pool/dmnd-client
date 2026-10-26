@@ -146,6 +146,16 @@ POOL_ADDRESSES=pool-a.example.com:20000,pool-b.example.com:20000 \
 ./dmnd-client -l info -d 250T --tp-address="127.0.0.1:8336"
 ```
 
+### Mining user identifier
+
+The client creates one user identifier when the process starts. It contains `ABC`
+followed by 16 random bytes encoded as 32 hexadecimal characters. Its total length
+is 35 bytes, below the protocol limit of 255 bytes.
+
+The client uses the same value in `OpenExtendedMiningChannel.user_identity` and
+`AllocateMiningJobToken.user_identifier`. It keeps this value through reconnections.
+A new process creates a new value.
+
 ### Miner coinbase tag
 
 The coinbase tag defaults to `/DMND/<miner_name>/`. Set `--miner-name` (or `miner_name` in

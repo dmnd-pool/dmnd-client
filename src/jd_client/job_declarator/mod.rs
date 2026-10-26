@@ -573,7 +573,7 @@ impl JobDeclarator {
                     }
                 };
             let message = JobDeclaration::AllocateMiningJobToken(AllocateMiningJobToken {
-                user_identifier: "todo".to_string().try_into().expect("Infallible operation"),
+                user_identifier: crate::USER_IDENTIFIER.clone(),
                 request_id,
             });
 
@@ -636,7 +636,7 @@ fn missing_prioritized_txids(
 
 #[cfg(test)]
 mod tests {
-    use super::missing_prioritized_txids;
+    use super::*;
     use bitcoin::Txid;
     use std::collections::HashSet;
 
@@ -664,5 +664,41 @@ mod tests {
         let template = HashSet::from([a, c]);
 
         assert_eq!(missing_prioritized_txids(&prioritized, &template), vec![b]);
+    }
+
+    #[tokio::test]
+    async fn token_requests_reuse_process_user_identifier() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        let (mining_sender, _mining_receiver) = tokio::sync::mpsc::channel(1);
+        let up = Upstream::new(crate::MIN_EXTRANONCE_SIZE, mining_sender)
+            .await
+            .unwrap();
+        let declarator = Arc::new(Mutex::new(JobDeclarator {
+            sender,
+            allocated_tokens: vec![],
+            req_ids: Id::new(),
+            min_extranonce_size: crate::MIN_EXTRANONCE_SIZE,
+            last_declare_mining_jobs_sent: HashMap::new(),
+            last_set_new_prev_hash: None,
+            set_new_prev_hash_counter: 0,
+            future_jobs: HashMap::with_hasher(BuildNoHashHasher::default()),
+            up,
+            task_manager: TaskManager::initialize(),
+        }));
+
+        JobDeclarator::allocate_tokens(&declarator, 2).await;
+        let expected = crate::USER_IDENTIFIER.to_vec();
+        for _ in 0..2 {
+            let frame: StdFrame = receiver.recv().await.unwrap().try_into().unwrap();
+            let mut encoded = vec![0; frame.encoded_length()];
+            frame.serialize(&mut encoded).unwrap();
+            let mut frame = StdFrame::from_bytes(encoded.into()).unwrap();
+            let message_type = frame.get_header().unwrap().msg_type();
+            let message = JobDeclaration::try_from((message_type, frame.payload())).unwrap();
+            let JobDeclaration::AllocateMiningJobToken(request) = message else {
+                panic!("expected a token allocation request");
+            };
+            assert_eq!(request.user_identifier.to_vec(), expected);
+        }
     }
 }
