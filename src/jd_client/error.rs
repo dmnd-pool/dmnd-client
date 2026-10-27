@@ -12,7 +12,7 @@ pub enum Error {
     /// Errors from `binary_sv2` crate.
     BinarySv2(binary_sv2::Error),
     /// Errors on bad noise handshake.
-    CodecNoise(codec_sv2::noise_sv2::Error),
+    CodecNoise(demand_sv2_connection::noise_sv2::Error),
     /// Errors from `framing_sv2` crate.
     FramingSv2(framing_sv2::Error),
     /// Errors on bad `TcpStream` connection.
@@ -92,7 +92,9 @@ impl fmt::Display for Error {
                 f,
                 "Failed to add Task in JdClient Mining Downstream TaskManager"
             ),
-            JdClientUpstreamMutexCorrupted => write!(f, "JdClient Mining Upstream mutex Corrupted"),
+            JdClientUpstreamMutexCorrupted => {
+                write!(f, "JdClient Mining Upstream mutex Corrupted")
+            }
             JdClientUpstreamTaskManagerFailed => write!(
                 f,
                 "Failed to add Task in JdClient Mining Upstream TaskManager"
@@ -112,8 +114,8 @@ impl From<binary_sv2::Error> for Error {
     }
 }
 
-impl From<codec_sv2::noise_sv2::Error> for Error {
-    fn from(e: codec_sv2::noise_sv2::Error) -> Self {
+impl From<demand_sv2_connection::noise_sv2::Error> for Error {
+    fn from(e: demand_sv2_connection::noise_sv2::Error) -> Self {
         Error::CodecNoise(e)
     }
 }

@@ -1,15 +1,15 @@
 pub mod message_handler;
 mod task_manager;
-use binary_sv2::{Seq0255, Seq064K, B016M, B064K, U256};
+use binary_sv2::{B016MOwned, B064KOwned, Seq0255Owned, Seq064KOwned, U256Owned};
 use bitcoin::{blockdata::transaction::Transaction, hashes::Hash, Txid};
-use codec_sv2::{HandshakeRole, Initiator, StandardEitherFrame, StandardSv2Frame};
 use demand_sv2_connection::noise_connection_tokio::Connection;
+use demand_sv2_connection::{HandshakeRole, Initiator, StandardEitherFrame, StandardSv2Frame};
 use roles_logic_sv2::{
     handlers::SendTo_,
-    job_declaration_sv2::{AllocateMiningJobTokenSuccess, SubmitSolutionJd},
-    mining_sv2::SubmitSharesExtended,
-    parsers::{JobDeclaration, PoolMessages},
-    template_distribution_sv2::SetNewPrevHash,
+    job_declaration_sv2::{AllocateMiningJobTokenSuccessOwned, PushSolutionOwned},
+    mining_sv2::SubmitSharesExtendedOwned,
+    parsers::{JobDeclarationOwned, PoolMessagesOwned},
+    template_distribution_sv2::SetNewPrevHashOwned,
     utils::Mutex,
 };
 use std::{
@@ -24,14 +24,14 @@ use async_recursion::async_recursion;
 use nohash_hasher::BuildNoHashHasher;
 use roles_logic_sv2::{
     handlers::job_declaration::ParseServerJobDeclarationMessages,
-    job_declaration_sv2::{AllocateMiningJobToken, DeclareMiningJob},
-    template_distribution_sv2::NewTemplate,
+    job_declaration_sv2::{AllocateMiningJobTokenOwned, DeclareMiningJobOwned},
+    template_distribution_sv2::NewTemplateOwned,
     utils::Id,
 };
 use std::{net::SocketAddr, sync::Arc};
 
-pub type Message = PoolMessages<'static>;
-pub type SendTo = SendTo_<JobDeclaration<'static>, ()>;
+pub type Message = PoolMessagesOwned;
+pub type SendTo = SendTo_<JobDeclarationOwned, ()>;
 pub type StdFrame = StandardSv2Frame<Message>;
 
 pub mod setup_connection;
@@ -46,30 +46,30 @@ use super::{error::Error, mining_downstream::DownstreamJob, mining_upstream::Ups
 
 #[derive(Debug, Clone)]
 pub struct LastDeclareJob {
-    declare_job: DeclareMiningJob<'static>,
-    template: NewTemplate<'static>,
+    declare_job: DeclareMiningJobOwned,
+    template: NewTemplateOwned,
     coinbase_pool_output: Vec<u8>,
-    tx_list: Seq064K<'static, B016M<'static>>,
+    tx_list: Seq064KOwned<B016MOwned>,
     downstream_job: DownstreamJob,
 }
 
 #[derive(Debug)]
 pub struct JobDeclarator {
-    sender: TSender<StandardEitherFrame<PoolMessages<'static>>>,
-    allocated_tokens: Vec<AllocateMiningJobTokenSuccess<'static>>,
+    sender: TSender<StandardEitherFrame<PoolMessagesOwned>>,
+    allocated_tokens: Vec<AllocateMiningJobTokenSuccessOwned>,
     req_ids: Id,
     min_extranonce_size: u16,
     // (Sent DeclareMiningJob, is future, template id, merkle path)
     last_declare_mining_jobs_sent: HashMap<u32, Option<LastDeclareJob>>,
-    pub last_set_new_prev_hash: Option<SetNewPrevHash<'static>>,
+    pub last_set_new_prev_hash: Option<SetNewPrevHashOwned>,
     set_new_prev_hash_counter: u8,
     #[allow(clippy::type_complexity)]
     future_jobs: HashMap<
         u64,
         (
-            DeclareMiningJob<'static>,
-            Seq0255<'static, U256<'static>>,
-            NewTemplate<'static>,
+            DeclareMiningJobOwned,
+            Seq0255Owned<U256Owned>,
+            NewTemplateOwned,
             // pool's outputs
             Vec<u8>,
             DownstreamJob,
@@ -157,7 +157,7 @@ impl JobDeclarator {
     #[async_recursion]
     pub async fn get_last_token(
         self_mutex: &Arc<Mutex<Self>>,
-    ) -> Result<AllocateMiningJobTokenSuccess<'static>, Error> {
+    ) -> Result<AllocateMiningJobTokenSuccessOwned, Error> {
         let mut token_len = self_mutex
             .safe_lock(|s| s.allocated_tokens.len())
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
@@ -216,10 +216,10 @@ impl JobDeclarator {
 
     pub(crate) async fn on_new_template(
         self_mutex: &Arc<Mutex<Self>>,
-        template: NewTemplate<'static>,
+        template: NewTemplateOwned,
         token: Vec<u8>,
-        tx_list_: Seq064K<'static, B016M<'static>>,
-        excess_data: B064K<'static>,
+        tx_list_: Seq064KOwned<B016MOwned>,
+        excess_data: B064KOwned,
         coinbase_pool_output: Vec<u8>,
         downstream_job: DownstreamJob,
     ) -> Result<(), Error> {
@@ -241,22 +241,23 @@ impl JobDeclarator {
             .safe_lock(|s| (s.req_ids.next(), s.min_extranonce_size, s.sender.clone()))
             .map_err(|_| Error::JobDeclaratorMutexCorrupted)?;
 
-        let template_transactions = tx_list_.to_vec();
+        let template_transactions = tx_list_.as_slice();
         let mut prioritized_txids =
             crate::prioritized_transactions::PRIORITIZED_TRANSACTIONS.snapshot_txids();
         prioritized_txids.extend(
             crate::prioritized_transactions::MEMPOOL_DOT_SPACE_ACCELERATED.snapshot_txids(),
         );
         let mut template_txids = HashSet::with_capacity(template_transactions.len());
-        let mut tx_list: Vec<Transaction> = Vec::new();
-        let mut tx_ids = vec![];
+        let mut tx_list: Vec<Transaction> = Vec::with_capacity(template_transactions.len());
+        let mut tx_ids = Vec::with_capacity(template_transactions.len());
         for tx in template_transactions {
             let transaction: Result<Transaction, bitcoin::consensus::encode::Error> =
-                bitcoin::consensus::deserialize(&tx);
+                bitcoin::consensus::deserialize(tx.as_bytes());
             match transaction {
                 Ok(tx) => {
                     template_txids.insert(tx.compute_txid());
-                    let w_tx_id: U256 = tx.compute_wtxid().to_raw_hash().to_byte_array().into();
+                    let w_tx_id: U256Owned =
+                        tx.compute_wtxid().to_raw_hash().to_byte_array().into();
                     tx_list.push(tx);
                     tx_ids.push(w_tx_id);
                 }
@@ -267,37 +268,38 @@ impl JobDeclarator {
             }
         }
         crate::block_templates::template_received(&template, &tx_list);
+        drop(tx_list);
 
         let missing_txids = missing_prioritized_txids(&prioritized_txids, &template_txids);
         for tx in missing_txids {
             warn!("Prioritized txs missing from block. POssible cause: already have been mined. Txid: {}", tx);
         }
-        let tx_ids: Seq064K<'static, U256> = Seq064K::from(tx_ids);
+        let tx_ids: Seq064KOwned<U256Owned> = Seq064KOwned::new(tx_ids)?;
 
         let template_id = template.template_id;
         let coinbase_prefix = downstream_job.coinbase_tx_prefix.clone();
         let coinbase_suffix = downstream_job.coinbase_tx_suffix.clone();
 
-        let declare_job = DeclareMiningJob {
+        let declare_job = DeclareMiningJobOwned {
             request_id: id,
             mining_job_token: token.try_into().expect("Internal error: this operation can not fail because Vec<U8> can always be converted into Inner"),
             version: template.version,
-            coinbase_prefix,
-            coinbase_suffix,
-            tx_list: tx_ids,
+            coinbase_tx_prefix: coinbase_prefix,
+            coinbase_tx_suffix: coinbase_suffix,
+            wtxid_list: tx_ids,
             excess_data, // request transaction data
         };
         let last_declare = LastDeclareJob {
             declare_job: declare_job.clone(),
             template,
             coinbase_pool_output,
-            tx_list: tx_list_.clone(),
+            tx_list: tx_list_,
             downstream_job,
         };
         crate::block_templates::declaration_sent(template_id);
         Self::update_last_declare_job_sent(self_mutex, id, last_declare)?;
         let frame: StdFrame =
-            PoolMessages::JobDeclaration(JobDeclaration::DeclareMiningJob(declare_job))
+            PoolMessagesOwned::JobDeclaration(JobDeclarationOwned::DeclareMiningJob(declare_job))
                 .try_into()
                 .expect("Infallable operation");
         sender
@@ -308,7 +310,7 @@ impl JobDeclarator {
 
     pub async fn on_upstream_message(
         self_mutex: Arc<Mutex<Self>>,
-        mut receiver: TReceiver<StandardEitherFrame<PoolMessages<'static>>>,
+        mut receiver: TReceiver<StandardEitherFrame<PoolMessagesOwned>>,
     ) -> Result<(), Error> {
         let up = self_mutex
             .safe_lock(|s| s.up.clone())
@@ -329,13 +331,18 @@ impl JobDeclarator {
                         break;
                     }
                 };
-                let message_type = match incoming.get_header() {
-                    Some(header) => header.msg_type(),
-                    None => {
-                        error!("Invalid msg: Failed to get msg header");
-                        std::process::exit(1)
-                    }
-                };
+                let message_type =
+                    match crate::jd_client::protocol::message_type(incoming.get_header(), |id| {
+                        roles_logic_sv2::parsers::JobDeclarationTypes::try_from(id)
+                            .map(roles_logic_sv2::parsers::JobDeclarationTypes::channel_bit)
+                    }) {
+                        Ok(message_type) => message_type,
+                        Err(error) => {
+                            warn!(?error, "Invalid Job Declaration frame header");
+                            ProxyState::update_jd_state(JdState::Down);
+                            break;
+                        }
+                    };
                 let payload = incoming.payload();
                 let next_message_to_send =
                     ParseServerJobDeclarationMessages::handle_message_job_declaration(
@@ -344,7 +351,7 @@ impl JobDeclarator {
                         payload,
                     );
                 match next_message_to_send {
-                    Ok(SendTo::None(Some(JobDeclaration::DeclareMiningJobSuccess(m)))) => {
+                    Ok(SendTo::None(Some(JobDeclarationOwned::DeclareMiningJobSuccess(m)))) => {
                         let new_token = m.new_mining_job_token;
                         let last_declare =
                             match Self::take_last_declare_job_sent(&self_mutex, m.request_id) {
@@ -400,9 +407,17 @@ impl JobDeclarator {
                                         break;
                                     }
                                 };
-                            let mut template_outs = template.coinbase_tx_outputs.to_vec();
-                            let mut pool_outs = last_declare.coinbase_pool_output;
-                            pool_outs.append(&mut template_outs);
+                            let pool_outs = match custom_job_outputs(
+                                &template,
+                                &last_declare.coinbase_pool_output,
+                            ) {
+                                Ok(outputs) => outputs,
+                                Err(error) => {
+                                    error!(?error, "Cannot construct custom job outputs");
+                                    ProxyState::update_jd_state(JdState::Down);
+                                    break;
+                                }
+                            };
                             match set_new_prev_hash {
                                 Some(p) => if let Err(e) =  Upstream::set_custom_jobs(
                                     &up,
@@ -413,7 +428,6 @@ impl JobDeclarator {
                                     template.coinbase_tx_version,
                                     template.coinbase_prefix,
                                     template.coinbase_tx_input_sequence,
-                                    template.coinbase_tx_value_remaining,
                                     pool_outs,
                                     template.coinbase_tx_locktime,
                                     template.template_id,
@@ -423,7 +437,7 @@ impl JobDeclarator {
                             }
                         }
                     }
-                    Ok(SendTo::None(Some(JobDeclaration::DeclareMiningJobError(m)))) => {
+                    Ok(SendTo::None(Some(JobDeclarationOwned::DeclareMiningJobError(m)))) => {
                         let removed = self_mutex
                             .safe_lock(|state| {
                                 state.last_declare_mining_jobs_sent.remove(&m.request_id)
@@ -440,7 +454,7 @@ impl JobDeclarator {
                     }
                     Ok(SendTo::None(None)) => (),
                     Ok(SendTo::Respond(m)) => {
-                        let sv2_frame: StdFrame = PoolMessages::JobDeclaration(m)
+                        let sv2_frame: StdFrame = PoolMessagesOwned::JobDeclaration(m)
                             .try_into()
                             .expect("Infallable operatiion");
                         let sender = match self_mutex.safe_lock(|self_| self_.sender.clone()) {
@@ -473,7 +487,7 @@ impl JobDeclarator {
 
     pub async fn on_set_new_prev_hash(
         self_mutex: Arc<Mutex<Self>>,
-        set_new_prev_hash: SetNewPrevHash<'static>,
+        set_new_prev_hash: SetNewPrevHashOwned,
     ) -> Result<(), Error> {
         crate::block_templates::clear_for_new_tip(set_new_prev_hash.template_id);
         let task_manager = self_mutex
@@ -491,7 +505,7 @@ impl JobDeclarator {
                 error!("{}", Error::JobDeclaratorMutexCorrupted);
                 return;
             };
-            let (job, up, merkle_path, template, mut pool_outs, downstream_job) = loop {
+            let (job, up, merkle_path, template, pool_outs, downstream_job) = loop {
                 match self_mutex.safe_lock(|s| {
                     if s.set_new_prev_hash_counter > 1
                         && s.last_set_new_prev_hash != Some(set_new_prev_hash.clone())
@@ -534,8 +548,14 @@ impl JobDeclarator {
                 tokio::task::yield_now().await;
             };
             let signed_token = job.mining_job_token.clone();
-            let mut template_outs = template.coinbase_tx_outputs.to_vec();
-            pool_outs.append(&mut template_outs);
+            let pool_outs = match custom_job_outputs(&template, &pool_outs) {
+                Ok(outputs) => outputs,
+                Err(error) => {
+                    error!(?error, "Cannot construct custom job outputs");
+                    ProxyState::update_jd_state(JdState::Down);
+                    return;
+                }
+            };
             if let Err(e) = Upstream::set_custom_jobs(
                 &up,
                 job,
@@ -545,7 +565,6 @@ impl JobDeclarator {
                 template.coinbase_tx_version,
                 template.coinbase_prefix,
                 template.coinbase_tx_input_sequence,
-                template.coinbase_tx_value_remaining,
                 pool_outs,
                 template.coinbase_tx_locktime,
                 template.template_id,
@@ -572,13 +591,14 @@ impl JobDeclarator {
                         return;
                     }
                 };
-            let message = JobDeclaration::AllocateMiningJobToken(AllocateMiningJobToken {
-                user_identifier: "todo".to_string().try_into().expect("Infallible operation"),
-                request_id,
-            });
+            let message =
+                JobDeclarationOwned::AllocateMiningJobToken(AllocateMiningJobTokenOwned {
+                    user_identifier: "todo".to_string().try_into().expect("Infallible operation"),
+                    request_id,
+                });
 
             // Safe unwrap message is build above and is valid, below can never panic
-            let frame: StdFrame = PoolMessages::JobDeclaration(message)
+            let frame: StdFrame = PoolMessagesOwned::JobDeclaration(message)
                 .try_into()
                 .expect("Infallible operation");
 
@@ -590,7 +610,7 @@ impl JobDeclarator {
     }
     pub async fn on_solution(
         self_mutex: &Arc<Mutex<Self>>,
-        solution: SubmitSharesExtended<'static>,
+        solution: SubmitSharesExtendedOwned,
     ) -> Result<(), Error> {
         let prev_hash = match self_mutex
             .safe_lock(|s| s.last_set_new_prev_hash.clone())
@@ -602,7 +622,7 @@ impl JobDeclarator {
                 Err(Error::Unrecoverable)?
             }
         };
-        let solution = SubmitSolutionJd {
+        let solution = PushSolutionOwned {
             extranonce: solution.extranonce,
             prev_hash: prev_hash.prev_hash,
             ntime: solution.ntime,
@@ -611,7 +631,7 @@ impl JobDeclarator {
             version: solution.version,
         };
         let frame: StdFrame =
-            PoolMessages::JobDeclaration(JobDeclaration::SubmitSolution(solution))
+            PoolMessagesOwned::JobDeclaration(JobDeclarationOwned::PushSolution(solution))
                 .try_into()
                 .expect("Infallible operation");
         let sender = self_mutex
@@ -622,6 +642,23 @@ impl JobDeclarator {
             Error::Unrecoverable
         })
     }
+}
+
+fn custom_job_outputs(
+    template: &NewTemplateOwned,
+    pool_outputs: &[u8],
+) -> Result<B064KOwned, Error> {
+    use roles_logic_sv2::job_creator::{decode_outputs, decode_template_outputs};
+    let mut outputs = decode_outputs(pool_outputs)?;
+    let payout = outputs.first_mut().ok_or(Error::Unrecoverable)?;
+    payout.value = bitcoin::Amount::from_sat(template.coinbase_tx_value_remaining);
+    outputs.extend(decode_template_outputs(
+        template.coinbase_tx_outputs.as_bytes(),
+        template.coinbase_tx_outputs_count,
+    )?);
+    bitcoin::consensus::serialize(&outputs)
+        .try_into()
+        .map_err(Error::from)
 }
 
 fn missing_prioritized_txids(
@@ -636,12 +673,78 @@ fn missing_prioritized_txids(
 
 #[cfg(test)]
 mod tests {
-    use super::missing_prioritized_txids;
-    use bitcoin::Txid;
+    use super::{custom_job_outputs, missing_prioritized_txids, NewTemplateOwned};
+    use bitcoin::{consensus::serialize, Amount, ScriptBuf, TxOut, Txid};
     use std::collections::HashSet;
 
     fn txid(value: u8) -> Txid {
         format!("{value:064x}").parse().expect("valid txid")
+    }
+
+    #[test]
+    fn custom_job_outputs_reject_count_prefix_above_b064k_limit() {
+        let template_output = TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::new(),
+        };
+        let template = template_with_output(&template_output);
+        let pool_output = TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51; 65_515]),
+        };
+        assert_eq!(pool_output.size() + template_output.size(), 65_535);
+        assert!(custom_job_outputs(&template, &serialize(&vec![pool_output])).is_err());
+
+        let pool_output = TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51; 65_514]),
+        };
+        let outputs = custom_job_outputs(&template, &serialize(&vec![pool_output])).unwrap();
+        assert_eq!(outputs.len(), 65_535);
+    }
+
+    fn template_with_output(output: &TxOut) -> NewTemplateOwned {
+        NewTemplateOwned {
+            template_id: 1,
+            future_template: true,
+            version: 0x20000000,
+            coinbase_tx_version: 2,
+            coinbase_prefix: vec![1, 1, 0].try_into().unwrap(),
+            coinbase_tx_input_sequence: u32::MAX,
+            coinbase_tx_value_remaining: 5_000_000_000,
+            coinbase_tx_outputs_count: 1,
+            coinbase_tx_outputs: serialize(output).try_into().unwrap(),
+            coinbase_tx_locktime: 0,
+            merkle_path: Vec::new().try_into().unwrap(),
+        }
+    }
+
+    #[test]
+    fn native_custom_job_outputs_preserve_count_value_and_order() {
+        let pool_outputs = vec![
+            TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            },
+            TxOut {
+                value: Amount::from_sat(2),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x52]),
+            },
+        ];
+        let template_output = TxOut {
+            value: Amount::from_sat(3),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x6a]),
+        };
+        let template = template_with_output(&template_output);
+        let actual = custom_job_outputs(&template, &serialize(&pool_outputs)).unwrap();
+        let mut expected = pool_outputs;
+        expected[0].value = Amount::from_sat(template.coinbase_tx_value_remaining);
+        expected.push(template_output);
+        assert_eq!(actual.as_bytes(), serialize(&expected).as_slice());
+        assert_eq!(
+            roles_logic_sv2::job_creator::decode_outputs(actual.as_bytes()).unwrap(),
+            expected
+        );
     }
 
     #[test]

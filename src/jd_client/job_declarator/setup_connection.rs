@@ -1,10 +1,10 @@
 use crate::config::Configuration;
-use codec_sv2::{StandardEitherFrame, StandardSv2Frame};
+use demand_sv2_connection::{StandardEitherFrame, StandardSv2Frame};
 use rand::distributions::{Alphanumeric, DistString};
 use roles_logic_sv2::{
-    common_messages_sv2::{Protocol, SetupConnection, SetupConnectionSuccess},
+    common_messages_sv2::{Protocol, SetupConnectionOwned},
     handlers::common::{ParseUpstreamCommonMessages, SendTo},
-    parsers::PoolMessages,
+    parsers::PoolMessagesOwned,
     routing_logic::{CommonRoutingLogic, NoRouting},
     utils::Mutex,
 };
@@ -12,7 +12,7 @@ use std::{convert::TryInto, net::SocketAddr, sync::Arc};
 use tokio::sync::mpsc::{Receiver as TReceiver, Sender as TSender};
 use tracing::{error, warn};
 
-pub type Message = PoolMessages<'static>;
+pub type Message = PoolMessagesOwned;
 pub type StdFrame = StandardSv2Frame<Message>;
 pub type EitherFrame = StandardEitherFrame<Message>;
 #[derive(Default)]
@@ -21,7 +21,7 @@ pub struct SetupConnectionHandler {
 }
 
 impl SetupConnectionHandler {
-    fn get_setup_connection_message(proxy_address: SocketAddr) -> SetupConnection<'static> {
+    fn get_setup_connection_message(proxy_address: SocketAddr) -> SetupConnectionOwned {
         let endpoint_host = proxy_address
             .ip()
             .to_string()
@@ -37,20 +37,18 @@ impl SetupConnectionHandler {
             .to_string()
             .try_into()
             .expect("Internal error: this operation can not fail because device_id string can always be converted into Inner");
-        let mut setup_connection = SetupConnection {
+        SetupConnectionOwned {
             protocol: Protocol::JobDeclarationProtocol,
-            min_version: 2,
-            max_version: 2,
-            flags: 0b0000_0000_0000_0000_0000_0000_0000_0000,
+            min_version: crate::jd_client::protocol::VERSION,
+            max_version: crate::jd_client::protocol::VERSION,
+            flags: 1,
             endpoint_host,
             endpoint_port: proxy_address.port(),
             vendor,
             hardware_version,
             firmware,
             device_id,
-        };
-        setup_connection.set_async_job_nogotiation();
-        setup_connection
+        }
     }
 
     pub async fn setup(
@@ -60,7 +58,7 @@ impl SetupConnectionHandler {
     ) -> Result<(), crate::jd_client::error::Error> {
         let setup_connection = Self::get_setup_connection_message(proxy_address);
 
-        let sv2_frame: StdFrame = PoolMessages::Common(setup_connection.into()).try_into()?;
+        let sv2_frame: StdFrame = PoolMessagesOwned::Common(setup_connection.into()).try_into()?;
         let sv2_frame = sv2_frame.into();
 
         sender
@@ -76,10 +74,10 @@ impl SetupConnectionHandler {
             }
         };
 
-        let message_type = incoming
-            .get_header()
-            .ok_or(crate::jd_client::error::Error::Unrecoverable)?
-            .msg_type();
+        let message_type = crate::jd_client::protocol::message_type(incoming.get_header(), |id| {
+            roles_logic_sv2::parsers::CommonMessageTypes::try_from(id)
+                .map(roles_logic_sv2::parsers::CommonMessageTypes::channel_bit)
+        })?;
         let payload = incoming.payload();
         let handler = Arc::new(Mutex::new(SetupConnectionHandler::default()));
         ParseUpstreamCommonMessages::handle_message_common(
@@ -102,8 +100,9 @@ impl SetupConnectionHandler {
 impl ParseUpstreamCommonMessages<NoRouting> for SetupConnectionHandler {
     fn handle_setup_connection_success(
         &mut self,
-        _: SetupConnectionSuccess,
+        message: roles_logic_sv2::common_messages_sv2::SetupConnectionSuccess,
     ) -> Result<roles_logic_sv2::handlers::common::SendTo, roles_logic_sv2::errors::Error> {
+        crate::jd_client::protocol::validate_version(message.used_version)?;
         self.setup_succeeded = true;
         Ok(SendTo::None(None))
     }
@@ -133,13 +132,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn setup_rejects_unsupported_version() {
+        for used_version in [0, 1, 3, u16::MAX] {
+            let mut handler = SetupConnectionHandler::default();
+            assert!(handler
+                .handle_setup_connection_success(
+                    roles_logic_sv2::common_messages_sv2::SetupConnectionSuccess {
+                        used_version,
+                        flags: 0,
+                    },
+                )
+                .is_err());
+        }
+    }
+
+    #[test]
     fn setup_success_with_zero_flags_is_accepted() {
         let mut handler = SetupConnectionHandler::default();
         handler
-            .handle_setup_connection_success(SetupConnectionSuccess {
-                used_version: 2,
-                flags: 0,
-            })
+            .handle_setup_connection_success(
+                roles_logic_sv2::common_messages_sv2::SetupConnectionSuccess {
+                    used_version: 2,
+                    flags: 0,
+                },
+            )
             .expect("setup success");
 
         assert!(handler.setup_succeeded);

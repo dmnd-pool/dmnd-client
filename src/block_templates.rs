@@ -6,7 +6,7 @@ use std::{
 };
 
 use bitcoin::{Transaction, Txid};
-use roles_logic_sv2::template_distribution_sv2::NewTemplate;
+use roles_logic_sv2::template_distribution_sv2::NewTemplateOwned;
 
 /// One transaction in the node's template.
 #[derive(Debug, Clone)]
@@ -188,13 +188,13 @@ fn price_from_template(transactions: &[Transaction]) -> HashMap<Txid, u64> {
 }
 
 /// Record a template as the newest candidate.
-pub fn template_received(template: &NewTemplate<'_>, transactions: &[Transaction]) {
+pub fn template_received(template: &NewTemplateOwned, transactions: &[Transaction]) {
     record_template(
         template.template_id,
         template.future_template,
         template.version,
         template.coinbase_tx_value_remaining,
-        template.coinbase_prefix.inner_as_ref(),
+        template.coinbase_prefix.as_bytes(),
         transactions,
     );
 }

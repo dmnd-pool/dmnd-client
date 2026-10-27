@@ -71,3 +71,9 @@ impl Display for UserId {
         write!(f, "{}", self.0)
     }
 }
+
+pub(crate) fn maximum_channel_target() -> binary_sv2::U256Owned {
+    let mut target = [0; 32];
+    target[24..].fill(255);
+    target.into()
+}

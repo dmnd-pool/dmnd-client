@@ -2,12 +2,13 @@ use bitcoin::hex::DisplayHex;
 use tokio::task::JoinHandle;
 
 use roles_logic_sv2::{
-    channel_logic::channel_factory::{ExtendedChannelKind, ProxyExtendedChannelFactory, Share},
+    channel_logic::channel_factory::Share,
+    mining::{ExtendedExtranonce, Target},
     mining_sv2::{
-        ExtendedExtranonce, NewExtendedMiningJob, SetNewPrevHash, SubmitSharesExtended, Target,
+        NewExtendedMiningJobOwned, OpenExtendedMiningChannelSuccessOwned, SetNewPrevHashOwned,
+        SubmitSharesExtendedOwned,
     },
-    parsers::Mining,
-    utils::{GroupId, Mutex},
+    utils::Mutex,
 };
 use std::sync::{
     atomic::{AtomicU32, Ordering},
@@ -25,6 +26,7 @@ use super::{
         error::{Error, ProxyResult},
         MiningNotify,
     },
+    channel_factory::ChannelFactory,
     task_manager::TaskManager,
 };
 use crate::{
@@ -46,7 +48,7 @@ lazy_static! {
 
 #[derive(Debug, Clone)]
 struct BoundExtendedJob {
-    job: NewExtendedMiningJob<'static>,
+    job: NewExtendedMiningJobOwned,
     merge_mining_binding_id: Option<u64>,
 }
 
@@ -73,14 +75,14 @@ pub struct Bridge {
     /// a Downstream role connects and receives the first notify values, this member field is no
     /// longer used.
     last_notify: Option<MiningNotify>,
-    pub(self) channel_factory: ProxyExtendedChannelFactory,
+    pub(self) channel_factory: ChannelFactory,
     future_jobs: Vec<BoundExtendedJob>,
-    last_p_hash: Option<SetNewPrevHash<'static>>,
+    last_p_hash: Option<SetNewPrevHashOwned>,
     target: Arc<Mutex<Vec<u8>>>,
 }
 
 impl Bridge {
-    pub async fn ready(self_: &'_ Arc<Mutex<Self>>) -> Result<(), Error<'_>> {
+    pub async fn ready(self_: &'_ Arc<Mutex<Self>>) -> Result<(), Error> {
         let started_at = std::time::Instant::now();
         let mut last_log_at = started_at;
         while self_
@@ -110,10 +112,12 @@ impl Bridge {
         tx_sv1_notify: broadcast::Sender<MiningNotify>,
         extranonces: ExtendedExtranonce,
         target: Arc<Mutex<Vec<u8>>>,
-        channel_id: u32,
-    ) -> Result<Arc<Mutex<Self>>, Error<'static>> {
-        info!("Creating new bridge for channel_id {}:", channel_id);
-        let ids = Arc::new(Mutex::new(GroupId::new()));
+        upstream_channel: OpenExtendedMiningChannelSuccessOwned,
+    ) -> Result<Arc<Mutex<Self>>, Error> {
+        info!(
+            "Creating new bridge for channel_id {}:",
+            upstream_channel.channel_id
+        );
         let upstream_target: [u8; 32] =  target.safe_lock(|t| {
     t.clone().try_into().expect("Internal error: this operation can not fail because Vec<U8> can always be converted into [u8; 32]")
 }).map_err(|e| Error::TargetError(RolesLogicError::PoisonLock(e.to_string())))?;
@@ -122,15 +126,12 @@ impl Bridge {
             tx_sv2_submit_shares_ext,
             tx_sv1_notify,
             last_notify: None,
-            channel_factory: ProxyExtendedChannelFactory::new(
-                ids,
+            channel_factory: ChannelFactory::new(
                 extranonces,
-                None,
                 *crate::SHARE_PER_MIN,
-                ExtendedChannelKind::Proxy { upstream_target },
-                None,
-                channel_id,
-            ),
+                upstream_target,
+                upstream_channel,
+            )?,
             future_jobs: vec![],
             last_p_hash: None,
             target,
@@ -138,54 +139,26 @@ impl Bridge {
     }
 
     #[allow(clippy::result_large_err)]
-    pub fn on_new_sv1_connection(
-        &mut self,
-        hash_rate: f32,
-    ) -> ProxyResult<'static, OpenSv1Downstream> {
+    pub fn on_new_sv1_connection(&mut self, hash_rate: f32) -> ProxyResult<OpenSv1Downstream> {
         info!(
             "dmnd-client-debug open_sv1_downstream_start hash_rate={} last_notify_present={}",
             hash_rate,
             self.last_notify.is_some()
         );
-        match self.channel_factory.new_extended_channel(0, hash_rate, 0) {
-            Ok(messages) => {
-                info!(
-                    "dmnd-client-debug open_sv1_downstream_channel_factory_messages count={}",
-                    messages.len()
-                );
-                let mut message = messages
-                    .iter()
-                    .filter(|m| matches!(m, Mining::OpenExtendedMiningChannelSuccess(_)));
-                if let Some(Mining::OpenExtendedMiningChannelSuccess(success)) = message.next() {
-                    info!(
-                        "dmnd-client-debug open_sv1_downstream_success channel_id={} extranonce_len={} extranonce2_len={} last_notify_present={}",
-                        success.channel_id,
-                        success.extranonce_prefix.len(),
-                        success.extranonce_size,
-                        self.last_notify.is_some()
-                    );
-                    let extranonce = success.extranonce_prefix.to_vec();
-                    let extranonce2_len = success.extranonce_size;
-                    Ok(OpenSv1Downstream {
-                        channel_id: success.channel_id,
-                        last_notify: self.last_notify.clone(),
-                        extranonce,
-                        extranonce2_len,
-                    })
-                } else {
-                    let ms: Vec<Mining<'_>> =
-                        messages.into_iter().map(|m| m.into_static()).collect();
-                    let e = Error::ImpossibleToOpenChannnel;
-                    error!("{}", e);
-                    error!("Messages: {:?}", ms);
-                    Err(e)
-                }
-            }
-            Err(e) => {
-                error!("{}", e);
-                Err(Error::RolesSv2Logic(e))
-            }
-        }
+        let success = self.channel_factory.open_channel(0, hash_rate)?;
+        info!(
+            "dmnd-client-debug open_sv1_downstream_success channel_id={} extranonce_len={} extranonce2_len={} last_notify_present={}",
+            success.channel_id,
+            success.extranonce_prefix.len(),
+            success.extranonce_size,
+            self.last_notify.is_some()
+        );
+        Ok(OpenSv1Downstream {
+            channel_id: success.channel_id,
+            last_notify: self.last_notify.clone(),
+            extranonce: success.extranonce_prefix.into_bytes(),
+            extranonce2_len: success.extranonce_size,
+        })
     }
 
     /// Starts the tasks that receive SV1 and SV2 messages to be translated and sent to their
@@ -194,7 +167,7 @@ impl Bridge {
         self_: Arc<Mutex<Self>>,
         rx_bridge_work: tokio::sync::mpsc::Receiver<BridgeWork>,
         rx_sv1_downstream: tokio::sync::mpsc::Receiver<DownstreamMessages>,
-    ) -> Result<AbortOnDrop, Error<'static>> {
+    ) -> Result<AbortOnDrop, Error> {
         let task_manager = TaskManager::initialize();
         let abortable = task_manager
             .safe_lock(|t| t.get_aborter())
@@ -233,6 +206,15 @@ impl Bridge {
                 };
 
                 match msg {
+                    DownstreamMessages::CloseChannel(channel_id) => {
+                        if self_
+                            .safe_lock(|bridge| bridge.channel_factory.close_channel(channel_id))
+                            .is_err()
+                        {
+                            ProxyState::update_translator_state(TranslatorState::Down);
+                            break;
+                        }
+                    }
                     DownstreamMessages::SubmitShares(share) => {
                         if let Err(e) = Self::handle_submit_shares(self_.clone(), share).await {
                             error!("Failed to handle SubmitShareWithChannelId: {e}");
@@ -258,7 +240,7 @@ impl Bridge {
     fn handle_update_downstream_target(
         self_: Arc<Mutex<Self>>,
         new_target: SetDownstreamTarget,
-    ) -> ProxyResult<'static, ()> {
+    ) -> ProxyResult<()> {
         self_
             .safe_lock(|b| {
                 b.channel_factory
@@ -280,7 +262,7 @@ impl Bridge {
     async fn handle_submit_shares(
         self_: Arc<Mutex<Self>>,
         share: SubmitShareWithChannelId,
-    ) -> ProxyResult<'static, ()> {
+    ) -> ProxyResult<()> {
         let SubmitShareWithChannelId {
             channel_id,
             share,
@@ -378,7 +360,7 @@ impl Bridge {
 
         match res {
             Ok(OnNewShare::SendErrorDownstream(e)) => {
-                let error_code = std::str::from_utf8(&e.error_code.to_vec()[..])
+                let error_code = std::str::from_utf8(&e.error_code.as_bytes().to_vec()[..])
                     .unwrap_or("unparsable error code")
                     .to_string();
                 error!(
@@ -453,6 +435,14 @@ impl Bridge {
             }
             // Proxy do not have JD capabilities
             Ok(OnNewShare::ShareMeetBitcoinTarget(..)) => unreachable!(),
+            Err(RolesLogicError::ShareDoNotMatchAnyChannel) => {
+                debug!("Discarding share from closed channel {channel_id}");
+                Self::resolve_submit(
+                    result_tx,
+                    Err(crate::monitor::shares::RejectionReason::UpstreamRejected),
+                );
+                Ok(())
+            }
             Err(e) => {
                 Self::resolve_submit(
                     result_tx,
@@ -470,7 +460,7 @@ impl Bridge {
         channel_id: u32,
         sv1_submit: Submit,
         version_rolling_mask: Option<HexU32Be>,
-    ) -> ProxyResult<'static, SubmitSharesExtended<'static>> {
+    ) -> ProxyResult<SubmitSharesExtendedOwned> {
         if share_log_enabled() {
             info!(
                 "Bridge translating mining.submit {} from downstream with channel {} and job {}",
@@ -501,18 +491,18 @@ impl Bridge {
                     &sv1_submit.version_bits, &version_rolling_mask
                 );
                 return Err(Error::V1Protocol(Box::new(
-                    sv1_api::error::Error::InvalidSubmission,
+                    sv1_api::error::Error::UnexpectedMessage("Invalid submission".to_string()),
                 )));
             }
         };
         let mining_device_extranonce: Vec<u8> = sv1_submit.extra_nonce2.into();
         debug!(
-            "Mining device extranonce: {}",
+            "MiningOwned device extranonce: {}",
             mining_device_extranonce.to_vec().as_hex()
         );
         let extranonce2 = mining_device_extranonce;
         debug!("Extranonce2: {}", extranonce2.to_vec().as_hex());
-        Ok(SubmitSharesExtended {
+        Ok(SubmitSharesExtendedOwned {
             channel_id,
             // I put 0 below cause sequence_number is not what should be TODO
             sequence_number: 0,
@@ -526,9 +516,9 @@ impl Bridge {
 
     async fn handle_new_prev_hash_(
         self_: Arc<Mutex<Self>>,
-        sv2_set_new_prev_hash: SetNewPrevHash<'static>,
+        sv2_set_new_prev_hash: SetNewPrevHashOwned,
         tx_sv1_notify: broadcast::Sender<MiningNotify>,
-    ) -> Result<(), Error<'static>> {
+    ) -> Result<(), Error> {
         self_
             .safe_lock(|s| s.last_p_hash = Some(sv2_set_new_prev_hash.clone()))
             .map_err(|_| Error::BridgeMutexPoisoned)?;
@@ -596,15 +586,15 @@ impl Bridge {
 
     async fn handle_new_extended_mining_job_(
         self_: Arc<Mutex<Self>>,
-        sv2_new_extended_mining_job: NewExtendedMiningJob<'static>,
+        sv2_new_extended_mining_job: NewExtendedMiningJobOwned,
         tx_sv1_notify: broadcast::Sender<MiningNotify>,
         merge_mining_binding_id: Option<u64>,
-    ) -> Result<(), Error<'static>> {
+    ) -> Result<(), Error> {
         // convert to non segwit jobs so we dont have to depend if miner's support segwit or not
         self_
             .safe_lock(|s| {
                 s.channel_factory
-                    .on_new_extended_mining_job(sv2_new_extended_mining_job.as_static().clone())
+                    .on_new_extended_mining_job(sv2_new_extended_mining_job.clone())
             })
             .map_err(|_| Error::BridgeMutexPoisoned)?
             .map_err(|_| {
@@ -615,7 +605,7 @@ impl Bridge {
             .safe_lock(|s| s.channel_factory.get_extranonce_len())
             .map_err(|_| Error::BridgeMutexPoisoned)?;
 
-        // If future_job=true, this job is meant for a future SetNewPrevHash that the proxy
+        // If future_job=true, this job is meant for a future SetNewPrevHashOwned that the proxy
         // has yet to receive. Insert this new job into the job_mapper .
         if sv2_new_extended_mining_job.is_future() {
             self_
@@ -628,13 +618,13 @@ impl Bridge {
                 .map_err(|_| Error::BridgeMutexPoisoned)?;
             Ok(())
 
-        // If future_job=false, this job is meant for the current SetNewPrevHash.
+        // If future_job=false, this job is meant for the current SetNewPrevHashOwned.
         } else {
             let last_p_hash_option = self_
                 .safe_lock(|s| s.last_p_hash.clone())
                 .map_err(|_| Error::BridgeMutexPoisoned)?;
 
-            // last_p_hash is an Option<SetNewPrevHash> so we need to map to the correct error type to be handled
+            // last_p_hash is an Option<SetNewPrevHashOwned> so we need to map to the correct error type to be handled
             let last_p_hash = last_p_hash_option.ok_or(Error::RolesSv2Logic(
                 RolesLogicError::JobIsNotFutureButPrevHashNotPresent,
             ))?;
@@ -675,7 +665,7 @@ impl Bridge {
     fn handle_upstream_work(
         self_: Arc<Mutex<Self>>,
         mut receiver: tokio::sync::mpsc::Receiver<BridgeWork>,
-    ) -> Result<JoinHandle<()>, Error<'static>> {
+    ) -> Result<JoinHandle<()>, Error> {
         let tx_sv1_notify = self_
             .safe_lock(|s| s.tx_sv1_notify.clone())
             .map_err(|_| Error::BridgeMutexPoisoned)?;
@@ -683,8 +673,26 @@ impl Bridge {
         Ok(tokio::task::spawn(async move {
             while let Some(work) = receiver.recv().await {
                 match work {
+                    BridgeWork::SetGroupChannel(message) => {
+                        if self_
+                            .safe_lock(|bridge| {
+                                let channel_ids = message.channel_ids.into_inner();
+                                let message = roles_logic_sv2::mining_sv2::SetGroupChannel {
+                                    group_channel_id: message.group_channel_id,
+                                    channel_ids: channel_ids
+                                        .try_into()
+                                        .expect("Channel count was checked by the decoder"),
+                                };
+                                bridge.channel_factory.set_group_channel(&message);
+                            })
+                            .is_err()
+                        {
+                            ProxyState::update_translator_state(TranslatorState::Down);
+                            return;
+                        }
+                    }
                     BridgeWork::SetNewPrevHash(set_new_prev_hash) => {
-                        let mut dbg_prev_hash = set_new_prev_hash.prev_hash.to_vec();
+                        let mut dbg_prev_hash = set_new_prev_hash.prev_hash.as_bytes().to_vec();
                         dbg_prev_hash.reverse();
                         debug!(
                             "Received NewPrevHash {} for channel {} with job {}",
@@ -769,15 +777,22 @@ mod test {
             let b = Bridge::new(
                 tx_sv2_submit_shares_ext.clone(),
                 tx_sv1_notify,
-                extranonces,
+                extranonces.clone(),
                 Arc::new(Mutex::new(upstream_target.to_vec())),
-                1,
+                OpenExtendedMiningChannelSuccessOwned {
+                    request_id: 0,
+                    channel_id: 1,
+                    group_channel_id: 0,
+                    target: upstream_target.into(),
+                    extranonce_size: (extranonces.get_len() - extranonces.get_range0_len()) as u16,
+                    extranonce_prefix: extranonces.upstream_part().into_b032(),
+                },
             )
             .map_err(|_| ())?;
             Ok(b)
         }
 
-        pub fn create_sv1_submit(job_id: u32) -> Submit<'static> {
+        pub fn create_sv1_submit(job_id: u32) -> Submit {
             Submit {
                 user_name: "test_user".to_string(),
                 job_id: job_id.to_string(),
@@ -794,7 +809,7 @@ mod test {
             extranonce2_len: usize,
             ntime: u32,
             nonce: u32,
-        ) -> Submit<'static> {
+        ) -> Submit {
             Submit {
                 user_name: "test_user".to_string(),
                 job_id: job_id.to_string(),
@@ -808,7 +823,7 @@ mod test {
         }
     }
 
-    fn test_extended_job(job_id: u32) -> NewExtendedMiningJob<'static> {
+    fn test_extended_job(job_id: u32) -> NewExtendedMiningJobOwned {
         let out_id = bitcoin::hashes::sha256d::Hash::from_slice(&[0_u8; 32]).unwrap();
         let previous_output = bitcoin::OutPoint {
             txid: bitcoin::Txid::from_raw_hash(out_id),
@@ -827,20 +842,20 @@ mod test {
             output: vec![],
         };
         let tx = bitcoin::consensus::serialize(&tx);
-        NewExtendedMiningJob {
+        NewExtendedMiningJobOwned {
             channel_id: 1,
             job_id,
-            min_ntime: binary_sv2::Sv2Option::new(Some(TEST_NTIME)),
+            min_ntime: binary_sv2::Sv2OptionOwned::new(Some(TEST_NTIME)),
             version: 0,
             version_rolling_allowed: false,
-            merkle_path: vec![].into(),
+            merkle_path: vec![].try_into().expect("Empty merkle path"),
             coinbase_tx_prefix: tx[0..42].to_vec().try_into().unwrap(),
             coinbase_tx_suffix: tx[58..].to_vec().try_into().unwrap(),
         }
     }
 
     fn seed_bridge_job(bridge: &mut Bridge) {
-        let prev_hash = SetNewPrevHash {
+        let prev_hash = SetNewPrevHashOwned {
             channel_id: 1,
             job_id: TEST_JOB_ID,
             prev_hash: [3; 32].into(),
@@ -854,11 +869,97 @@ mod test {
             .unwrap();
     }
 
+    #[test]
+    fn miner_channels_do_not_expand_native_job_fanout() {
+        let bridge = test_utils::create_bridge(ExtendedExtranonce::new(0..6, 6..8, 8..16)).unwrap();
+        bridge
+            .safe_lock(|bridge| {
+                seed_bridge_job(bridge);
+                for _ in 0..64 {
+                    bridge.on_new_sv1_connection(1_000.).unwrap();
+                }
+                let messages = bridge
+                    .channel_factory
+                    .on_new_extended_mining_job(test_extended_job(1))
+                    .unwrap();
+                assert!(
+                    messages.len() <= 1,
+                    "SV1 miners receive one broadcast; native per-miner channel storage creates {} unused job copies",
+                    messages.len()
+                );
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn group_updates_preserve_order_and_reject_other_groups() {
+        let bridge = test_utils::create_bridge(ExtendedExtranonce::new(0..6, 6..8, 8..16)).unwrap();
+        let (work_tx, work_rx) = mpsc::channel(4);
+        let handler = Bridge::handle_upstream_work(bridge.clone(), work_rx).unwrap();
+        let group = roles_logic_sv2::mining_sv2::SetGroupChannelOwned {
+            group_channel_id: 42,
+            channel_ids: vec![1].try_into().unwrap(),
+        };
+        work_tx
+            .send(BridgeWork::SetGroupChannel(group))
+            .await
+            .unwrap();
+        let prev_hash = SetNewPrevHashOwned {
+            channel_id: 42,
+            job_id: TEST_JOB_ID,
+            prev_hash: [3; 32].into(),
+            min_ntime: TEST_NTIME,
+            nbits: 0x1d00ffff,
+        };
+        work_tx
+            .send(BridgeWork::SetNewPrevHash(prev_hash))
+            .await
+            .unwrap();
+        let mut job = test_extended_job(TEST_JOB_ID);
+        job.channel_id = 42;
+        work_tx
+            .send(BridgeWork::NewExtendedMiningJob {
+                job,
+                merge_mining_binding_id: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if bridge
+                    .safe_lock(|bridge| bridge.last_notify.is_some())
+                    .unwrap()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Group work must create a notification");
+        bridge
+            .safe_lock(|bridge| {
+                assert_eq!(
+                    bridge.channel_factory.upstream_channel().group_channel_id,
+                    42
+                );
+                let mut job = test_extended_job(TEST_JOB_ID + 1);
+                job.channel_id = 43;
+                assert!(matches!(
+                    bridge.channel_factory.on_new_extended_mining_job(job),
+                    Err(RolesLogicError::NotFoundChannelId)
+                ));
+            })
+            .unwrap();
+        handler.abort();
+        let _ = handler.await;
+    }
+
     #[tokio::test]
     async fn bound_job_without_notify_receivers_does_not_fail_the_bridge() {
         let extranonces = ExtendedExtranonce::new(0..6, 6..8, 8..16);
         let bridge = test_utils::create_bridge(extranonces).expect("bridge");
-        let prev_hash = SetNewPrevHash {
+        let prev_hash = SetNewPrevHashOwned {
             channel_id: 1,
             job_id: TEST_JOB_ID,
             prev_hash: [3; 32].into(),
@@ -966,9 +1067,9 @@ mod test {
                 let tx = bitcoin::consensus::serialize(&tx);
                 let _down = bridge
                     .channel_factory
-                    .add_standard_channel(0, 10_000_000_000.0, true, 1)
+                    .open_channel(0, 10_000_000_000.0)
                     .unwrap();
-                let prev_hash = SetNewPrevHash {
+                let prev_hash = SetNewPrevHashOwned {
                     channel_id,
                     job_id: 0,
                     prev_hash: [
@@ -984,13 +1085,13 @@ mod test {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_secs() as u32;
-                let new_mining_job = NewExtendedMiningJob {
+                let new_mining_job = NewExtendedMiningJobOwned {
                     channel_id,
                     job_id: 0,
-                    min_ntime: binary_sv2::Sv2Option::new(Some(now)),
+                    min_ntime: binary_sv2::Sv2OptionOwned::new(Some(now)),
                     version: 0b0000_0000_0000_0000,
                     version_rolling_allowed: false,
-                    merkle_path: vec![].into(),
+                    merkle_path: vec![].try_into().expect("Empty merkle path"),
                     coinbase_tx_prefix: tx[0..42].to_vec().try_into().unwrap(),
                     coinbase_tx_suffix: tx[58..].to_vec().try_into().unwrap(),
                 };

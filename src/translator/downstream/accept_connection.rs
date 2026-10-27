@@ -29,7 +29,7 @@ pub async fn start_accept_connection(
     mut downstreams: Receiver<crate::DownstreamConnection>,
     stats_sender: crate::api::stats::StatsSender,
     tx_update_token: Sender<String>,
-) -> Result<(), Error<'static>> {
+) -> Result<(), Error> {
     let handle = {
         let task_manager = task_manager.clone();
         task::spawn(async move {

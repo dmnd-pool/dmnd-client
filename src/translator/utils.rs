@@ -11,10 +11,9 @@ use crate::{
     share_log_enabled,
     translator::error::Error,
 };
-use binary_sv2::Sv2DataType;
 use bitcoin::{
     block::{Header, Version},
-    hashes::{sha256d, Hash as BHash},
+    hashes::{sha256d, Hash as BHash, HashEngine},
     hex::DisplayHex,
     BlockHash, CompactTarget,
 };
@@ -69,7 +68,7 @@ fn reserve_share_slot(
 fn maybe_request_upstream_rate_limit_retarget(
     downstream: &Arc<Mutex<Downstream>>,
     now: tokio::time::Instant,
-) -> crate::translator::error::ProxyResult<'static, ()> {
+) -> crate::translator::error::ProxyResult<()> {
     let should_update = LAST_UPSTREAM_RATE_LIMIT_RETARGET
         .safe_lock(|last_update| {
             let should_update = last_update.is_none_or(|last_update| {
@@ -149,7 +148,7 @@ pub async fn check_share_rate_limit(downstream: Arc<Mutex<Downstream>>) {
 }
 
 /// Reserves one upstream-share slot in the rolling rate-limit window.
-pub fn allow_submit_share() -> crate::translator::error::ProxyResult<'static, bool> {
+pub fn allow_submit_share() -> crate::translator::error::ProxyResult<bool> {
     if Configuration::difficulty_updates_disabled() {
         return Ok(true);
     }
@@ -173,8 +172,8 @@ pub fn allow_submit_share() -> crate::translator::error::ProxyResult<'static, bo
 }
 
 pub fn validate_share(
-    request: &client_to_server::Submit<'static>,
-    job: &Notify<'static>,
+    request: &client_to_server::Submit,
+    job: &Notify,
     difficulty: f32,
     extranonce1: &[u8],
     version_rolling_mask: Option<sv1_api::utils::HexU32Be>,
@@ -186,24 +185,7 @@ pub fn validate_share(
         );
     }
 
-    let prev_hash_vec: Vec<u8> = job.prev_hash.clone().into();
-    let prev_hash = match binary_sv2::U256::from_vec_(prev_hash_vec) {
-        Ok(hash) => hash,
-        Err(e) => {
-            error!("Share rejected: Invalid previous hash: {:?}", e);
-            return false;
-        }
-    };
-    let mut merkle_branch = Vec::new();
-    for branch in &job.merkle_branch {
-        merkle_branch.push(branch.0.to_vec());
-    }
-
-    let mut extranonce = Vec::new();
-    extranonce.extend_from_slice(extranonce1);
-    extranonce.extend_from_slice(request.extra_nonce2.0.as_ref());
-    let extranonce: &[u8] = extranonce.as_ref();
-
+    let prev_hash = BlockHash::from_byte_array(*job.prev_hash.0.as_array());
     let version = effective_version(
         job.version.0,
         request.version_bits.as_ref(),
@@ -214,10 +196,10 @@ pub fn validate_share(
         request.nonce.0,
         version,
         request.time.0,
-        extranonce,
+        extranonce1,
+        request.extra_nonce2.0.as_bytes(),
         job,
-        roles_logic_sv2::utils::u256_to_block_hash(prev_hash),
-        merkle_branch,
+        prev_hash,
     );
 
     hash.reverse(); //convert to little-endian
@@ -254,14 +236,12 @@ pub(crate) fn effective_version(
 pub fn submit_error_to_rejection_reason(error_code: &str) -> RejectionReason {
     match error_code {
         code if code
-            == roles_logic_sv2::mining_sv2::SubmitSharesError::difficulty_too_low_error_code() =>
+            == roles_logic_sv2::mining_sv2::ERROR_CODE_SUBMIT_SHARES_DIFFICULTY_TOO_LOW =>
         {
             RejectionReason::DifficultyMismatch
         }
-        code if code
-            == roles_logic_sv2::mining_sv2::SubmitSharesError::stale_share_error_code()
-            || code
-                == roles_logic_sv2::mining_sv2::SubmitSharesError::invalid_job_id_error_code() =>
+        code if code == roles_logic_sv2::mining_sv2::ERROR_CODE_SUBMIT_SHARES_STALE_SHARE
+            || code == roles_logic_sv2::mining_sv2::ERROR_CODE_SUBMIT_SHARES_INVALID_JOB_ID =>
         {
             RejectionReason::JobIdNotFound
         }
@@ -273,31 +253,28 @@ pub fn get_hash(
     nonce: u32,
     version: u32,
     ntime: u32,
-    extranonce: &[u8],
+    extranonce1: &[u8],
+    extranonce2: &[u8],
     job: &Notify,
     prev_hash: BlockHash,
-    merkle_path: Vec<Vec<u8>>,
 ) -> [u8; 32] {
-    // Construct coinbase
-    let mut coinbase = Vec::new();
-    coinbase.extend_from_slice(job.coin_base1.as_ref());
-    coinbase.extend_from_slice(extranonce);
-    coinbase.extend_from_slice(job.coin_base2.as_ref());
+    let mut coinbase = sha256d::Hash::engine();
+    coinbase.input(job.coin_base1.as_ref());
+    coinbase.input(extranonce1);
+    coinbase.input(extranonce2);
+    coinbase.input(job.coin_base2.as_ref());
+    let mut merkle_root = sha256d::Hash::from_engine(coinbase).to_byte_array();
 
-    // Calculate the Merkle root
-    let coinbase_hash = <sha256d::Hash as bitcoin::hashes::Hash>::hash(&coinbase);
-    let mut merkle_root = coinbase_hash.to_byte_array();
-
-    for path in merkle_path {
-        let mut combined = Vec::with_capacity(64);
-        combined.extend_from_slice(&merkle_root);
-        combined.extend_from_slice(path.as_ref());
-        merkle_root = <sha256d::Hash as bitcoin::hashes::Hash>::hash(&combined).to_byte_array();
+    for path in &job.merkle_branch {
+        let mut combined = [0; 64];
+        combined[..32].copy_from_slice(&merkle_root);
+        combined[32..].copy_from_slice(path.0.as_bytes());
+        merkle_root = sha256d::Hash::hash(&combined).to_byte_array();
     }
 
     // Construct the block header
     let header = Header {
-        version: Version::from_consensus(version.try_into().unwrap()),
+        version: Version::from_consensus(version as i32),
         prev_blockhash: prev_hash,
         merkle_root: bitcoin::TxMerkleNode::from_byte_array(merkle_root),
         time: ntime,
@@ -372,6 +349,90 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc, Barrier, Mutex as StdMutex,
     };
+
+    fn share_fixture() -> Notify {
+        use sv1_api::utils::{HexU32Be, MerkleNode, PrevHash};
+        Notify {
+            job_id: "1".to_string(),
+            prev_hash: PrevHash([3; 32].into()),
+            coin_base1: (0u8..48).collect::<Vec<_>>().into(),
+            coin_base2: vec![9; 32].into(),
+            merkle_branch: (0..3).map(|byte| MerkleNode([byte; 32].into())).collect(),
+            version: HexU32Be(0x20000000),
+            bits: HexU32Be(0x1d00ffff),
+            time: HexU32Be(1_700_000_000),
+            clean_jobs: true,
+        }
+    }
+
+    #[test]
+    fn share_hash_matches_wire_fixture() {
+        let job = share_fixture();
+        let hash = get_hash(
+            12345,
+            job.version.0,
+            job.time.0,
+            &[7; 6],
+            &[8; 10],
+            &job,
+            BlockHash::from_byte_array([3; 32]),
+        );
+        assert_eq!(
+            hash,
+            [
+                132, 101, 194, 171, 250, 154, 199, 154, 118, 18, 54, 17, 180, 12, 151, 211, 74,
+                182, 109, 23, 83, 255, 99, 143, 101, 15, 3, 153, 43, 140, 75, 67
+            ]
+        );
+    }
+
+    #[test]
+    fn share_hash_preserves_high_version_bit() {
+        let job = share_fixture();
+        let hash = get_hash(
+            12345,
+            0xa0000000,
+            job.time.0,
+            &[7; 6],
+            &[8; 10],
+            &job,
+            BlockHash::from_byte_array([3; 32]),
+        );
+        assert_eq!(
+            hash,
+            [
+                224, 98, 143, 251, 252, 118, 102, 82, 228, 247, 96, 81, 199, 162, 118, 158, 155,
+                50, 69, 121, 231, 159, 253, 115, 185, 226, 87, 74, 94, 237, 234, 207
+            ]
+        );
+    }
+
+    #[test]
+    fn share_validation_does_not_allocate() {
+        let job = share_fixture();
+        let request = client_to_server::Submit {
+            user_name: "worker.1".to_string(),
+            job_id: job.job_id.clone(),
+            extra_nonce2: vec![8; 10].try_into().unwrap(),
+            time: job.time.clone(),
+            nonce: sv1_api::utils::HexU32Be(0),
+            version_bits: None,
+            id: 1,
+        };
+        tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+            assert!(validate_share(&request, &job, 1e-9, &[7; 6], None));
+            let count = crate::test_alloc::allocations(|| {
+                assert!(validate_share(
+                    std::hint::black_box(&request),
+                    &job,
+                    1e-9,
+                    &[7; 6],
+                    None
+                ));
+            });
+            assert_eq!(count, 0);
+        });
+    }
 
     static RATE_LIMIT_TEST_MUTEX: StdMutex<()> = StdMutex::new(());
 

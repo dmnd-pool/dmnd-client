@@ -5,12 +5,12 @@ use stratum_apps as _;
 #[cfg(test)]
 use tempfile as _;
 
-#[cfg(all(not(target_os = "windows"), feature = "jemalloc"))]
+#[cfg(all(not(test), not(target_os = "windows"), feature = "jemalloc"))]
 use jemallocator::Jemalloc;
 use router::Router;
 use tokio::sync::watch;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
-#[cfg(all(not(target_os = "windows"), feature = "jemalloc"))]
+#[cfg(all(not(test), not(target_os = "windows"), feature = "jemalloc"))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
@@ -34,18 +34,24 @@ mod dashboard;
 mod debug_timing;
 mod ingress;
 pub use config::Configuration;
+#[cfg(test)]
+mod binary_tests;
 mod block_templates;
 pub mod jd_client;
 mod merge_mining;
 mod minin_pool_connection;
 mod monitor;
 pub mod prioritized_transactions;
+#[cfg(test)]
+mod protocol_tests;
 mod proxy_protocol;
 mod proxy_state;
 mod router;
 mod share_accounter;
 mod shared;
 mod shutdown;
+#[cfg(test)]
+mod test_alloc;
 mod translator;
 
 const TRANSLATOR_BUFFER_SIZE: usize = 128;
@@ -365,6 +371,15 @@ async fn monitor(
             drop(abort_handles);
             return Reconnect::NoUpstream;
         }
+        if jd_client::take_coinbase_reservation_restart_request() {
+            info!("Pool coinbase output limits increased. Reinitializing proxy...");
+            drop(abort_handles);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            return router
+                .current_pool
+                .map(Reconnect::NewUpstream)
+                .unwrap_or(Reconnect::NoUpstream);
+        }
         if Configuration::monitor() {
             // Check if a better upstream exist every 100 seconds
             if should_check_upstreams_latency == 10 * 100 {
@@ -427,7 +442,48 @@ pub enum Reconnect {
 
 #[cfg(test)]
 mod tests {
-    use super::supports_transaction_prioritization;
+    use super::*;
+
+    #[tokio::test]
+    async fn coinbase_capacity_restart_drops_all_tasks_and_keeps_current_pool() {
+        let pool = "127.0.0.1:34254".parse().unwrap();
+        let mut router = Router::new(vec![pool], MAIN_AUTH_PUB_KEY.parse().unwrap(), None, None);
+        router.current_pool = Some(pool);
+        let (old_queue, mut receiver) = channel::<()>(1);
+        let child = tokio::spawn(async move {
+            let _old_queue = old_queue;
+            std::future::pending::<()>().await;
+        });
+        let manager = tokio::spawn(async move {
+            let _child = AbortOnDrop::from(child);
+            std::future::pending::<()>().await;
+        });
+        let finished = tokio::spawn(async {});
+        let finished_abort = AbortOnDrop::from(finished);
+        while !finished_abort.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        jd_client::request_coinbase_reservation_restart();
+        let result = monitor(
+            &mut router,
+            vec![
+                (manager.into(), "jdc".to_string()),
+                (finished_abort, "finished".to_string()),
+            ],
+            Duration::ZERO,
+            shutdown,
+        )
+        .await;
+        assert!(matches!(result, Reconnect::NewUpstream(address) if address == pool));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!jd_client::take_coinbase_reservation_restart_request());
+    }
 
     #[test]
     fn transaction_prioritization_is_supported_in_production_and_local() {

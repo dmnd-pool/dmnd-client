@@ -7,17 +7,18 @@ use tokio::time::{timeout, Duration};
 
 use super::{job_declarator::JobDeclarator, mining_upstream::Upstream as UpstreamMiningNode};
 use crate::jd_client::error::Error as JdClientError;
-use binary_sv2::B064K;
+use binary_sv2::B064KOwned;
 use roles_logic_sv2::{
     channel_logic::channel_factory::{OnNewShare, PoolChannelFactory, Share},
     common_properties::{CommonDownstreamData, IsDownstream, IsMiningDownstream},
     errors::Error,
-    handlers::mining::{ParseDownstreamMiningMessages, SendTo, SupportedChannelTypes},
-    job_creator::{tx_outputs_to_costum_scripts, JobsCreators},
+    handlers::mining::SendTo,
+    job_creator::{decode_outputs, JobsCreators},
+    mining::ExtendedExtranonce,
     mining_sv2::*,
-    parsers::{Mining, MiningDeviceMessages},
+    parsers::{MiningDeviceMessagesOwned, MiningOwned},
     template_distribution_sv2::{
-        NewTemplate, SetNewPrevHash as TemplateSetNewPrevHash, SubmitSolution,
+        NewTemplateOwned, SetNewPrevHashOwned as TemplateSetNewPrevHashOwned, SubmitSolutionOwned,
     },
     utils::Mutex,
 };
@@ -28,11 +29,11 @@ use tokio::{
 };
 use tracing::{debug, error, warn};
 
-use codec_sv2::{StandardEitherFrame, StandardSv2Frame};
+use demand_sv2_connection::{StandardEitherFrame, StandardSv2Frame};
 
 use bitcoin::{consensus::Decodable, TxOut};
 
-pub type Message = MiningDeviceMessages<'static>;
+pub type Message = MiningDeviceMessagesOwned;
 pub type StdFrame = StandardSv2Frame<Message>;
 pub type EitherFrame = StandardEitherFrame<Message>;
 
@@ -41,8 +42,8 @@ const MAX_SUPPORTED_COINBASE_OUTPUTS: usize = 252;
 #[derive(Clone, Debug)]
 pub(crate) struct DownstreamJob {
     pub(crate) local_job_id: u32,
-    pub(crate) coinbase_tx_prefix: B064K<'static>,
-    pub(crate) coinbase_tx_suffix: B064K<'static>,
+    pub(crate) coinbase_tx_prefix: B064KOwned,
+    pub(crate) coinbase_tx_suffix: B064KOwned,
 }
 
 /// 1 to 1 connection with a downstream node that implement the mining (sub)protocol can be either
@@ -51,13 +52,14 @@ pub(crate) struct DownstreamJob {
 /// downstream do no make much sense.
 #[derive(Debug)]
 pub struct DownstreamMiningNode {
-    sender: TSender<Mining<'static>>,
+    sender: TSender<MiningOwned>,
     pub status: DownstreamMiningNodeStatus,
     pub prev_job_id: Option<u32>,
-    solution_sender: TSender<SubmitSolution<'static>>,
+    solution_sender: TSender<SubmitSolutionOwned>,
     withhold: bool,
     miner_coinbase_output: Vec<TxOut>,
     pub jd: Option<Arc<Mutex<JobDeclarator>>>,
+    pending_tasks: tokio::task::JoinSet<()>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -125,23 +127,16 @@ use std::sync::Arc;
 
 impl DownstreamMiningNode {
     pub(crate) fn decode_pool_coinbase_outputs(
-        mut encoded_outputs: &[u8],
+        encoded_outputs: &[u8],
     ) -> Result<Vec<TxOut>, JdClientError> {
-        let mut outputs = Vec::new();
-        while !encoded_outputs.is_empty() {
-            outputs.push(
-                TxOut::consensus_decode(&mut encoded_outputs)
-                    .map_err(|_| JdClientError::Unrecoverable)?,
-            );
-        }
-        Ok(outputs)
+        decode_outputs(encoded_outputs).map_err(JdClientError::RolesSv2Logic)
     }
 
     pub(crate) fn preview_template_job(
         self_mutex: &Arc<Mutex<Self>>,
-        template: NewTemplate<'static>,
+        template: NewTemplateOwned,
         pool_output: &[u8],
-    ) -> Result<(B064K<'static>, B064K<'static>), JdClientError> {
+    ) -> Result<(B064KOwned, B064KOwned), JdClientError> {
         let extranonce_len = self_mutex
             .safe_lock(|state| {
                 state
@@ -156,10 +151,10 @@ impl DownstreamMiningNode {
     }
 
     fn preview_template_job_with_extranonce(
-        mut template: NewTemplate<'static>,
+        mut template: NewTemplateOwned,
         pool_outputs: Vec<TxOut>,
         extranonce_len: usize,
-    ) -> Result<(B064K<'static>, B064K<'static>), JdClientError> {
+    ) -> Result<(B064KOwned, B064KOwned), JdClientError> {
         if pool_outputs.is_empty() {
             return Err(JdClientError::Unrecoverable);
         }
@@ -176,13 +171,23 @@ impl DownstreamMiningNode {
         Ok((job.coinbase_tx_prefix, job.coinbase_tx_suffix))
     }
 
+    fn decode_raw_template_outputs(mut bytes: &[u8]) -> Result<Vec<TxOut>, JdClientError> {
+        let mut outputs = Vec::new();
+        while !bytes.is_empty() {
+            outputs.push(
+                TxOut::consensus_decode(&mut bytes).map_err(|_| JdClientError::Unrecoverable)?,
+            );
+        }
+        Ok(outputs)
+    }
+
     fn validate_final_coinbase_output_count(
-        template: &NewTemplate<'static>,
+        template: &NewTemplateOwned,
         additional_output_count: usize,
     ) -> Result<(), JdClientError> {
         // JobsCreators uses the serialized outputs, rather than trusting the declared count.
         let template_output_count =
-            tx_outputs_to_costum_scripts(template.coinbase_tx_outputs.as_ref()).len();
+            Self::decode_raw_template_outputs(template.coinbase_tx_outputs.as_bytes())?.len();
         let final_output_count = template_output_count
             .checked_add(additional_output_count)
             .ok_or(JdClientError::UnsupportedCoinbaseOutputCount {
@@ -200,9 +205,9 @@ impl DownstreamMiningNode {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        sender: TSender<Mining<'static>>,
+        sender: TSender<MiningOwned>,
         upstream: Option<Arc<Mutex<UpstreamMiningNode>>>,
-        solution_sender: TSender<SubmitSolution<'static>>,
+        solution_sender: TSender<SubmitSolutionOwned>,
         withhold: bool,
         miner_coinbase_output: Vec<TxOut>,
         jd: Option<Arc<Mutex<JobDeclarator>>>,
@@ -219,13 +224,23 @@ impl DownstreamMiningNode {
             withhold,
             miner_coinbase_output,
             jd,
+            pending_tasks: tokio::task::JoinSet::new(),
         }
+    }
+
+    fn spawn_pending_task(&mut self, task: impl std::future::Future<Output = ()> + Send + 'static) {
+        while self.pending_tasks.try_join_next().is_some() {}
+        self.pending_tasks.spawn(task);
+    }
+
+    pub(super) fn abort_pending_tasks(&mut self) {
+        self.pending_tasks.abort_all();
     }
 
     /// Strat listen for downstream mining node. Return as soon as one downstream connect.
     pub async fn start(
         self_mutex: Arc<Mutex<Self>>,
-        mut receiver: TReceiver<Mining<'static>>,
+        mut receiver: TReceiver<MiningOwned>,
     ) -> Result<AbortOnDrop, JdClientError> {
         let task_manager = TaskManager::initialize();
         let abortable = match task_manager
@@ -303,16 +318,12 @@ impl DownstreamMiningNode {
     /// Parse the received message and relay it to the right upstream
     pub async fn next(
         self_mutex: &Arc<Mutex<Self>>,
-        incoming: Mining<'static>,
+        incoming: MiningOwned,
     ) -> Result<(), JdClientError> {
-        let routing_logic = roles_logic_sv2::routing_logic::MiningRoutingLogic::None;
-
-        let next_message_to_send =
-            ParseDownstreamMiningMessages::handle_message_mining_deserialized(
-                self_mutex.clone(),
-                Ok(incoming.clone()),
-                routing_logic,
-            );
+        let next_message_to_send = self_mutex
+            .safe_lock(|state| state.handle_owned_message(&incoming))
+            .map_err(|_| Error::DownstreamDown)
+            .and_then(|result| result);
         Self::match_send_to(self_mutex.clone(), next_message_to_send, Some(incoming)).await
         //Propgate error, caller will restart proxy
     }
@@ -321,7 +332,7 @@ impl DownstreamMiningNode {
     async fn match_send_to(
         self_mutex: Arc<Mutex<Self>>,
         next_message_to_send: Result<SendTo<UpstreamMiningNode>, Error>,
-        incoming: Option<Mining<'static>>,
+        incoming: Option<MiningOwned>,
     ) -> Result<(), JdClientError> {
         match next_message_to_send {
             Ok(SendTo::RelaySameMessageToRemote(upstream_mutex)) => {
@@ -335,10 +346,11 @@ impl DownstreamMiningNode {
                 };
                 UpstreamMiningNode::send(&upstream_mutex, incoming).await?;
             }
-            Ok(SendTo::RelayNewMessage(Mining::SubmitSharesExtended(mut share))) => {
-                tokio::task::spawn(async move {
+            Ok(SendTo::RelayNewMessage(MiningOwned::SubmitSharesExtended(mut share))) => {
+                let task_state = self_mutex.clone();
+                self_mutex.safe_lock(|state| state.spawn_pending_task(async move {
                     let local_job_id = share.job_id;
-                    let upstream_mutex = match self_mutex
+                    let upstream_mutex = match task_state
                         .safe_lock(|state| state.status.get_upstream())
                     {
                         Ok(Some(upstream)) => upstream,
@@ -363,7 +375,7 @@ impl DownstreamMiningNode {
                     if let Ok(Ok(job_id)) = timeout(Duration::from_secs(20), job_id_future).await {
                         share.job_id = job_id;
                         debug!("Relaying share upstream with pool job_id {}", job_id);
-                        let message = Mining::SubmitSharesExtended(share);
+                        let message = MiningOwned::SubmitSharesExtended(share);
                         if let Err(error) = UpstreamMiningNode::send(&upstream_mutex, message).await
                         {
                             error!(%error, "Failed to relay share upstream");
@@ -372,7 +384,8 @@ impl DownstreamMiningNode {
                     } else {
                         error!(local_job_id, "Timeout getting pool job id; discard share");
                     }
-                });
+                }))
+                .map_err(|_| JdClientError::JdClientDownstreamMutexCorrupted)?;
             }
             Ok(SendTo::RelayNewMessage(message)) => {
                 let upstream_mutex = self_mutex
@@ -410,7 +423,7 @@ impl DownstreamMiningNode {
     /// Send a message downstream
     pub async fn send(
         self_mutex: &Arc<Mutex<Self>>,
-        message: Mining<'static>,
+        message: MiningOwned,
     ) -> Result<(), JdClientError> {
         let sender = self_mutex
             .safe_lock(|self_| self_.sender.clone())
@@ -448,7 +461,7 @@ impl DownstreamMiningNode {
 
     pub(crate) fn apply_difficulty_commitment(
         self_mutex: &Arc<Mutex<Self>>,
-        template: &mut NewTemplate<'static>,
+        template: &mut NewTemplateOwned,
     ) -> Result<(), JdClientError> {
         let upstream = self_mutex
             .safe_lock(|state| match &state.status {
@@ -464,7 +477,7 @@ impl DownstreamMiningNode {
 
     pub(crate) async fn on_new_template(
         self_mutex: &Arc<Mutex<Self>>,
-        mut new_template: NewTemplate<'static>,
+        mut new_template: NewTemplateOwned,
         pool_output: &[u8],
         template_generation: Option<u64>,
     ) -> Result<Option<DownstreamJob>, JdClientError> {
@@ -489,7 +502,7 @@ impl DownstreamMiningNode {
         // map and send them downstream.
         let messages = to_send.into_values().collect::<Vec<_>>();
         let downstream_job = messages.iter().find_map(|message| {
-            if let Mining::NewExtendedMiningJob(job) = message {
+            if let MiningOwned::NewExtendedMiningJob(job) = message {
                 Some(DownstreamJob {
                     local_job_id: job.job_id,
                     coinbase_tx_prefix: job.coinbase_tx_prefix.clone(),
@@ -506,8 +519,8 @@ impl DownstreamMiningNode {
                     crate::merge_mining::global().bind_job_generation(
                         job.local_job_id,
                         generation,
-                        job.coinbase_tx_prefix.to_vec(),
-                        job.coinbase_tx_suffix.to_vec(),
+                        job.coinbase_tx_prefix.as_bytes().to_vec(),
+                        job.coinbase_tx_suffix.as_bytes().to_vec(),
                     )
                 });
                 if !bound {
@@ -529,7 +542,7 @@ impl DownstreamMiningNode {
 
     pub async fn on_set_new_prev_hash(
         self_mutex: &Arc<Mutex<Self>>,
-        new_prev_hash: TemplateSetNewPrevHash<'static>,
+        new_prev_hash: TemplateSetNewPrevHashOwned,
     ) -> Result<(), JdClientError> {
         if !self_mutex
             .safe_lock(|s| s.status.have_channel())
@@ -558,14 +571,14 @@ impl DownstreamMiningNode {
             1 => channel_ids[0],
             _ => unreachable!(),
         };
-        let to_send = SetNewPrevHash {
+        let to_send = SetNewPrevHashOwned {
             channel_id,
             job_id,
             prev_hash: new_prev_hash.prev_hash,
             min_ntime: new_prev_hash.header_timestamp,
             nbits: new_prev_hash.n_bits,
         };
-        let message = Mining::SetNewPrevHash(to_send);
+        let message = MiningOwned::SetNewPrevHash(to_send);
         Self::send(self_mutex, message)
             .await
             .map_err(|_| Error::DownstreamDown)?; // Caller will restart proxy
@@ -573,7 +586,6 @@ impl DownstreamMiningNode {
     }
 }
 
-use roles_logic_sv2::selectors::NullDownstreamMiningSelector;
 impl IsDownstream for DownstreamMiningNode {
     fn get_downstream_mining_data(&self) -> CommonDownstreamData {
         CommonDownstreamData {
@@ -584,33 +596,26 @@ impl IsDownstream for DownstreamMiningNode {
     }
 }
 /// It impl UpstreamMining cause the proxy act as an upstream node for the DownstreamMiningNode
-impl
-    ParseDownstreamMiningMessages<
-        UpstreamMiningNode,
-        NullDownstreamMiningSelector,
-        roles_logic_sv2::routing_logic::NoRouting,
-    > for DownstreamMiningNode
-{
-    fn get_channel_type(&self) -> SupportedChannelTypes {
-        SupportedChannelTypes::Extended
-    }
-
-    fn is_work_selection_enabled(&self) -> bool {
-        true
-    }
-
-    fn handle_open_standard_mining_channel(
+impl DownstreamMiningNode {
+    fn handle_owned_message(
         &mut self,
-        _: OpenStandardMiningChannel,
-        _: Option<Arc<Mutex<UpstreamMiningNode>>>,
+        message: &MiningOwned,
     ) -> Result<SendTo<UpstreamMiningNode>, Error> {
-        warn!("Ignoring OpenStandardMiningChannel");
-        Ok(SendTo::None(None))
+        use roles_logic_sv2::parsers::IsSv2Message;
+        match message {
+            MiningOwned::OpenExtendedMiningChannel(m) => {
+                self.handle_open_extended_mining_channel(m.clone())
+            }
+            MiningOwned::UpdateChannel(m) => self.handle_update_channel(m.clone()),
+            MiningOwned::SubmitSharesExtended(m) => self.handle_submit_shares_extended(m.clone()),
+            MiningOwned::SetCustomMiningJob(m) => self.handle_set_custom_mining_job(m.clone()),
+            _ => Err(Error::UnexpectedMessage(message.message_type())),
+        }
     }
 
     fn handle_open_extended_mining_channel(
         &mut self,
-        m: OpenExtendedMiningChannel,
+        m: roles_logic_sv2::mining_sv2::OpenExtendedMiningChannelOwned,
     ) -> Result<SendTo<UpstreamMiningNode>, Error> {
         if !self.status.is_solo_miner() {
             // Safe unwrap alreay checked if it cointains upstream with is_solo_miner
@@ -672,7 +677,7 @@ impl
 
     fn handle_update_channel(
         &mut self,
-        _: UpdateChannel,
+        _: roles_logic_sv2::mining_sv2::UpdateChannelOwned,
     ) -> Result<SendTo<UpstreamMiningNode>, Error> {
         if !self.status.is_solo_miner() {
             // Safe unwrap alreay checked if it cointains upstream with is_solo_miner
@@ -687,32 +692,25 @@ impl
         }
     }
 
-    fn handle_submit_shares_standard(
-        &mut self,
-        _: SubmitSharesStandard,
-    ) -> Result<SendTo<UpstreamMiningNode>, Error> {
-        panic!("Impossible message from downstream");
-    }
-
     fn handle_submit_shares_extended(
         &mut self,
-        m: SubmitSharesExtended,
+        m: roles_logic_sv2::mining_sv2::SubmitSharesExtendedOwned,
     ) -> Result<SendTo<UpstreamMiningNode>, Error> {
         match self
             .status
             .get_channel()
             .map_err(|_| Error::NotFoundChannelId)?
-            .on_submit_shares_extended(m.clone())?
+            .on_submit_shares_extended(m)?
         {
             OnNewShare::SendErrorDownstream(s) => {
                 error!("Share do not meet downstream target");
-                Ok(SendTo::Respond(Mining::SubmitSharesError(s)))
+                Ok(SendTo::Respond(MiningOwned::SubmitSharesError(s)))
             }
             OnNewShare::SendSubmitShareUpstream((m, Some(_template_id))) => {
                 if !self.status.is_solo_miner() {
                     match m {
                         Share::Extended(share) => {
-                            let for_upstream = Mining::SubmitSharesExtended(share);
+                            let for_upstream = MiningOwned::SubmitSharesExtended(share);
                             Ok(SendTo::RelayNewMessage(for_upstream))
                         }
                         // We are in an extended channel shares are extended
@@ -732,14 +730,14 @@ impl
                 match share {
                     Share::Extended(share) => {
                         let solution_sender = self.solution_sender.clone();
-                        let solution = SubmitSolution {
+                        let solution = SubmitSolutionOwned {
                             template_id,
                             version: share.version,
                             header_timestamp: share.ntime,
                             header_nonce: share.nonce,
                             coinbase_tx: coinbase.try_into()?,
                         };
-                        tokio::spawn(async move {
+                        self.spawn_pending_task(async move {
                             if solution_sender.send(solution).await.is_err() {
                                 error!("Downstream channel closed, couldn't send solution");
                             }
@@ -749,9 +747,7 @@ impl
                                 let jd = self.jd.clone();
                                 let mut share = share.clone();
                                 share.extranonce = extranonce.try_into()?;
-                                // This do not need to be put in a task manager it always return
-                                // fastly
-                                tokio::task::spawn(async move {
+                                self.spawn_pending_task(async move {
                                     if let Some(jd) = jd {
                                         if let Err(e) = JobDeclarator::on_solution(&jd, share).await
                                         {
@@ -766,7 +762,7 @@ impl
 
                         // Safe unwrap alreay checked if it cointains upstream with is_solo_miner
                         if !self.withhold && !self.status.is_solo_miner() {
-                            let for_upstream = Mining::SubmitSharesExtended(share);
+                            let for_upstream = MiningOwned::SubmitSharesExtended(share);
                             Ok(SendTo::RelayNewMessage(for_upstream))
                         } else {
                             Ok(SendTo::None(None))
@@ -785,7 +781,7 @@ impl
 
     fn handle_set_custom_mining_job(
         &mut self,
-        _: SetCustomMiningJob,
+        _: roles_logic_sv2::mining_sv2::SetCustomMiningJobOwned,
     ) -> Result<SendTo<UpstreamMiningNode>, Error> {
         warn!("Ignoring SetCustomMiningJob");
         Ok(SendTo::None(None))
@@ -796,6 +792,65 @@ impl IsMiningDownstream for DownstreamMiningNode {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pending_share_relay_stops_when_jd_session_is_aborted() {
+        let manager = crate::jd_client::task_manager::TaskManager::initialize();
+        let abortable = manager.safe_lock(|manager| manager.get_aborter()).unwrap();
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let upstream = UpstreamMiningNode::new(8, sender).await.unwrap();
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let (solutions, _receiver) = tokio::sync::mpsc::channel(1);
+        let downstream = Arc::new(Mutex::new(DownstreamMiningNode::new(
+            sender,
+            Some(upstream.clone()),
+            solutions,
+            false,
+            vec![],
+            None,
+        )));
+        upstream
+            .safe_lock(|upstream| upstream.downstream = Some(downstream.clone()))
+            .unwrap();
+        crate::jd_client::task_manager::TaskManager::add_mining_session(
+            manager.clone(),
+            upstream.clone(),
+        )
+        .await
+        .unwrap();
+        DownstreamMiningNode::match_send_to(
+            downstream.clone(),
+            Ok(SendTo::RelayNewMessage(MiningOwned::SubmitSharesExtended(
+                SubmitSharesExtendedOwned {
+                    channel_id: 1,
+                    sequence_number: 1,
+                    job_id: 999,
+                    nonce: 0,
+                    ntime: 0,
+                    version: 0,
+                    extranonce: vec![0; 8].try_into().unwrap(),
+                },
+            ))),
+            None,
+        )
+        .await
+        .unwrap();
+        let old_downstream = Arc::downgrade(&downstream);
+        drop(downstream);
+        drop(upstream);
+        drop(abortable);
+        drop(manager);
+        let released = tokio::time::timeout(Duration::from_secs(1), async {
+            while old_downstream.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            released.is_ok(),
+            "old share relay survives session shutdown"
+        );
+    }
     use bitcoin::{consensus::serialize, script::PushBytesBuf, Amount, ScriptBuf};
 
     #[test]
@@ -811,7 +866,7 @@ mod tests {
             None,
         )));
         let mut template = template_with_outputs(1, 1);
-        let outputs = template.coinbase_tx_outputs.to_vec();
+        let outputs = template.coinbase_tx_outputs.as_bytes().to_vec();
 
         DownstreamMiningNode::apply_difficulty_commitment(&downstream, &mut template)
             .expect("solo mining does not require a difficulty commitment");
@@ -822,7 +877,6 @@ mod tests {
 
     #[tokio::test]
     async fn first_template_waits_before_adding_difficulty_commitment() {
-        use roles_logic_sv2::handlers::mining::ParseUpstreamMiningMessages;
         let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
         let (solution_sender, _solutions) = tokio::sync::mpsc::channel(8);
         let (upstream_sender, _upstream_receiver) = tokio::sync::mpsc::channel(8);
@@ -837,6 +891,7 @@ mod tests {
             withhold: false,
             miner_coinbase_output: vec![],
             jd: None,
+            pending_tasks: tokio::task::JoinSet::new(),
         }));
         let mut template = template_with_outputs(0, 0);
         template.future_template = true;
@@ -848,7 +903,7 @@ mod tests {
             value: Amount::ZERO,
             script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
         };
-        let encoded = serialize(&output);
+        let encoded = serialize(&vec![output.clone()]);
         let task_downstream = downstream.clone();
         let task = tokio::spawn(async move {
             DownstreamMiningNode::wait_for_mining_channel(&task_downstream).await?;
@@ -864,9 +919,10 @@ mod tests {
             .safe_lock(|state| {
                 state.downstream = Some(downstream.clone());
                 state.handle_open_extended_mining_channel_success(
-                    OpenExtendedMiningChannelSuccess {
+                    OpenExtendedMiningChannelSuccessOwned {
                         request_id: 1,
                         channel_id: 1,
+                        group_channel_id: 7,
                         target: target.to_le_bytes().into(),
                         extranonce_size: 28,
                         extranonce_prefix: vec![0; 4].try_into().unwrap(),
@@ -919,11 +975,11 @@ mod tests {
                 && output.script_pubkey.as_bytes() == commitment));
         assert!(matches!(
             receiver.recv().await,
-            Some(Mining::NewExtendedMiningJob(_))
+            Some(MiningOwned::NewExtendedMiningJob(_))
         ));
     }
 
-    fn template_with_outputs(actual_count: usize, declared_count: u32) -> NewTemplate<'static> {
+    fn template_with_outputs(actual_count: usize, declared_count: u32) -> NewTemplateOwned {
         let output = TxOut {
             value: Amount::ZERO,
             script_pubkey: ScriptBuf::new(),
@@ -931,7 +987,7 @@ mod tests {
         let outputs = (0..actual_count)
             .flat_map(|_| serialize(&output))
             .collect::<Vec<_>>();
-        NewTemplate {
+        NewTemplateOwned {
             template_id: 1,
             future_template: false,
             version: 0,
@@ -942,7 +998,7 @@ mod tests {
             coinbase_tx_outputs_count: declared_count,
             coinbase_tx_outputs: outputs.try_into().expect("serialized outputs"),
             coinbase_tx_locktime: 0,
-            merkle_path: Vec::new().into(),
+            merkle_path: Vec::new().try_into().expect("empty merkle path"),
         }
     }
 
@@ -985,7 +1041,7 @@ mod tests {
                 script_pubkey: ScriptBuf::new(),
             },
         ];
-        let encoded = outputs.iter().flat_map(serialize).collect::<Vec<_>>();
+        let encoded = serialize(&outputs);
         assert_eq!(
             DownstreamMiningNode::decode_pool_coinbase_outputs(&encoded)
                 .expect("valid pool outputs"),
@@ -1011,7 +1067,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(pristine_outputs.len(), 65_483);
 
-        let pristine = NewTemplate {
+        let pristine = NewTemplateOwned {
             template_id: u64::MAX,
             future_template: true,
             version: 0,
@@ -1025,7 +1081,7 @@ mod tests {
                 .try_into()
                 .expect("pristine outputs"),
             coinbase_tx_locktime: 0,
-            merkle_path: Vec::new().into(),
+            merkle_path: Vec::new().try_into().expect("empty merkle path"),
         };
         let pool_outputs = vec![TxOut {
             value: Amount::ZERO,

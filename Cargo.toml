@@ -47,33 +47,12 @@ reqwest ={ version = "0.12.20"}
 tracing-appender = "0.2.4"
 minisign-verify = "0.2.5"
 
-#roles_logic_sv2 = "1.2.1"
-#sv1_api = "1.0.1"
-#demand-sv2-connection = "0.0.3"
-#framing_sv2 = "^2.0.0"
-#binary_sv2 = "1.1.0"
-#demand-share-accounting-ext = "0.0.10"
-
-#noise_sv2 = "1.1.0"
-#codec_sv2 = { version = "1.2.1", features = ["noise_sv2","with_buffer_pool"]}
-
-#demand-share-accounting-ext = {path = "../demand-share-accounting-ext"}
-#demand-sv2-connection = { path = "../demand-sv2-connection"}
-#roles_logic_sv2 = { path = "../stratum/protocols/v2/roles-logic-sv2"}
-#framing_sv2 = { path = "../stratum/protocols/v2/framing-sv2"}
-#binary_sv2 = { path = "../stratum/protocols/v2/binary-sv2"}
-#noise_sv2 = {path ="../stratum/protocols/v2/noise-sv2"}
-#codec_sv2 = {features = ["noise_sv2","with_buffer_pool"], path = "../stratum/protocols/v2/codec-sv2" }
-#sv1_api = {path = "../stratum/protocols/v1" }
-
-demand-share-accounting-ext = { git = "https://github.com/demand-open-source/share-accounting-ext" }
-demand-sv2-connection = { git = "https://github.com/demand-open-source/demand-sv2-connection" }
-roles_logic_sv2 = { git = "https://github.com/demand-open-source/stratum" }
-framing_sv2 = { git = "https://github.com/demand-open-source/stratum" }
-binary_sv2 = { git = "https://github.com/demand-open-source/stratum" }
-noise_sv2 = { git = "https://github.com/demand-open-source/stratum" }
-codec_sv2 = { git = "https://github.com/demand-open-source/stratum", features = ["noise_sv2", "with_buffer_pool"] }
-sv1_api = { git = "https://github.com/demand-open-source/stratum" }
+roles_logic_sv2 = { git = "https://github.com/dmnd-pool/roles-logic", rev = "95839819d259fedf80d69cbfba5eab4f7857c206" }
+binary_sv2 = "=7.0.0"
+framing_sv2 = "=8.0.0"
+sv1_api = "=6.0.0"
+demand-share-accounting-ext = { path = "vendor/share-accounting-ext" }
+demand-sv2-connection = { path = "vendor/demand-sv2-connection" }
 
 rust-embed = "8.7.2"
 mime_guess = "2.0.5"
@@ -87,6 +66,9 @@ stratum-apps = { git = "https://github.com/stratum-mining/sv2-apps.git", branch 
 
 [build-dependencies]
 toml = "0.8.22"
+
+[patch.crates-io]
+binary_sv2 = { path = "vendor/binary-sv2" }
 
 [profile.release]
 strip = true

@@ -3,16 +3,16 @@ mod task_manager;
 
 use std::net::SocketAddr;
 
-use codec_sv2::{HandshakeRole, StandardEitherFrame, StandardSv2Frame};
-use demand_share_accounting_ext::parser::PoolExtMessages;
+use demand_share_accounting_ext::parser::PoolExtMessagesOwned;
 use demand_sv2_connection::noise_connection_tokio::Connection;
+use demand_sv2_connection::Initiator;
+use demand_sv2_connection::{HandshakeRole, StandardEitherFrame, StandardSv2Frame};
 use errors::Error;
 use key_utils::Secp256k1PublicKey;
-use noise_sv2::Initiator;
 use rand::distributions::{Alphanumeric, DistString};
 use roles_logic_sv2::{
-    common_messages_sv2::{Protocol, SetupConnection, SetupConnectionSuccess},
-    parsers::CommonMessages,
+    common_messages_sv2::{Protocol, SetupConnectionOwned, SetupConnectionSuccess},
+    parsers::CommonMessagesOwned,
 };
 use tokio::net::TcpStream;
 use tokio::sync::{
@@ -26,7 +26,7 @@ use crate::{
 };
 use task_manager::TaskManager;
 
-pub type Message = PoolExtMessages<'static>;
+pub type Message = PoolExtMessagesOwned;
 pub type StdFrame = StandardSv2Frame<Message>;
 pub type EitherFrame = StandardEitherFrame<Message>;
 
@@ -35,13 +35,13 @@ const DEFAULT_TIMER: std::time::Duration = std::time::Duration::from_secs(5);
 pub async fn connect_pool(
     address: SocketAddr,
     authority_public_key: Secp256k1PublicKey,
-    setup_connection_msg: Option<SetupConnection<'static>>,
+    setup_connection_msg: Option<SetupConnectionOwned>,
     timer: Option<std::time::Duration>,
     mut shutdown_signal: watch::Receiver<bool>,
 ) -> Result<
     (
-        Sender<PoolExtMessages<'static>>,
-        Receiver<PoolExtMessages<'static>>,
+        Sender<PoolExtMessagesOwned>,
+        Receiver<PoolExtMessagesOwned>,
         AbortOnDrop,
     ),
     Error,
@@ -141,7 +141,7 @@ pub async fn connect_pool(
 }
 
 pub fn relay_up(
-    mut recv: Receiver<PoolExtMessages<'static>>,
+    mut recv: Receiver<PoolExtMessagesOwned>,
     send: Sender<EitherFrame>,
 ) -> AbortOnDrop {
     let task = tokio::spawn(async move {
@@ -164,7 +164,7 @@ pub fn relay_up(
 
 pub fn relay_down(
     mut recv: Receiver<EitherFrame>,
-    send: Sender<PoolExtMessages<'static>>,
+    send: Sender<PoolExtMessagesOwned>,
 ) -> AbortOnDrop {
     let task = tokio::spawn(async move {
         while let Some(msg) = recv.recv().await {
@@ -174,10 +174,10 @@ pub fn relay_down(
                     let message_type = header.msg_type();
                     let payload = msg.payload();
                     let extension = header.ext_type();
-                    let msg: Result<PoolExtMessages<'_>, _> =
+                    let msg: Result<demand_share_accounting_ext::parser::PoolExtMessages<'_>, _> =
                         (extension, message_type, payload).try_into();
                     if let Ok(msg) = msg {
-                        let msg = msg.into_static();
+                        let msg = msg.into_owned();
                         if send.send(msg).await.is_err() {
                             error!("Internal Mining downstream not available");
 
@@ -206,10 +206,11 @@ pub fn relay_down(
 pub async fn mining_setup_connection(
     recv: &mut Receiver<EitherFrame>,
     send: &mut Sender<EitherFrame>,
-    setup_conection: SetupConnection<'static>,
+    setup_conection: SetupConnectionOwned,
     timer: std::time::Duration,
 ) -> Result<SetupConnectionSuccess, Error> {
-    let msg = PoolExtMessages::Common(CommonMessages::SetupConnection(setup_conection));
+    let supported_versions = setup_conection.min_version..=setup_conection.max_version;
+    let msg = PoolExtMessagesOwned::Common(CommonMessagesOwned::SetupConnection(setup_conection));
     let std_frame: StdFrame = match msg.try_into() {
         Ok(frame) => frame,
         Err(e) => {
@@ -225,17 +226,25 @@ pub async fn mining_setup_connection(
     if let Ok(Some(msg)) = tokio::time::timeout(timer, recv.recv()).await {
         let mut msg: StdFrame = msg.try_into().map_err(Error::FramingSv2)?;
         let header = msg.get_header().ok_or(Error::UnexpectedMessage)?;
+        if header.ext_type() != 0 {
+            return Err(Error::UnexpectedMessage);
+        }
         let message_type = header.msg_type();
         let payload = msg.payload();
-        let msg: CommonMessages<'_> = match (message_type, payload).try_into() {
-            Ok(message) => message,
-            Err(e) => {
-                error!("Unexpected Message: {e}");
-                return Err(Error::UpstreamIncoming(e));
-            }
-        };
+        let msg: roles_logic_sv2::parsers::CommonMessages<'_> =
+            match (message_type, payload).try_into() {
+                Ok(message) => message,
+                Err(e) => {
+                    error!("Unexpected Message: {e}");
+                    return Err(Error::UpstreamIncoming(e));
+                }
+            };
         match msg {
-            CommonMessages::SetupConnectionSuccess(s) => Ok(s),
+            roles_logic_sv2::parsers::CommonMessages::SetupConnectionSuccess(s)
+                if supported_versions.contains(&s.used_version) =>
+            {
+                Ok(s)
+            }
             e => {
                 error!("Unexpected Message: {e:?}");
                 Err(Error::UnexpectedMessage)
@@ -247,7 +256,7 @@ pub async fn mining_setup_connection(
     }
 }
 
-pub fn get_mining_setup_connection_msg(work_selection: bool) -> SetupConnection<'static> {
+pub fn get_mining_setup_connection_msg(work_selection: bool) -> SetupConnectionOwned {
     let endpoint_host = "0.0.0.0".to_string().into_bytes().try_into().expect("Internal error: this operation can not fail because the string 0.0.0.0 can always be converted into Inner");
     let vendor = String::new().try_into().expect("Internal error: this operation can not fail because an empty string can always be converted into Inner");
     let hardware_version = String::new().try_into().expect("Internal error: this operation can not fail because an empty string can always be converted into Inner");
@@ -262,7 +271,7 @@ pub fn get_mining_setup_connection_msg(work_selection: bool) -> SetupConnection<
         .to_string()
         .try_into()
         .expect("Internal error: this operation can not fail because an device_id can always be converted into Inner");
-    SetupConnection {
+    SetupConnectionOwned {
         protocol: Protocol::MiningProtocol,
         min_version: 2,
         max_version: 2,
@@ -273,5 +282,56 @@ pub fn get_mining_setup_connection_msg(work_selection: bool) -> SetupConnection<
         hardware_version,
         firmware,
         device_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn setup_reply(
+        extension: u16,
+        channel_bit: bool,
+        used_version: u16,
+    ) -> Result<SetupConnectionSuccess, Error> {
+        let response = PoolExtMessagesOwned::Common(CommonMessagesOwned::SetupConnectionSuccess(
+            SetupConnectionSuccess {
+                used_version,
+                flags: 0,
+            },
+        ));
+        let frame = StdFrame::from_message(response, 1, extension, channel_bit).unwrap();
+        let mut bytes = vec![0; frame.encoded_length()];
+        frame.serialize(&mut bytes).unwrap();
+        let frame = StdFrame::from_bytes(bytes).unwrap();
+        let (incoming, mut receiver) = tokio::sync::mpsc::channel(1);
+        incoming.send(frame.into()).await.unwrap();
+        let (mut sender, _outgoing) = tokio::sync::mpsc::channel(1);
+        let setup = SetupConnectionOwned {
+            protocol: Protocol::MiningProtocol,
+            min_version: 2,
+            max_version: 2,
+            flags: 0,
+            endpoint_host: Vec::new().try_into().unwrap(),
+            endpoint_port: 0,
+            vendor: Vec::new().try_into().unwrap(),
+            hardware_version: Vec::new().try_into().unwrap(),
+            firmware: Vec::new().try_into().unwrap(),
+            device_id: Vec::new().try_into().unwrap(),
+        };
+        mining_setup_connection(&mut receiver, &mut sender, setup, DEFAULT_TIMER).await
+    }
+
+    #[tokio::test]
+    async fn pool_setup_rejects_unsupported_versions() {
+        assert!(setup_reply(0, false, 1).await.is_err());
+        assert!(setup_reply(0, false, 3).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn pool_setup_rejects_invalid_extension_and_channel_bit() {
+        assert!(setup_reply(0, false, 2).await.is_ok());
+        assert!(setup_reply(1, false, 2).await.is_err());
+        assert!(setup_reply(0, true, 2).await.is_err());
     }
 }

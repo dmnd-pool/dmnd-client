@@ -4,12 +4,12 @@ use std::{
 };
 
 use crate::jd_client::job_declarator::{setup_connection::SetupConnectionHandler, JobDeclarator};
-use codec_sv2::{buffer_sv2::Slice, HandshakeRole};
-use demand_share_accounting_ext::parser::PoolExtMessages;
+use demand_share_accounting_ext::parser::PoolExtMessagesOwned;
 use demand_sv2_connection::noise_connection_tokio::Connection;
+use demand_sv2_connection::Initiator;
+use demand_sv2_connection::{HandshakeRole, StandardEitherFrame};
 use key_utils::Secp256k1PublicKey;
-use noise_sv2::Initiator;
-use roles_logic_sv2::{common_messages_sv2::SetupConnection, parsers::Mining};
+use roles_logic_sv2::{common_messages_sv2::SetupConnectionOwned, parsers::MiningOwned};
 use tokio::{
     net::TcpStream,
     sync::{
@@ -30,7 +30,7 @@ pub struct Router {
     pool_addresses: Vec<SocketAddr>,
     pub current_pool: Option<SocketAddr>,
     auth_pub_k: Secp256k1PublicKey,
-    setup_connection_msg: Option<SetupConnection<'static>>,
+    setup_connection_msg: Option<SetupConnectionOwned>,
     timer: Option<Duration>,
     latency_tx: watch::Sender<Option<Duration>>,
     pub latency_rx: watch::Receiver<Option<Duration>>,
@@ -43,7 +43,7 @@ impl Router {
         auth_pub_k: Secp256k1PublicKey,
         // Configuration msg used to setup connection between client and pool
         // If not, present `get_mining_setup_connection_msg()` is called to generated default values
-        setup_connection_msg: Option<SetupConnection<'static>>,
+        setup_connection_msg: Option<SetupConnectionOwned>,
         // Max duration for pool setup after which it times out.
         // If None, default time of 5s is used.
         timer: Option<Duration>,
@@ -139,8 +139,8 @@ impl Router {
         shutdown_signal: watch::Receiver<bool>,
     ) -> Result<
         (
-            tokio::sync::mpsc::Sender<PoolExtMessages<'static>>,
-            tokio::sync::mpsc::Receiver<PoolExtMessages<'static>>,
+            tokio::sync::mpsc::Sender<PoolExtMessagesOwned>,
+            tokio::sync::mpsc::Receiver<PoolExtMessagesOwned>,
             AbortOnDrop,
         ),
         minin_pool_connection::errors::Error,
@@ -276,7 +276,7 @@ impl PoolLatency {
     /// and `receive_first_set_new_prev_hash`
     async fn get_mining_setup_latencies(
         &mut self,
-        setup_connection_msg: Option<SetupConnection<'static>>,
+        setup_connection_msg: Option<SetupConnectionOwned>,
         timer: Option<Duration>,
         authority_public_key: Secp256k1PublicKey,
     ) -> Result<(), ()> {
@@ -310,7 +310,7 @@ impl PoolLatency {
                         let (send_from_down, recv_to_up) = tokio::sync::mpsc::channel(10);
                         let channel = open_channel();
                         if send_from_down
-                            .send(PoolExtMessages::Mining(channel))
+                            .send(PoolExtMessagesOwned::Mining(channel))
                             .await
                             .is_err()
                         {
@@ -327,16 +327,17 @@ impl PoolLatency {
                         let mut received_prev_hash = false;
 
                         while let Some(message) = recv_from_down.recv().await {
-                            if let PoolExtMessages::Mining(Mining::NewExtendedMiningJob(
-                                _new_ext_job,
-                            )) = message.clone()
+                            if let PoolExtMessagesOwned::Mining(
+                                MiningOwned::NewExtendedMiningJob(_new_ext_job),
+                            ) = message.clone()
                             {
                                 // Set receive_first_job latency
                                 self.receive_first_job = Some(timer.elapsed());
                                 received_new_job = true;
                             }
-                            if let PoolExtMessages::Mining(Mining::SetNewPrevHash(_new_prev_hash)) =
-                                message.clone()
+                            if let PoolExtMessagesOwned::Mining(MiningOwned::SetNewPrevHash(
+                                _new_prev_hash,
+                            )) = message.clone()
                             {
                                 // Set receive_first_set_new_prev_hash latency
                                 self.receive_first_set_new_prev_hash = Some(timer.elapsed());
@@ -442,11 +443,11 @@ impl PoolLatency {
 }
 
 // Helper functions
-fn open_channel() -> Mining<'static> {
-    roles_logic_sv2::parsers::Mining::OpenExtendedMiningChannel(
-        roles_logic_sv2::mining_sv2::OpenExtendedMiningChannel {
+fn open_channel() -> MiningOwned {
+    roles_logic_sv2::parsers::MiningOwned::OpenExtendedMiningChannel(
+        roles_logic_sv2::mining_sv2::OpenExtendedMiningChannelOwned {
             request_id: 0,
-            max_target: binary_sv2::u256_from_int(u64::MAX),
+            max_target: crate::shared::utils::maximum_channel_target(),
             min_extranonce_size: 8,
             user_identity: "ABC"
                 .to_string()
@@ -459,14 +460,14 @@ fn open_channel() -> Mining<'static> {
 }
 
 async fn initialize_mining_connections(
-    setup_connection_msg: Option<SetupConnection<'static>>,
+    setup_connection_msg: Option<SetupConnectionOwned>,
     stream: TcpStream,
     authority_public_key: Secp256k1PublicKey,
 ) -> Result<
     (
-        Receiver<codec_sv2::Frame<PoolExtMessages<'static>, Slice>>,
-        Sender<codec_sv2::Frame<PoolExtMessages<'static>, Slice>>,
-        SetupConnection<'static>,
+        Receiver<StandardEitherFrame<PoolExtMessagesOwned>>,
+        Sender<StandardEitherFrame<PoolExtMessagesOwned>>,
+        SetupConnectionOwned,
     ),
     (),
 > {
@@ -484,4 +485,19 @@ async fn initialize_mining_connections(
     let setup_connection_msg =
         setup_connection_msg.unwrap_or(get_mining_setup_connection_msg(true));
     Ok((receiver, sender, setup_connection_msg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn latency_channel_preserves_maximum_target_bytes() {
+        let MiningOwned::OpenExtendedMiningChannel(message) = open_channel() else {
+            panic!("Expected an extended channel request");
+        };
+        let mut expected = [0; 32];
+        expected[24..].fill(255);
+        assert_eq!(message.max_target.as_bytes(), expected);
+    }
 }

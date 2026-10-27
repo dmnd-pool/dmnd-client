@@ -13,7 +13,7 @@ pub async fn start_send_to_downstream(
     send_to_down: mpsc::Sender<String>,
     connection_id: u32,
     host: String,
-) -> Result<(), Error<'static>> {
+) -> Result<(), Error> {
     let handle = task::spawn(async move {
         while let Some(res) = receiver_outgoing.recv().await {
             let to_send = match serde_json::to_string(&res) {

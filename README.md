@@ -370,3 +370,197 @@ Happy mining!
     cargo build --release
 
 The binary is produced at `./target/release/dmnd-client` — use it exactly as shown in Section 4.1.
+
+## Native SRI migration
+
+The CLI uses [`roles_logic_sv2` 4.0.0](https://github.com/dmnd-pool/roles-logic/tree/95839819d259fedf80d69cbfba5eab4f7857c206).
+The revision is `95839819d259fedf80d69cbfba5eab4f7857c206`. Cargo fetches this
+library from Git. Its source is not copied into this repository.
+
+Production uses `binary_sv2` 7.0.0, `codec_sv2` 7.0.0, `framing_sv2` 8.0.0,
+`noise_sv2` 2.0.0, and `sv1_api` 6.0.0. The production dependency graph contains
+no crates from the old DMND Stratum repository. The existing development
+dependencies remain available to the independent mining test runner.
+
+Two dependencies need local changes because their upstream revisions use the
+old SRI types. A third copy removes a measured performance regression in the
+new binary codec:
+
+| Local source | Upstream source | Original revision | Original source commit |
+|---|---|---|---|
+| `vendor/demand-sv2-connection` | [demand-sv2-connection](https://github.com/dmnd-pool/demand-sv2-connection) | `edeb677c9e2aa07de99f6b7a9ce5b627ff0e1899` | `d96968b` |
+| `vendor/share-accounting-ext` | [share-accounting-ext](https://github.com/dmnd-pool/share-accounting-ext) | `c661e936264cd8cc6b13b51fc06a79e04a6ae76e` | `eb9e2a1` |
+| `vendor/binary-sv2` | [SRI binary_sv2 7.0.0](https://crates.io/crates/binary_sv2/7.0.0) | `e11881b372c0f0f4cd6bc1b0cf08ae65e4a001fd`, `sv2/binary-sv2` | `5584799` |
+
+Each original source commit precedes all changes to that dependency. The
+transport and share accounting upstream manifests declare `MIT OR Apache-2.0`, but neither source tree includes
+license files. The imports also include the unchanged `LICENSE-MIT` and
+`LICENSE-APACHE` files from [DMND Stratum revision
+`f037e6db3568454cdf7973aa6f457dd41d0856e1`](https://github.com/dmnd-pool/stratum/tree/f037e6db3568454cdf7973aa6f457dd41d0856e1).
+
+The binary codec copy contains the complete, unchanged published package. Its
+license files come from the [same upstream revision](https://github.com/stratum-mining/stratum/tree/e11881b372c0f0f4cd6bc1b0cf08ae65e4a001fd).
+The later patch removes a second traversal during encoding and allows the
+compiler to inline primitive decoding. It retains the native wire format,
+error checks, and iterative handling of deeply nested data.
+
+Messages in queues own their data. The receive parser borrows frame data until
+it must retain a message. The connection adapter uses the native SRI codec and
+frames. It exports `HandshakeRole`, `Initiator`, `Responder`,
+`StandardEitherFrame`, and `StandardSv2Frame` at its crate root. Message and
+frame size queries do not serialize data or allocate heap memory.
+
+Job Declaration uses transaction witness IDs, `PushSolution`, and the native
+coinbase output constraints. Token and custom-job output lists include their
+Bitcoin count field. Template output lists retain the separate count field.
+Channel group changes pass to the translator. Share validation hashes the
+coinbase parts directly and uses a fixed buffer for each Merkle branch step.
+
+Coinbase output limits use BIP141 signature-operation cost. A P2PKH output
+reserves four units. Costs that do not fit the protocol field are rejected.
+Each token is checked against both advertised limits. If either limit must
+increase, the CLI retains the larger limits and restarts the mining session
+with the same pool. The new template connection advertises those limits before
+it uses a template. This prevents queued templates from using the earlier,
+smaller reservation. Smaller tokens do not reduce the limits. Unchanged token
+outputs require no heap allocation. Merge-mining output space remains reserved.
+
+The translator stores miner channels and extranonce prefixes in hash indexes.
+Channel setup and removal use constant expected lookup time. Disconnects remove
+both records. The native factory keeps the job, previous-hash, and group state;
+the CLI uses the native version, target, and Merkle helpers to check shares.
+This avoids the upstream factory's scan through all existing miner prefixes.
+It also avoids per-miner job copies because SV1 miners use the existing job
+broadcast. Unit tests compare channel assignments and share results with the
+native factory, including serialized bytes and protocol rejections.
+
+### Checks without the mining suite
+
+Run these commands from the repository root:
+
+```sh
+rustfmt --edition 2021 src/lib.rs src/main.rs
+cargo check --locked --lib --bin dmnd-client
+cargo clippy --lib --bin dmnd-client --all-features -- -D warnings
+cargo test --locked --lib -- --test-threads=1
+cargo test --locked --bin dmnd-client
+cargo test --locked --manifest-path vendor/demand-sv2-connection/Cargo.toml --lib
+cargo test --locked --features mining-e2e --lib native_transport_interface_roundtrip
+```
+
+This run starts from master. It does not contain the prepared public example.
+The `native_transport_interface_roundtrip` unit test checks the required crate
+exports, both handshake roles, encrypted send and receive, frame conversion,
+headers, payload access, serialized bytes, and extension messages against the
+production dependency graph. The prepared example was not added.
+
+The final library test run passed 202 tests. Two existing tests remain ignored.
+All 12 transport tests passed. The locked production check and Clippy check
+passed without warnings. The CLI help command also passed.
+
+Library unit tests check message bytes, malformed payloads, invalid headers,
+version rejection, channel assignments, transaction selection, and allocation
+counts. Transport unit tests also check encrypted frames, fragmented reads,
+large messages, concurrent handshakes, authentication rejection, and connection
+closure. These checks do not prove that the private mining suite passes. That
+suite must still report all 18 tests and all 17 scenario summaries as passed,
+with no unexpected errors or panics. It was not accessed or run in this session.
+
+### Local performance measurements
+
+Measurements compare the starting production source at
+`4c2a7341d3a9e1b1b46d063770a1e2c3bff005d7` with this migration. The machine has an
+Intel Core i9-14900K. Both versions use Rust 1.88.0, release optimization, and
+the System allocator. An allocation counter counts allocations and
+reallocations. The share and codec measurements also enable link-time
+optimization. Times below are medians; they are local measurements, not network
+or full mining-suite results.
+
+| Operation | Starting code | Migrated code |
+|---|---:|---:|
+| Share validation | 3108.21 ns | 2855.96 ns |
+| Allocations per share validation | 34 | 0 |
+| Message size query | 1.10 ns | 0.84 ns |
+| Frame size query | 1.42 ns | 0.55 ns |
+| Allocations per size query | 0 | 0 |
+| Raw extended-share encoding | 115.44 ns | 95.21 ns |
+| Raw extended-share decoding | 486.88 ns | 486.75 ns |
+| Allocations per raw encoding | 4 | 3 |
+| Allocations per raw decoding | 18 | 18 |
+| Encrypted roundtrip | 28.64 µs | 27.84 µs |
+| Encrypted pipeline throughput | 96,170 frames/s | 112,223 frames/s |
+| Allocations per small encrypted roundtrip | 1 | 0 |
+
+Share validation uses 12 Merkle nodes, a 180-byte coinbase prefix, a 48-byte
+suffix, and two 8-byte extranonce parts. Each version runs nine rounds of
+150,000 calls on CPU 2 after warmup. A fixed hash test checks the resulting
+protocol bytes. The migrated path is 8.1% faster in this measurement.
+
+The codec measurement uses a 32-byte extranonce. Each round runs 5,000,000 size
+queries and 100,000 encode or decode operations on CPU 4. The table combines
+four runs of five rounds per version, with both execution orders. The initial
+unpatched native codec measured 149.86 ns for share encoding. The local binary
+patch removes that regression. Final encoding is 17.5% faster in this check;
+decoding is comparable. Decode ranges overlap: 480.93–491.33 ns for the starting
+code and 479.22–501.79 ns for the migrated code.
+
+The transport measurement uses loopback TCP, `TCP_NODELAY`, a four-byte payload,
+and four Tokio worker threads on CPUs 8, 10, 12, and 14. Each version runs 1,000
+warmup exchanges, then seven rounds of 10,000 roundtrips and seven rounds of
+100,000 pipeline frames. The observed roundtrip ranges overlap: 28.15–29.35 µs
+for the starting code and 27.56–28.19 µs for the migrated code. Pipeline
+throughput increases by 16.7% in the final run.
+
+Larger-message checks also compare serialized lengths and hashes. A template
+with 12 Merkle hashes and 165 coinbase output bytes encodes to 594 bytes. Its
+encoding time is comparable in both execution orders; allocations decrease
+from 6 to 5. In the reverse-order run, declarations with 500 and 2,000 witness
+IDs take 10.84 µs and 42.15 µs, compared with 12.09 µs and 48.37 µs for the
+starting code. Their allocations decrease from 7 to 4. These measurements use
+CPU 10, seven rounds, and release builds with link-time optimization. Message
+construction and cloning occur before timing.
+
+The channel check compares the starting code, the native revision without the
+prefix index, and the final CLI adapter. Values are median nanoseconds per
+operation from eight rounds on CPU 4, after warmup, with both execution orders.
+Each setup run starts with an empty factory. The share run uses one active
+channel, an empty Merkle path, and 100,000 submissions; it includes share
+cloning and checks that each share is accepted for upstream transmission.
+
+| Operation | Starting code | Native without index | Final CLI |
+|---|---:|---:|---:|
+| Channel setup, 256 miners | 266.73 ns | 793.72 ns | 228.05 ns |
+| Channel setup, 1,024 miners | 220.17 ns | 2,227.21 ns | 185.69 ns |
+| Channel setup, 4,096 miners | 211.86 ns | 7,533.57 ns | 185.35 ns |
+| Channel setup, 16,384 miners | 212.47 ns | 28,544.34 ns | 186.19 ns |
+| Bridge share processing | 740.01 ns | 687.06 ns | 630.65 ns |
+
+At 16,384 miners, final setup is 12.4% faster than the starting code. Bridge
+share processing is 14.8% faster. The prefix index removes the quadratic
+comparison growth. The adapter also returns the channel assignment directly,
+without allocating unused protocol response messages.
+
+The measurement sources are in `src/performance/`. Use Python 3.11 or later.
+Prepare separate temporary Cargo projects with:
+
+```sh
+python3 src/performance/prepare.py /tmp/demand-performance
+```
+
+Run both `share-baseline` and `share-native` with CPU affinity 2. Run both
+`codec-baseline` and `codec-native` with CPU affinity 4. Run both
+`message-baseline` and `message-native` with CPU affinity 10. For example:
+
+```sh
+taskset -c 2 cargo run --release --manifest-path /tmp/demand-performance/share-native/Cargo.toml
+taskset -c 4 cargo run --release --manifest-path /tmp/demand-performance/codec-native/Cargo.toml
+taskset -c 10 cargo run --release --manifest-path /tmp/demand-performance/message-native/Cargo.toml
+taskset -c 4 cargo run --release --manifest-path /tmp/demand-performance/channels-native/Cargo.toml
+taskset -c 8,10,12,14 cargo run --release --locked --manifest-path /tmp/demand-performance/transport/Cargo.toml -- reverse
+```
+
+Use available CPU numbers on other machines. Repeat both orders and compare
+several rounds. The temporary baseline projects use the old dependencies only
+for measurement. They do not change the CLI dependency graph or its targets.
+For the channel check, compare `channels-baseline`, `channels-unindexed`, and
+`channels-native`. Build before timing and run the resulting binaries directly.
