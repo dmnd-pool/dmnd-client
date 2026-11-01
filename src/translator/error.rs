@@ -1,14 +1,14 @@
 use std::{convert::Infallible, fmt, sync::PoisonError};
 
-pub type ProxyResult<'a, T> = core::result::Result<T, Error<'a>>;
+pub type ProxyResult<T> = core::result::Result<T, Error>;
 
 #[derive(Debug)]
-pub enum Error<'a> {
+pub enum Error {
     /// Errors due to invalid extranonce from upstream
     InvalidExtranonce(String),
     /// Errors from `roles_logic_sv2` crate.
     RolesSv2Logic(roles_logic_sv2::errors::Error),
-    V1Protocol(Box<sv1_api::error::Error<'a>>),
+    V1Protocol(Box<sv1_api::error::Error>),
     // Locking Errors
     PoisonLock,
     TranslatorUpstreamMutexPoisoned,
@@ -25,18 +25,17 @@ pub enum Error<'a> {
     #[allow(clippy::enum_variant_names)]
     TargetError(roles_logic_sv2::errors::Error),
     Infallible(Infallible),
-    ImpossibleToOpenChannnel,
     #[allow(clippy::enum_variant_names)]
     AsyncChannelError,
 }
 
-impl From<Infallible> for Error<'_> {
+impl From<Infallible> for Error {
     fn from(v: Infallible) -> Self {
         Self::Infallible(v)
     }
 }
 
-impl fmt::Display for Error<'_> {
+impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::InvalidExtranonce(e) => write!(f, "InvalidExtranonce {e}"),
@@ -45,7 +44,6 @@ impl fmt::Display for Error<'_> {
             Error::PoisonLock => write!(f, "PoisonLock"),
             Error::TargetError(e) => write!(f, "TargetError {e}"),
             Error::Infallible(e) => write!(f, "Infallible {e}"),
-            Error::ImpossibleToOpenChannnel => write!(f, "ImpossibleToOpenChannnel"),
             Error::AsyncChannelError => write!(f, "AsyncChannelError"),
             Error::TranslatorUpstreamMutexPoisoned => write!(f, "TranslatorUpstreamMutexPoisoned"),
             Error::TranslatorDiffConfigMutexPoisoned => {
@@ -63,24 +61,24 @@ impl fmt::Display for Error<'_> {
     }
 }
 
-impl<T> From<PoisonError<T>> for Error<'_> {
+impl<T> From<PoisonError<T>> for Error {
     fn from(_: PoisonError<T>) -> Self {
         Self::PoisonLock
     }
 }
-impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error<'_> {
+impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
     fn from(_value: tokio::sync::mpsc::error::SendError<T>) -> Self {
         Self::AsyncChannelError
     }
 }
-impl From<roles_logic_sv2::Error> for Error<'_> {
+impl From<roles_logic_sv2::Error> for Error {
     fn from(value: roles_logic_sv2::Error) -> Self {
         Self::RolesSv2Logic(value)
     }
 }
 
-impl<'a> From<sv1_api::error::Error<'a>> for Error<'a> {
-    fn from(value: sv1_api::error::Error<'a>) -> Self {
+impl From<sv1_api::error::Error> for Error {
+    fn from(value: sv1_api::error::Error) -> Self {
         Self::V1Protocol(Box::new(value))
     }
 }

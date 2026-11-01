@@ -1,5 +1,4 @@
-use super::control::ChannelKey;
-use roles_logic_sv2::mining_sv2::OpenExtendedMiningChannelSuccess;
+use super::{control::ChannelKey, protocol::OpenExtendedMiningChannelSuccess};
 
 #[derive(Clone, Debug)]
 pub struct ChannelState {
@@ -10,11 +9,11 @@ pub struct ChannelState {
 }
 
 impl ChannelState {
-    pub fn opened(key: ChannelKey, message: &OpenExtendedMiningChannelSuccess<'_>) -> Self {
+    pub fn opened(key: ChannelKey, message: &OpenExtendedMiningChannelSuccess) -> Self {
         Self {
             key,
-            target: message.target.to_vec().try_into().expect("U256"),
-            extranonce_prefix: message.extranonce_prefix.to_vec(),
+            target: message.target.as_ref().try_into().expect("U256"),
+            extranonce_prefix: message.extranonce_prefix.as_ref().to_vec(),
             extranonce_size: message.extranonce_size,
         }
     }

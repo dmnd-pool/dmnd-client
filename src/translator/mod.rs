@@ -10,8 +10,8 @@ use bitcoin::Address;
 use error::Error;
 
 use roles_logic_sv2::{
-    mining_sv2::{NewExtendedMiningJob, SetNewPrevHash},
-    parsers::Mining,
+    mining_sv2::{NewExtendedMiningJobOwned, SetGroupChannelOwned, SetNewPrevHashOwned},
+    parsers::MiningOwned,
     utils::Mutex,
 };
 use tracing::error;
@@ -34,28 +34,29 @@ use task_manager::TaskManager;
 
 #[derive(Debug, Clone)]
 pub(crate) struct MiningNotify {
-    pub(crate) notify: server_to_client::Notify<'static>,
+    pub(crate) notify: server_to_client::Notify,
     pub(crate) merge_mining_binding_id: Option<u64>,
 }
 
 #[derive(Debug)]
 pub(crate) enum BridgeWork {
     NewExtendedMiningJob {
-        job: NewExtendedMiningJob<'static>,
+        job: NewExtendedMiningJobOwned,
         merge_mining_binding_id: Option<u64>,
     },
-    SetNewPrevHash(SetNewPrevHash<'static>),
+    SetNewPrevHash(SetNewPrevHashOwned),
+    SetGroupChannel(SetGroupChannelOwned),
 }
 
 pub async fn start(
     downstreams: TReceiver<crate::DownstreamConnection>,
     pool_connection: TSender<(
-        TSender<Mining<'static>>,
-        TReceiver<Mining<'static>>,
+        TSender<MiningOwned>,
+        TReceiver<MiningOwned>,
         Option<Address>,
     )>,
     stats_sender: crate::api::stats::StatsSender,
-) -> Result<AbortOnDrop, Error<'static>> {
+) -> Result<AbortOnDrop, Error> {
     let task_manager = TaskManager::initialize(pool_connection.clone());
     let abortable = task_manager
         .safe_lock(|t| t.get_aborter())
@@ -78,7 +79,7 @@ pub async fn start(
     let (tx_sv1_bridge, rx_sv1_bridge) = channel(crate::TRANSLATOR_BUFFER_SIZE);
 
     // Sender/Receiver to send a SV2 `SubmitSharesExtended` from the `Bridge` to the `Upstream`
-    // (Sender<SubmitSharesExtended<'static>>, Receiver<SubmitSharesExtended<'static>>)
+    // (Sender<SubmitSharesExtendedOwned>, Receiver<SubmitSharesExtendedOwned>)
     let (tx_sv2_submit_shares_ext, rx_sv2_submit_shares_ext) =
         channel(crate::TRANSLATOR_BUFFER_SIZE);
 
@@ -135,8 +136,10 @@ pub async fn start(
         let target = target.clone();
         let task_manager = task_manager.clone();
         tokio::task::spawn(async move {
-            let (extended_extranonce, up_id) = match rx_sv2_extranonce.recv().await {
-                Some((extended_extranonce, up_id)) => (extended_extranonce, up_id),
+            let (extended_extranonce, upstream_channel) = match rx_sv2_extranonce.recv().await {
+                Some((extended_extranonce, upstream_channel)) => {
+                    (extended_extranonce, upstream_channel)
+                }
                 None => {
                     error!("Failed to receive from rx_sv2_extranonce");
                     ProxyState::update_translator_state(TranslatorState::Down);
@@ -165,7 +168,7 @@ pub async fn start(
                 tx_sv1_notify.clone(),
                 extended_extranonce,
                 target,
-                up_id,
+                upstream_channel,
             ) {
                 Ok(b) => b,
                 Err(e) => {

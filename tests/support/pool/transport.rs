@@ -1,31 +1,20 @@
-use crate::support::{error, TestResult};
-#[cfg(legacy_sv2_transport)]
-use codec_sv2::{
-    HandshakeRole, NoiseEncoder, StandardEitherFrame, StandardNoiseDecoder, StandardSv2Frame, State,
+use crate::support::{
+    error,
+    share_accounting::parser::{PoolExtMessages, PoolExtMessagesOwned},
+    TestResult,
 };
-use demand_share_accounting_ext::parser::PoolExtMessages;
-#[cfg(not(legacy_sv2_transport))]
-use demand_sv2_connection::{
+use dmnd_client::sv2_connection::{
     noise_connection_tokio::Connection, HandshakeRole, Initiator, Responder, StandardEitherFrame,
     StandardSv2Frame,
 };
 use key_utils::{Secp256k1PublicKey, Secp256k1SecretKey};
-#[cfg(legacy_sv2_transport)]
-use noise_sv2::{Initiator, Responder};
 use serde::Serialize;
-#[cfg(legacy_sv2_transport)]
-use std::sync::Arc;
-#[cfg(legacy_sv2_transport)]
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    sync::Mutex,
-};
 use tokio::{net::TcpStream, sync::mpsc, task::AbortHandle};
 
 pub const AUTH_PUBLIC: &str = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72";
 // Published test authority from the locked stratum pool config examples.
 const AUTH_SECRET: &str = "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n";
-pub type Message = PoolExtMessages<'static>;
+pub type Message = PoolExtMessagesOwned;
 pub type Frame = StandardEitherFrame<Message>;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize)]
@@ -76,99 +65,6 @@ impl PeerConnection {
         Self::open(stream, HandshakeRole::Initiator(initiator)).await
     }
 
-    #[cfg(legacy_sv2_transport)]
-    async fn open(stream: TcpStream, role: HandshakeRole) -> TestResult<Self> {
-        let stream = stream.into_std()?;
-        let socket = SocketGuard(stream.try_clone()?);
-        let mut stream = TcpStream::from_std(stream)?;
-        // Complete this socket's handshake before starting transport tasks. The locked
-        // Connection::new uses process-wide flags, allowing another peer to advance its state.
-        let noise = match role {
-            HandshakeRole::Initiator(mut initiator) => {
-                let first = initiator
-                    .step_0()
-                    .map_err(|e| error(format!("Noise handshake: {e:?}")))?;
-                stream.write_all(&first).await?;
-                initiator
-                    .step_2(read_handshake(&mut stream).await?)
-                    .map_err(|e| error(format!("Noise handshake: {e:?}")))?
-            }
-            HandshakeRole::Responder(mut responder) => {
-                let (response, noise) = responder
-                    .step_1(read_handshake(&mut stream).await?)
-                    .map_err(|e| error(format!("Noise handshake: {e:?}")))?;
-                stream.write_all(&response).await?;
-                noise
-            }
-        };
-        let state = Arc::new(Mutex::new(State::with_transport_mode(noise)));
-        let (mut reader, mut writer) = stream.into_split();
-        let (incoming, receiver) = mpsc::channel(10);
-        let (sender, mut outgoing) = mpsc::channel::<Frame>(10);
-        let read_state = state.clone();
-        let read = tokio::spawn(async move {
-            let mut decoder = StandardNoiseDecoder::<Message>::new();
-            loop {
-                if reader.read_exact(decoder.writable()).await.is_err() {
-                    break;
-                }
-                let decoded = {
-                    let mut state = read_state.lock().await;
-                    decoder.next_frame(&mut state)
-                };
-                match decoded {
-                    Ok(frame) => {
-                        // Release the decoder's pooled slice before sending across tasks so its
-                        // buffer can be dropped safely even when this connection is aborted.
-                        let frame: StandardSv2Frame<Message> = frame.try_into().unwrap();
-                        let mut bytes = vec![0; frame.encoded_length()];
-                        if let Err(e) = frame.serialize(&mut bytes) {
-                            tracing::error!("SV2 frame copy: {e:?}");
-                            break;
-                        }
-                        let frame = StandardSv2Frame::from_bytes_unchecked(bytes.into());
-                        if incoming.send(frame.into()).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(codec_sv2::Error::MissingBytes(_)) => {}
-                    Err(e) => {
-                        tracing::error!("SV2 transport decode: {e:?}");
-                        break;
-                    }
-                }
-            }
-        });
-        let write = tokio::spawn(async move {
-            let mut encoder = NoiseEncoder::<Message>::new();
-            while let Some(frame) = outgoing.recv().await {
-                let encoded = {
-                    let mut state = state.lock().await;
-                    encoder.encode(frame, &mut state)
-                };
-                match encoded {
-                    Ok(bytes) => {
-                        if writer.write_all(bytes.as_ref()).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("SV2 transport encode: {e:?}");
-                        break;
-                    }
-                }
-            }
-            let _ = writer.shutdown().await;
-        });
-        Ok(Self {
-            receiver,
-            sender,
-            tasks: vec![read.abort_handle(), write.abort_handle()],
-            _socket: socket,
-        })
-    }
-
-    #[cfg(not(legacy_sv2_transport))]
     async fn open(stream: TcpStream, role: HandshakeRole) -> TestResult<Self> {
         let stream = stream.into_std()?;
         let socket = SocketGuard(stream.try_clone()?);
@@ -195,20 +91,8 @@ impl PeerConnection {
             .get_header()
             .ok_or_else(|| error("missing SV2 header"))?;
         let (extension, kind) = (header.ext_type(), header.msg_type());
-        // The locked accounting extension includes TD variants but its TryFrom implementation
-        // only dispatches common/mining/JD messages. Decode TD with the same locked SV2 parser.
-        if extension & 0x7fff == 0
-            && roles_logic_sv2::parsers::TemplateDistributionTypes::try_from(kind).is_ok()
-        {
-            return roles_logic_sv2::parsers::TemplateDistribution::try_from((
-                kind,
-                frame.payload(),
-            ))
-            .map(|message| Some(PoolExtMessages::TemplateDistribution(message).into_static()))
-            .map_err(|e| error(format!("decode TD message: {e:?}")));
-        }
         PoolExtMessages::try_from((extension, kind, frame.payload()))
-            .map(|m| Some(m.into_static()))
+            .map(|m| Some(m.into_owned()))
             .map_err(|e| error(format!("decode SV2 message: {e:?}")))
     }
 
@@ -218,13 +102,6 @@ impl PeerConnection {
             .await
             .map_err(|_| error("peer disconnected"))
     }
-}
-
-#[cfg(legacy_sv2_transport)]
-async fn read_handshake<const N: usize>(stream: &mut TcpStream) -> TestResult<[u8; N]> {
-    let mut message = [0; N];
-    stream.read_exact(&mut message).await?;
-    Ok(message)
 }
 
 pub fn encode(message: Message) -> TestResult<Frame> {

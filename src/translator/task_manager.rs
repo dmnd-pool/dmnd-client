@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use crate::shared::utils::AbortOnDrop;
 use bitcoin::Address;
-use roles_logic_sv2::parsers::Mining;
+use roles_logic_sv2::parsers::MiningOwned;
 use roles_logic_sv2::utils::Mutex;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::warn;
 
-type Message = Mining<'static>;
+type Message = MiningOwned;
 
 #[allow(dead_code)]
 enum Task {

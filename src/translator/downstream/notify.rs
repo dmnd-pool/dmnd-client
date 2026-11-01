@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 use tokio::task;
 use tracing::{debug, error, warn};
 
-fn current_or_initial_job(downstream: &mut Downstream) -> server_to_client::Notify<'static> {
+fn current_or_initial_job(downstream: &mut Downstream) -> server_to_client::Notify {
     let difficulty = downstream.current_difficulty();
     if let Some(job) = downstream.recent_jobs.clone_last(difficulty) {
         return job;
@@ -34,7 +34,7 @@ pub async fn start_notify(
     mut rx_sv1_notify: broadcast::Receiver<MiningNotify>,
     host: String,
     connection_id: u32,
-) -> Result<(), Error<'static>> {
+) -> Result<(), Error> {
     let is_closed = downstream.safe_lock(|d| d.is_closed())?;
     if is_closed {
         return Ok(());
@@ -198,7 +198,7 @@ async fn start_update(
     task_manager: Arc<Mutex<TaskManager>>,
     downstream: Arc<Mutex<Downstream>>,
     connection_id: u32,
-) -> Result<(), Error<'static>> {
+) -> Result<(), Error> {
     let handle = task::spawn(async move {
         // Prevent difficulty adjustments until after delay elapses
         tokio::time::sleep(std::time::Duration::from_secs(crate::Configuration::delay())).await;
@@ -256,7 +256,7 @@ mod tests {
 
     const RAW_BOOTSTRAP_HASHRATE: f32 = 500_000_000_000_000.0;
 
-    fn first_job(job_id: &str) -> Notify<'static> {
+    fn first_job(job_id: &str) -> Notify {
         Notify {
             job_id: job_id.to_string(),
             prev_hash: PrevHash::try_from("0".repeat(64).as_str()).unwrap(),
@@ -271,7 +271,7 @@ mod tests {
     }
 
     fn downstream_with_first_job(
-        first_job: Notify<'static>,
+        first_job: Notify,
         authorized_names: Vec<String>,
     ) -> (
         Downstream,

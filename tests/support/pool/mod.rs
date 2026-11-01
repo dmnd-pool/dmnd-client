@@ -2,31 +2,24 @@ pub mod control;
 pub mod jd;
 pub mod jobs;
 pub mod mining;
+pub mod protocol;
 pub mod shares;
 pub mod templates;
 pub mod transport;
 
+use crate::support::share_accounting::{parser::ShareAccountingMessages, ShareOk};
 use crate::support::{error, TestResult};
 use control::{
     ChannelKey, ControlRequest, EventHistory, PoolCommand, PoolEvent, PoolHandle, PoolSnapshot,
 };
-use demand_share_accounting_ext::{parser::ShareAccountingMessages, ShareOk};
 use jd::TokenRegistry;
 use jobs::{JobEngine, JobKey};
 use mining::{ChannelState, MiningSession};
-#[cfg(not(legacy_sv2_transport))]
-use roles_logic_sv2::binary_sv2;
-use roles_logic_sv2::{
-    common_messages_sv2::{Protocol, SetupConnectionError, SetupConnectionSuccess},
-    job_declaration_sv2::{
-        AllocateMiningJobTokenSuccess, DeclareMiningJobError, DeclareMiningJobSuccess,
-        ProvideMissingTransactions,
-    },
-    mining_sv2::{
-        SetCustomMiningJobError, SetNewPrevHash, SetTarget, SubmitSharesError, SubmitSharesSuccess,
-        UpdateChannelError,
-    },
-    parsers::{CommonMessages, JobDeclaration, Mining, TemplateDistribution},
+use protocol::{
+    AllocateMiningJobTokenSuccess, CommonMessages, DeclareMiningJobError, DeclareMiningJobSuccess,
+    JobDeclaration, Mining, Protocol, ProvideMissingTransactions, Seq064K, SetCustomMiningJobError,
+    SetNewPrevHash, SetTarget, SetupConnectionError, SetupConnectionSuccess, SubmitSharesError,
+    SubmitSharesExtended, SubmitSharesSuccess, TemplateDistribution, UpdateChannelError,
 };
 use shares::{ShareOutcome, ShareValidator};
 use std::{
@@ -129,7 +122,7 @@ enum Inbound {
     Ready(PeerId, mpsc::Sender<Message>),
     Message(PeerId, Message),
     Closed(PeerId),
-    Template(TemplateDistribution<'static>),
+    Template(TemplateDistribution),
     Error(String, String),
 }
 
@@ -363,7 +356,7 @@ impl State {
         Ok(())
     }
 
-    fn publish(&mut self, channel: ChannelKey, mut message: Mining<'static>) -> TestResult {
+    fn publish(&mut self, channel: ChannelKey, mut message: Mining) -> TestResult {
         match &mut message {
             Mining::NewExtendedMiningJob(job) => {
                 job.channel_id = channel.channel;
@@ -378,7 +371,7 @@ impl State {
                 self.jobs.activate(
                     channel,
                     tip.job_id,
-                    tip.prev_hash.to_vec().try_into().expect("U256"),
+                    tip.prev_hash.as_ref().try_into().expect("U256"),
                     tip.min_ntime,
                     tip.nbits,
                 );
@@ -388,7 +381,7 @@ impl State {
         self.send(channel.peer, Message::Mining(message))
     }
 
-    fn template(&mut self, message: TemplateDistribution<'static>) -> TestResult {
+    fn template(&mut self, message: TemplateDistribution) -> TestResult {
         match message {
             TemplateDistribution::NewTemplate(template) => {
                 let messages = self.jobs.template(template)?;
@@ -406,7 +399,7 @@ impl State {
             }
             TemplateDistribution::SetNewPrevHash(tip) => {
                 let id = self.jobs.prev_hash(tip.clone())?;
-                let hash = tip.prev_hash.to_vec().try_into().expect("U256");
+                let hash = tip.prev_hash.as_ref().try_into().expect("U256");
                 self.history.push(PoolEvent::TipChanged { prev_hash: hash });
                 let channels = self.mining.channels.keys().copied().collect::<Vec<_>>();
                 for channel in channels {
@@ -440,7 +433,7 @@ impl State {
         let protocol = connection.protocol;
         match message {
             Message::Common(CommonMessages::SetupConnection(setup)) if protocol.is_none() => {
-                let identity = String::from_utf8(setup.device_id.to_vec())?;
+                let identity = String::from_utf8(setup.device_id.as_ref().to_vec())?;
                 let token = identity.rsplit("::POOLED::").next().unwrap_or("");
                 let protocol = match setup.protocol {
                     Protocol::MiningProtocol => Some(PeerProtocol::Mining),
@@ -502,7 +495,7 @@ impl State {
         }
     }
 
-    fn mining_message(&mut self, peer: PeerId, message: Mining<'static>) -> TestResult {
+    fn mining_message(&mut self, peer: PeerId, message: Mining) -> TestResult {
         match message {
             Mining::OpenExtendedMiningChannel(request) => {
                 let messages = self.jobs.open(
@@ -514,7 +507,7 @@ impl State {
                 for mut message in messages {
                     if let Mining::OpenExtendedMiningChannelSuccess(success) = &mut message {
                         let max = bitcoin::Target::from_le_bytes(
-                            request.max_target.to_vec().try_into().expect("U256"),
+                            request.max_target.as_ref().try_into().expect("U256"),
                         );
                         let target = bitcoin::Target::from_le_bytes(self.config.target)
                             .min(max)
@@ -530,7 +523,7 @@ impl State {
                             .insert(channel, ChannelState::opened(channel, success));
                         self.history.push(PoolEvent::ChannelOpened {
                             channel,
-                            extranonce_prefix: success.extranonce_prefix.to_vec(),
+                            extranonce_prefix: success.extranonce_prefix.as_ref().to_vec(),
                             extranonce_size: success.extranonce_size,
                         });
                         opened = Some(channel);
@@ -590,14 +583,14 @@ impl State {
                 })();
                 match result {
                     Ok(mut job) => {
-                        let success = self.jobs.custom(custom.clone());
+                        let success = self.jobs.custom(custom.clone())?;
                         job.channel_id = channel.channel;
                         job.job_id = success.job_id;
                         self.jobs.record(channel, job);
                         self.jobs.activate(
                             channel,
                             success.job_id,
-                            custom.prev_hash.to_vec().try_into().expect("U256"),
+                            custom.prev_hash.as_ref().try_into().expect("U256"),
                             custom.min_ntime,
                             custom.nbits,
                         );
@@ -640,7 +633,7 @@ impl State {
         &mut self,
         channel: ChannelKey,
         key: JobKey,
-        share: roles_logic_sv2::mining_sv2::SubmitSharesExtended<'static>,
+        share: SubmitSharesExtended,
     ) -> TestResult {
         self.validator.retain_jobs(&self.jobs.jobs);
         let outcome = self.validator.validate(
@@ -732,7 +725,7 @@ impl State {
         )
     }
 
-    fn jd_message(&mut self, peer: PeerId, message: JobDeclaration<'static>) -> TestResult {
+    fn jd_message(&mut self, peer: PeerId, message: JobDeclaration) -> TestResult {
         match message {
             JobDeclaration::AllocateMiningJobToken(request) => {
                 let token = self.tokens.allocate(peer, &self.peers[&peer].identity);
@@ -746,11 +739,9 @@ impl State {
                         AllocateMiningJobTokenSuccess {
                             request_id: request.request_id,
                             mining_job_token: token.try_into().expect("token"),
-                            coinbase_output_max_additional_size: 10,
-                            coinbase_output: TokenRegistry::coinbase_output()
+                            coinbase_outputs: TokenRegistry::coinbase_output()
                                 .try_into()
                                 .expect("output"),
-                            async_mining_allowed: false,
                         },
                     )),
                 )
@@ -779,7 +770,7 @@ impl State {
                             Message::JobDeclaration(JobDeclaration::ProvideMissingTransactions(
                                 ProvideMissingTransactions {
                                     request_id,
-                                    unknown_tx_position_list: binary_sv2::Seq064K::new(missing)
+                                    unknown_tx_position_list: Seq064K::new(missing)
                                         .expect("positions"),
                                 },
                             )),
@@ -804,7 +795,7 @@ impl State {
 mod tests {
     use super::*;
     use control::EventMatcher;
-    use roles_logic_sv2::common_messages_sv2::SetupConnection;
+    use protocol::SetupConnection;
     use tokio::time::{timeout_at, Duration, Instant};
 
     #[tokio::test]

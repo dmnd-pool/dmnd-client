@@ -4,7 +4,7 @@ use std::fmt;
 pub enum Error {
     BinarySv2(binary_sv2::Error),
     /// Errors on bad noise handshake.
-    SV2Connection(demand_sv2_connection::Error),
+    SV2Connection(crate::sv2_connection::Error),
     /// Errors from `framing_sv2` crate.
     FramingSv2(framing_sv2::Error),
     /// Errors on bad `TcpStream` connection.
@@ -46,8 +46,8 @@ impl From<binary_sv2::Error> for Error {
     }
 }
 
-impl From<demand_sv2_connection::Error> for Error {
-    fn from(e: demand_sv2_connection::Error) -> Self {
+impl From<crate::sv2_connection::Error> for Error {
+    fn from(e: crate::sv2_connection::Error) -> Self {
         Error::SV2Connection(e)
     }
 }

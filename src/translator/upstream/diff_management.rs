@@ -38,8 +38,7 @@ impl UpstreamDifficultyConfig {
 }
 
 use super::super::error::ProxyResult;
-use binary_sv2::u256_from_int;
-use roles_logic_sv2::{mining_sv2::UpdateChannel, parsers::Mining, utils::Mutex};
+use roles_logic_sv2::{mining_sv2::UpdateChannelOwned, parsers::MiningOwned, utils::Mutex};
 use std::{sync::Arc, time::Duration};
 use tracing::error;
 
@@ -73,7 +72,7 @@ impl UpstreamRetargetRateLimiter {
 
 impl Upstream {
     /// Emit an `UpdateChannel` using the current aggregate nominal hashrate.
-    pub(super) async fn try_update_hashrate(self_: Arc<Mutex<Self>>) -> ProxyResult<'static, ()> {
+    pub(super) async fn try_update_hashrate(self_: Arc<Mutex<Self>>) -> ProxyResult<()> {
         let (channel_id_option, diff_mgmt, tx_message) = self_
             .safe_lock(|u| (u.channel_id, u.difficulty_config.clone(), u.sender.clone()))
             .map_err(|_e| Error::TranslatorDiffConfigMutexPoisoned)?;
@@ -83,12 +82,12 @@ impl Upstream {
         let new_hashrate = diff_mgmt
             .safe_lock(|d| d.channel_nominal_hashrate)
             .map_err(|_| Error::TranslatorDiffConfigMutexPoisoned)?;
-        let update_channel = UpdateChannel {
+        let update_channel = UpdateChannelOwned {
             channel_id,
             nominal_hash_rate: new_hashrate,
-            maximum_target: u256_from_int(u64::MAX),
+            maximum_target: crate::shared::utils::maximum_channel_target(),
         };
-        let message = Mining::UpdateChannel(update_channel);
+        let message = MiningOwned::UpdateChannel(update_channel);
 
         if tx_message.send(message).await.is_err() {
             error!("Failed to send message");

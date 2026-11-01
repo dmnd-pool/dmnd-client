@@ -1,12 +1,13 @@
 #![allow(dead_code, unused_crate_dependencies)]
 mod support;
 
+use binary_sv2::{Seq0255Owned as Seq0255, Sv2OptionOwned as Sv2Option};
 use bitcoin::{consensus::serialize, hashes::Hash, Network};
-use roles_logic_sv2::{
-    common_messages_sv2::{Protocol, SetupConnection},
-    mining_sv2::{NewExtendedMiningJob, OpenExtendedMiningChannel, SubmitSharesExtended},
-    parsers::{CommonMessages, Mining},
-    template_distribution_sv2::{NewTemplate, SetNewPrevHash},
+use dmnd_client::sv2_connection;
+use roles_logic_sv2::mining_sv2::OpenExtendedMiningChannelOwned as OpenExtendedMiningChannel;
+use support::pool::protocol::{
+    CommonMessages, Mining, NewExtendedMiningJob, NewTemplate, Protocol, Seq064K, SetupConnection,
+    SubmitSharesExtended, TemplatePrevHash as SetNewPrevHash,
 };
 use support::{
     pool::{
@@ -21,7 +22,7 @@ use support::{
 };
 use tokio::time::{Duration, Instant};
 
-fn vector() -> (ChannelState, JobRecord, SubmitSharesExtended<'static>) {
+fn vector() -> (ChannelState, JobRecord, SubmitSharesExtended) {
     let genesis = bitcoin::blockdata::constants::genesis_block(Network::Bitcoin);
     let header = genesis.header;
     let channel = ChannelState {
@@ -43,10 +44,10 @@ fn vector() -> (ChannelState, JobRecord, SubmitSharesExtended<'static>) {
         message: NewExtendedMiningJob {
             channel_id: 1,
             job_id: 1,
-            min_ntime: binary_sv2::Sv2Option::new(Some(header.time)),
+            min_ntime: Sv2Option::new(Some(header.time)),
             version: header.version.to_consensus() as u32,
             version_rolling_allowed: false,
-            merkle_path: binary_sv2::Seq0255::new(vec![]).unwrap(),
+            merkle_path: Seq0255::new(vec![]).unwrap(),
             coinbase_tx_prefix: serialize(&genesis.txdata[0]).try_into().unwrap(),
             coinbase_tx_suffix: vec![].try_into().unwrap(),
         },
@@ -107,7 +108,7 @@ fn invalid_work_and_connection_scope() {
     let (channel, job, share) = vector();
     let reject = |channel: &ChannelState,
                   job: &JobRecord,
-                  share: &SubmitSharesExtended<'_>,
+                  share: &SubmitSharesExtended,
                   expected| {
         assert!(
             matches!(ShareValidator::default().validate(PeerId(1),Some(channel),Some(job),share),ShareOutcome::Rejected(reason) if reason == expected)
@@ -152,13 +153,12 @@ fn merkle_known_answer() {
 
 #[test]
 fn jd_tokens_missing_transactions_and_custom_job_consistency() -> TestResult {
-    use roles_logic_sv2::{
-        job_creator::extended_job_from_custom_job,
-        job_declaration_sv2::{DeclareMiningJob, ProvideMissingTransactionsSuccess},
-        mining_sv2::SetCustomMiningJob,
-    };
     use support::pool::{
         jd::{coinbase_merkle_path, TokenRegistry},
+        protocol::{
+            encode_coinbase_outputs, extended_job_from_custom_job, DeclareMiningJob,
+            ProvideMissingTransactionsSuccess, SetCustomMiningJob,
+        },
         templates::TemplateStore,
     };
     let mut transaction = bitcoin::blockdata::constants::genesis_block(Network::Bitcoin)
@@ -171,6 +171,9 @@ fn jd_tokens_missing_transactions_and_custom_job_consistency() -> TestResult {
     let bytes = serialize(&transaction);
     let wtxid = transaction.compute_wtxid().to_byte_array();
     let merkle_path = coinbase_merkle_path(&[transaction.compute_txid().to_byte_array()]);
+    let reward = 5_000_000_000;
+    let mut pool_output = support::pool::jobs::pool_output();
+    pool_output.value = bitcoin::Amount::from_sat(reward);
     let mut custom = SetCustomMiningJob {
         channel_id: 1,
         request_id: 1,
@@ -182,12 +185,11 @@ fn jd_tokens_missing_transactions_and_custom_job_consistency() -> TestResult {
         coinbase_tx_version: 2,
         coinbase_prefix: vec![2, 1, 1, 0].try_into().unwrap(),
         coinbase_tx_input_n_sequence: u32::MAX,
-        coinbase_tx_value_remaining: 5_000_000_000,
-        coinbase_tx_outputs: TokenRegistry::coinbase_output().try_into().unwrap(),
-        coinbase_tx_locktime: 0,
-        merkle_path: binary_sv2::Seq0255::new(merkle_path.into_iter().map(Into::into).collect())
+        coinbase_tx_outputs: encode_coinbase_outputs(vec![pool_output])
+            .try_into()
             .unwrap(),
-        extranonce_size: 0,
+        coinbase_tx_locktime: 0,
+        merkle_path: Seq0255::new(merkle_path.into_iter().map(Into::into).collect()).unwrap(),
     };
     let job = extended_job_from_custom_job(&custom, 0, 32)
         .map_err(|e| support::error(format!("fixture: {e:?}")))?;
@@ -197,9 +199,9 @@ fn jd_tokens_missing_transactions_and_custom_job_consistency() -> TestResult {
         request_id: 1,
         mining_job_token: token.try_into().unwrap(),
         version: custom.version,
-        coinbase_prefix: job.coinbase_tx_prefix,
-        coinbase_suffix: job.coinbase_tx_suffix,
-        tx_list: binary_sv2::Seq064K::new(vec![wtxid.into()]).unwrap(),
+        coinbase_tx_prefix: job.coinbase_tx_prefix,
+        coinbase_tx_suffix: job.coinbase_tx_suffix,
+        wtxid_list: Seq064K::new(vec![wtxid.into()]).unwrap(),
         excess_data: vec![].try_into().unwrap(),
     };
     let mut store = TemplateStore::default();
@@ -219,7 +221,7 @@ fn jd_tokens_missing_transactions_and_custom_job_consistency() -> TestResult {
             PeerId(2),
             ProvideMissingTransactionsSuccess {
                 request_id: 1,
-                transaction_list: binary_sv2::Seq064K::new(vec![]).unwrap()
+                transaction_list: Seq064K::new(vec![]).unwrap()
             },
             &mut store
         )
@@ -228,7 +230,7 @@ fn jd_tokens_missing_transactions_and_custom_job_consistency() -> TestResult {
         PeerId(2),
         ProvideMissingTransactionsSuccess {
             request_id: 1,
-            transaction_list: binary_sv2::Seq064K::new(vec![bytes.try_into().unwrap()]).unwrap(),
+            transaction_list: Seq064K::new(vec![bytes.try_into().unwrap()]).unwrap(),
         },
         &mut store,
     )?;
@@ -239,7 +241,7 @@ fn jd_tokens_missing_transactions_and_custom_job_consistency() -> TestResult {
     invalid.token = vec![0].try_into().unwrap();
     assert!(tokens.custom("identity", &invalid, &store).is_err());
     let mut invalid = custom.clone();
-    invalid.merkle_path = binary_sv2::Seq0255::new(vec![]).unwrap();
+    invalid.merkle_path = Seq0255::new(vec![]).unwrap();
     assert!(tokens.custom("identity", &invalid, &store).is_err());
     let mut invalid = custom.clone();
     invalid.coinbase_tx_locktime = 1;
@@ -248,15 +250,13 @@ fn jd_tokens_missing_transactions_and_custom_job_consistency() -> TestResult {
     let valid_declaration = tokens.declarations[&(PeerId(2), 1)].message.clone();
     for pool_payment in [0, 1] {
         let mut invalid = custom.clone();
-        invalid.coinbase_tx_value_remaining -= pool_payment;
         let diverted = bitcoin::TxOut {
-            value: bitcoin::Amount::ZERO,
+            value: bitcoin::Amount::from_sat(reward - pool_payment),
             script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x52]),
         };
         let mut pool_output = support::pool::jobs::pool_output();
         pool_output.value = bitcoin::Amount::from_sat(pool_payment);
-        invalid.coinbase_tx_outputs = [serialize(&diverted), serialize(&pool_output)]
-            .concat()
+        invalid.coinbase_tx_outputs = encode_coinbase_outputs(vec![diverted, pool_output])
             .try_into()
             .unwrap();
         let job = extended_job_from_custom_job(&invalid, 0, 32)
@@ -264,8 +264,8 @@ fn jd_tokens_missing_transactions_and_custom_job_consistency() -> TestResult {
         let mut declaration = valid_declaration.clone();
         declaration.request_id = 2;
         declaration.mining_job_token = tokens.allocate(PeerId(2), "identity").try_into().unwrap();
-        declaration.coinbase_prefix = job.coinbase_tx_prefix;
-        declaration.coinbase_suffix = job.coinbase_tx_suffix;
+        declaration.coinbase_tx_prefix = job.coinbase_tx_prefix;
+        declaration.coinbase_tx_suffix = job.coinbase_tx_suffix;
         assert_eq!(
             tokens
                 .declare(PeerId(2), "identity", declaration.clone(), &store, false)
@@ -279,8 +279,8 @@ fn jd_tokens_missing_transactions_and_custom_job_consistency() -> TestResult {
             .get_mut(&(PeerId(2), 1))
             .unwrap()
             .message;
-        registered.coinbase_prefix = declaration.coinbase_prefix;
-        registered.coinbase_suffix = declaration.coinbase_suffix;
+        registered.coinbase_tx_prefix = declaration.coinbase_tx_prefix;
+        registered.coinbase_tx_suffix = declaration.coinbase_tx_suffix;
         assert_eq!(
             tokens
                 .custom("identity", &invalid, &store)
@@ -322,7 +322,7 @@ pub async fn setup(
     Ok(connection)
 }
 
-fn template(id: u64) -> NewTemplate<'static> {
+fn template(id: u64) -> NewTemplate {
     NewTemplate {
         template_id: id,
         future_template: true,
@@ -334,7 +334,7 @@ fn template(id: u64) -> NewTemplate<'static> {
         coinbase_tx_outputs_count: 0,
         coinbase_tx_outputs: vec![].try_into().unwrap(),
         coinbase_tx_locktime: 0,
-        merkle_path: binary_sv2::Seq0255::new(vec![]).unwrap(),
+        merkle_path: Seq0255::new(vec![]).unwrap(),
     }
 }
 
@@ -410,7 +410,7 @@ async fn simultaneous_connections_history_controls_and_shutdown() -> TestResult 
             panic!("open");
         };
         assert_eq!(
-            opened.extranonce_size as usize + opened.extranonce_prefix.as_ref().len(),
+            opened.extranonce_size as usize + opened.extranonce_prefix.as_bytes().len(),
             32
         );
         assert!(matches!(
@@ -508,7 +508,7 @@ async fn resume_delivers_more_responses_than_the_peer_queue_capacity() -> TestRe
         };
         let mut target = [255; 32];
         target[..4].copy_from_slice(&index.to_le_bytes());
-        assert_eq!(message.maximum_target.as_ref(), target);
+        assert_eq!(message.maximum_target.as_bytes(), target);
     }
     drop(peer);
     pool.shutdown().await?;

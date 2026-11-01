@@ -24,8 +24,8 @@ pub enum PoolCommand {
     RejectNextSubmit,
     RejectNextDeclaration,
     Snapshot,
-    PublishTemplate(roles_logic_sv2::template_distribution_sv2::NewTemplate<'static>),
-    PublishTip(roles_logic_sv2::template_distribution_sv2::SetNewPrevHash<'static>),
+    PublishTemplate(super::protocol::NewTemplate),
+    PublishTip(super::protocol::TemplatePrevHash),
 }
 
 #[derive(Clone, Debug, Serialize)]
