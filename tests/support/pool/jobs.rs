@@ -1,16 +1,15 @@
-use super::{control::ChannelKey, transport::PeerId};
+use super::{
+    control::ChannelKey,
+    protocol::{
+        ExtendedExtranonce, Mining, NewExtendedMiningJob, NewTemplate, SetCustomMiningJob,
+        SetCustomMiningJobSuccess, Target, TemplatePrevHash, U256,
+    },
+    transport::PeerId,
+};
 use crate::support::{error, TestResult};
-#[cfg(not(legacy_sv2_transport))]
-use roles_logic_sv2::binary_sv2;
 use roles_logic_sv2::{
     channel_logic::channel_factory::{ExtendedChannelKind, PoolChannelFactory},
     job_creator::JobsCreators,
-    mining_sv2::{
-        ExtendedExtranonce, NewExtendedMiningJob, SetCustomMiningJob, SetCustomMiningJobSuccess,
-        Target,
-    },
-    parsers::Mining,
-    template_distribution_sv2::{NewTemplate, SetNewPrevHash},
     utils::{GroupId, Mutex},
 };
 use serde::Serialize;
@@ -28,7 +27,7 @@ pub struct JobKey {
 #[derive(Clone, Debug)]
 pub struct JobRecord {
     pub key: JobKey,
-    pub message: NewExtendedMiningJob<'static>,
+    pub message: NewExtendedMiningJob,
     pub prev_hash: Option<[u8; 32]>,
     pub min_ntime: u32,
     pub nbits: u32,
@@ -38,7 +37,7 @@ pub struct JobRecord {
 pub struct JobEngine {
     factory: PoolChannelFactory,
     pub jobs: HashMap<JobKey, JobRecord>,
-    pub tip: Option<SetNewPrevHash<'static>>,
+    pub tip: Option<TemplatePrevHash>,
 }
 
 pub fn pool_output() -> bitcoin::TxOut {
@@ -72,23 +71,20 @@ impl JobEngine {
         request_id: u32,
         hashrate: f32,
         min_size: u16,
-    ) -> TestResult<Vec<Mining<'static>>> {
+    ) -> TestResult<Vec<Mining>> {
         self.factory
             .new_extended_channel(request_id, hashrate.max(1.0), min_size)
             .map_err(|e| error(format!("open channel: {e:?}")))
     }
 
-    pub fn template(
-        &mut self,
-        mut template: NewTemplate<'static>,
-    ) -> TestResult<Vec<(u32, Mining<'static>)>> {
+    pub fn template(&mut self, mut template: NewTemplate) -> TestResult<Vec<(u32, Mining)>> {
         self.factory
             .on_new_template(&mut template)
             .map(|messages| messages.into_iter().collect())
             .map_err(|e| error(format!("new template: {e:?}")))
     }
 
-    pub fn prev_hash(&mut self, tip: SetNewPrevHash<'static>) -> TestResult<u32> {
+    pub fn prev_hash(&mut self, tip: TemplatePrevHash) -> TestResult<u32> {
         let id = self
             .factory
             .on_new_prev_hash_from_tp(&tip)
@@ -98,22 +94,25 @@ impl JobEngine {
     }
 
     pub fn target(&mut self, channel: u32, target: [u8; 32]) -> TestResult {
-        let target: binary_sv2::U256 = target.into();
+        let target: U256 = target.into();
         self.factory
             .update_target_for_channel(channel, Target::from(target))
             .ok_or_else(|| error("unknown channel"))?;
         Ok(())
     }
 
-    pub fn custom(&mut self, message: SetCustomMiningJob<'static>) -> SetCustomMiningJobSuccess {
-        let mut success = self.factory.on_new_set_custom_mining_job(message);
-        // The factory's template and custom-job counters are independent. Reserve a separate
-        // namespace so a custom registration never overwrites an advertised pool job.
+    pub fn custom(&mut self, message: SetCustomMiningJob) -> TestResult<SetCustomMiningJobSuccess> {
+        let mut success = self
+            .factory
+            .on_new_set_custom_mining_job(message)
+            .map_err(|e| error(format!("custom job: {e:?}")))?;
+        // Keep custom registrations in a separate advertised namespace so they cannot
+        // overwrite pool jobs retained by the simulator.
         success.job_id |= 0x8000_0000;
-        success
+        Ok(success)
     }
 
-    pub fn record(&mut self, channel: ChannelKey, message: NewExtendedMiningJob<'static>) {
+    pub fn record(&mut self, channel: ChannelKey, message: NewExtendedMiningJob) {
         let key = JobKey {
             peer: channel.peer,
             channel: channel.channel,
@@ -126,7 +125,7 @@ impl JobEngine {
             JobRecord {
                 key,
                 message,
-                prev_hash: tip.map(|t| t.prev_hash.to_vec().try_into().expect("U256")),
+                prev_hash: tip.map(|t| t.prev_hash.as_ref().try_into().expect("U256")),
                 min_ntime,
                 nbits: tip.map_or(0, |t| t.n_bits),
                 valid: tip.is_some(),

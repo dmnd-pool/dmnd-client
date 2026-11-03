@@ -4,13 +4,14 @@ mod error;
 pub mod job_declarator;
 pub mod mining_downstream;
 pub mod mining_upstream;
+mod protocol;
 mod task_manager;
 mod template_receiver;
 
 use job_declarator::JobDeclarator;
 use key_utils::Secp256k1PublicKey;
 use mining_downstream::DownstreamMiningNode;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use task_manager::TaskManager;
 use template_receiver::TemplateRx;
 use tracing::{error, info};
@@ -41,8 +42,18 @@ pub static IS_NEW_TEMPLATE_HANDLED: AtomicBool = AtomicBool::new(true);
 pub static IS_CUSTOM_JOB_SET: AtomicBool = AtomicBool::new(true);
 pub static IS_NEW_PHASH_ARRIVED: AtomicBool = AtomicBool::new(false);
 
+static COINBASE_RESERVATION_RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn request_coinbase_reservation_restart() {
+    COINBASE_RESERVATION_RESTART_REQUESTED.store(true, Ordering::Release);
+}
+
+pub(crate) fn take_coinbase_reservation_restart_request() -> bool {
+    COINBASE_RESERVATION_RESTART_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
 use crate::proxy_state::{DownstreamType, ProxyState, TpState};
-use roles_logic_sv2::{parsers::Mining, utils::Mutex};
+use roles_logic_sv2::{parsers::MiningOwned, utils::Mutex};
 use std::{
     net::{IpAddr, SocketAddr},
     str::FromStr,
@@ -52,10 +63,10 @@ use std::{
 use crate::shared::utils::AbortOnDrop;
 
 pub async fn start(
-    receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
-    sender: tokio::sync::mpsc::Sender<Mining<'static>>,
-    up_receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
-    up_sender: tokio::sync::mpsc::Sender<Mining<'static>>,
+    receiver: tokio::sync::mpsc::Receiver<MiningOwned>,
+    sender: tokio::sync::mpsc::Sender<MiningOwned>,
+    up_receiver: tokio::sync::mpsc::Receiver<MiningOwned>,
+    up_sender: tokio::sync::mpsc::Sender<MiningOwned>,
 ) -> Option<AbortOnDrop> {
     // This will not work when we implement support for multiple upstream
     IS_CUSTOM_JOB_SET.store(true, std::sync::atomic::Ordering::Release);
@@ -65,10 +76,10 @@ pub async fn start(
 }
 
 async fn initialize_jd(
-    receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
-    sender: tokio::sync::mpsc::Sender<Mining<'static>>,
-    up_receiver: tokio::sync::mpsc::Receiver<Mining<'static>>,
-    up_sender: tokio::sync::mpsc::Sender<Mining<'static>>,
+    receiver: tokio::sync::mpsc::Receiver<MiningOwned>,
+    sender: tokio::sync::mpsc::Sender<MiningOwned>,
+    up_receiver: tokio::sync::mpsc::Receiver<MiningOwned>,
+    up_sender: tokio::sync::mpsc::Sender<MiningOwned>,
 ) -> Option<AbortOnDrop> {
     let task_manager = TaskManager::initialize();
     let abortable = match task_manager.safe_lock(|t| t.get_aborter()) {
@@ -94,6 +105,13 @@ async fn initialize_jd(
             return None;
         }
     };
+    if TaskManager::add_mining_session(task_manager.clone(), upstream.clone())
+        .await
+        .is_err()
+    {
+        error!("Failed to register the JD mining session");
+        return None;
+    }
 
     // Initialize JD part
     let tp_address = match crate::TP_ADDRESS.safe_lock(|tp| tp.clone()) {

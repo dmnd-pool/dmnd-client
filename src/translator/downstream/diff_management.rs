@@ -19,7 +19,7 @@ pub const NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY: f32 = 131_072.0;
 impl Downstream {
     /// Initializes difficult managment.
     /// Send downstream a first target.
-    pub async fn init_difficulty_management(self_: &'_ Arc<Mutex<Self>>) -> ProxyResult<'_, ()> {
+    pub async fn init_difficulty_management(self_: &'_ Arc<Mutex<Self>>) -> ProxyResult<()> {
         let (diff, stats_sender, connection_id, estimated_hashrate) = self_.safe_lock(|d| {
             (
                 d.difficulty_mgmt
@@ -68,9 +68,7 @@ impl Downstream {
 
     /// Called before a miner disconnects so we can remove the miner's hashrate from the
     /// aggregated channel hashrate.
-    pub fn remove_downstream_hashrate_from_channel(
-        self_: &Arc<Mutex<Self>>,
-    ) -> ProxyResult<'static, ()> {
+    pub fn remove_downstream_hashrate_from_channel(self_: &Arc<Mutex<Self>>) -> ProxyResult<()> {
         let (upstream_diff, estimated_downstream_hash_rate, should_subtract) =
             self_.safe_lock(|d| {
                 (
@@ -98,7 +96,7 @@ impl Downstream {
     pub fn request_upstream_rate_limit_retarget(
         self_: &Arc<Mutex<Self>>,
         multiplier: f32,
-    ) -> ProxyResult<'static, (f32, f32)> {
+    ) -> ProxyResult<(f32, f32)> {
         let upstream_difficulty_config = self_
             .safe_lock(|d| d.upstream_difficulty_config.clone())
             .map_err(|_| Error::TranslatorDiffConfigMutexPoisoned)?;
@@ -116,9 +114,7 @@ impl Downstream {
 
     /// Checks the downstream's difficulty based on recent share submissions. And if is worth an update, update the
     /// downstream and the bridge.
-    pub async fn try_update_difficulty_settings(
-        self_: &Arc<Mutex<Self>>,
-    ) -> ProxyResult<'static, ()> {
+    pub async fn try_update_difficulty_settings(self_: &Arc<Mutex<Self>>) -> ProxyResult<()> {
         if crate::config::Configuration::difficulty_updates_disabled() {
             return Ok(());
         }
@@ -142,7 +138,7 @@ impl Downstream {
         self_: &Arc<Mutex<Self>>,
         channel_id: u32,
         new_diff: f64,
-    ) -> ProxyResult<'static, ()> {
+    ) -> ProxyResult<()> {
         if crate::config::Configuration::difficulty_updates_disabled() {
             return Ok(());
         }
@@ -174,7 +170,7 @@ impl Downstream {
     }
 
     /// Increments the number of shares since the last difficulty update.
-    pub(super) fn save_share(self_: Arc<Mutex<Self>>) -> ProxyResult<'static, ()> {
+    pub(super) fn save_share(self_: Arc<Mutex<Self>>) -> ProxyResult<()> {
         if crate::config::Configuration::difficulty_updates_disabled() {
             return Ok(());
         }
@@ -224,9 +220,7 @@ impl Downstream {
     ///
     /// Returns `Some(new_difficulty)` when a new downstream difficulty should be sent, or `None`
     /// when no `mining.set_difficulty` update is needed.
-    pub fn update_difficulty_and_hashrate(
-        self_: &Arc<Mutex<Self>>,
-    ) -> ProxyResult<'static, Option<f32>> {
+    pub fn update_difficulty_and_hashrate(self_: &Arc<Mutex<Self>>) -> ProxyResult<Option<f32>> {
         let timestamp_millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("time went backwards")
@@ -308,7 +302,7 @@ impl Downstream {
     fn reconcile_hash_rate_estimation(
         self_: &Arc<Mutex<Self>>,
         new_estimation: f32,
-    ) -> ProxyResult<'static, ()> {
+    ) -> ProxyResult<()> {
         let (upstream_difficulty_config, old_estimation, connection_id, stats_sender, changed) =
             self_.safe_lock(|d| {
                 let old_estimation = d.difficulty_mgmt.estimated_downstream_hash_rate;
@@ -348,7 +342,7 @@ impl Downstream {
         self_: &Arc<Mutex<Self>>,
         new_estimation: f32,
         current_diff: f32,
-    ) -> ProxyResult<'static, ()> {
+    ) -> ProxyResult<()> {
         let (connection_id, stats_sender) = self_.safe_lock(|d| {
             d.difficulty_mgmt.reset();
             d.difficulty_mgmt.add_difficulty(current_diff);
@@ -363,7 +357,7 @@ impl Downstream {
 
 // Converts difficulty to SV1 `SetDifficulty` message and corresponding target.
 /// Returns JSON-RPC message and the target.
-fn diff_to_sv1_message(diff: f64) -> ProxyResult<'static, (json_rpc::Message, [u8; 32])> {
+fn diff_to_sv1_message(diff: f64) -> ProxyResult<(json_rpc::Message, [u8; 32])> {
     let message: json_rpc::Message = json_rpc::Notification {
         method: "mining.set_difficulty".to_string(),
         params: serde_json::Value::Array(vec![downstream_difficulty_param(diff)]),
@@ -434,10 +428,10 @@ mod test {
         api::stats::StatsSender,
         translator::downstream::{downstream::DownstreamDifficultyConfig, Downstream},
     };
-    use binary_sv2::U256;
+    use binary_sv2::U256Owned;
     use pid::Pid;
     use rand::{thread_rng, Rng};
-    use roles_logic_sv2::{mining_sv2::Target, utils::Mutex};
+    use roles_logic_sv2::{mining::Target, utils::Mutex};
     use sha2::{Digest, Sha256};
     use std::{
         collections::VecDeque,
@@ -533,7 +527,7 @@ mod test {
         nonce += 1;
         share[0..8].copy_from_slice(&nonce.to_le_bytes());
         let hash = Sha256::digest(&share).to_vec();
-        let hash: U256<'static> = hash.try_into().unwrap();
+        let hash: U256Owned = hash.try_into().unwrap();
         hash.into()
     }
 
@@ -1018,11 +1012,12 @@ mod test {
 
         let expected_nominal_hashrate = measure_hashrate(5);
         let expected_diff = get_diff(expected_nominal_hashrate as f32);
-        let expected_target: U256 = Downstream::difficulty_to_target(expected_diff).into();
+        let expected_target: U256Owned = Downstream::difficulty_to_target(expected_diff).into();
 
         let initial_nominal_hashrate = start_hashrate;
         let initial_difficulty = get_diff(initial_nominal_hashrate as f32);
-        let mut initial_target: U256 = Downstream::difficulty_to_target(initial_difficulty).into();
+        let mut initial_target: U256Owned =
+            Downstream::difficulty_to_target(initial_difficulty).into();
         let downstream = Arc::new(Mutex::new(downstream));
         Downstream::init_difficulty_management(&downstream)
             .await
@@ -1038,8 +1033,8 @@ mod test {
             .into();
             elapsed = timer.elapsed();
         }
-        let expected_0s = trailing_0s(expected_target.inner_as_ref().to_vec());
-        let actual_0s = trailing_0s(initial_target.inner_as_ref().to_vec());
+        let expected_0s = trailing_0s(expected_target.as_bytes().to_vec());
+        let actual_0s = trailing_0s(initial_target.as_bytes().to_vec());
         assert!(expected_0s.abs_diff(actual_0s) <= 1);
     }
     fn trailing_0s(mut v: Vec<u8>) -> usize {

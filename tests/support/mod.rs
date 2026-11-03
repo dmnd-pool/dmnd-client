@@ -1,6 +1,8 @@
 pub mod artifacts;
 pub mod pool;
 pub mod processes;
+#[path = "../../src/share_accounter/protocol/mod.rs"]
+pub mod share_accounting;
 pub mod sv1_client;
 
 pub type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;

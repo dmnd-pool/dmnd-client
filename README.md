@@ -380,3 +380,75 @@ Happy mining!
     cargo build --release
 
 The binary is produced at `./target/release/dmnd-client` — use it exactly as shown in Section 4.1.
+
+## Native SRI migration
+
+The CLI uses [`roles_logic_sv2` 4.0.0](https://github.com/dmnd-pool/roles-logic/tree/95839819d259fedf80d69cbfba5eab4f7857c206).
+The revision is `95839819d259fedf80d69cbfba5eab4f7857c206`. Cargo fetches this
+library from Git. Its source is not copied into this repository.
+
+Production uses `binary_sv2` 7.0.0, `codec_sv2` 7.0.0, `framing_sv2` 8.0.0,
+`noise_sv2` 2.0.0, and `sv1_api` 6.0.0. The production dependency graph contains
+no crates from the old DMND Stratum repository. The existing development
+dependencies remain available to the independent mining test runner.
+
+The SRI binary, codec, framing, and noise crates come from crates.io. The
+client has no local source overrides for these dependencies.
+
+`src/sv2_connection` connects the native SRI codec to Tokio TCP streams. Each
+connection owns its handshake and encryption state. Messages in queues own
+their data. Received frames retain their buffer owner until they are released,
+including after a connection stops. Both connection tasks stop when either
+side closes. Message and frame size queries do not serialize data or allocate
+heap memory.
+
+`src/share_accounter/protocol` contains the client-specific share-accounting
+messages. It preserves extension ID 32, message IDs, field order, and payload
+validation. Standard messages use the native SRI parser. The protocol types
+come from the DMND share-accounting extension; the client does not keep a
+separate copy of that dependency package.
+
+Job Declaration uses transaction witness IDs, `PushSolution`, and the native
+coinbase output constraints. Token and custom-job output lists include their
+Bitcoin count field. Template output lists retain the separate count field.
+Channel group changes pass to the translator. Share validation uses the native
+Merkle-root helper after hashing the assembled coinbase.
+
+Coinbase output limits use BIP141 signature-operation cost. A P2PKH output
+reserves four units. Costs that do not fit the protocol field are rejected.
+Each token is checked against both advertised limits. If either limit must
+increase, the CLI retains the larger limits and restarts the mining session
+with the same pool. The new template connection advertises those limits before
+it uses a template. This prevents queued templates from using the earlier,
+smaller reservation. Smaller tokens do not reduce the limits. Merge-mining
+output space remains reserved.
+
+The translator stores miner channels and extranonce prefixes in hash indexes.
+Channel setup and removal use constant expected lookup time. Disconnects remove
+both records. The native factory keeps the job, previous-hash, and group state;
+the CLI uses the native version, target, and Merkle helpers to check shares.
+This avoids the upstream factory's scan through all existing miner prefixes.
+It also avoids per-miner job copies because SV1 miners use the existing job
+broadcast. Unit tests compare channel assignments and share results with the
+native factory, including serialized bytes and protocol rejections.
+
+### Checks without the mining suite
+
+Run these commands from the repository root:
+
+```sh
+rustfmt --edition 2021 src/lib.rs src/main.rs
+cargo check --locked --lib --bin dmnd-client
+cargo clippy --lib --bin dmnd-client --all-features -- -D warnings
+cargo test --locked --lib -- --test-threads=1
+cargo test --locked --bin dmnd-client
+cargo test --locked --lib sv2_connection
+cargo test --locked --lib protocol_tests
+```
+
+Library unit tests check message bytes, malformed payloads, invalid headers,
+version rejection, channel assignments, and transaction selection. Transport unit tests also check encrypted frames, fragmented reads,
+large messages, concurrent handshakes, authentication rejection, and connection
+closure. The `native_transport_interface_roundtrip` unit test checks both
+handshake roles, encrypted send and receive, frame conversion, headers,
+payload access, and extension messages.

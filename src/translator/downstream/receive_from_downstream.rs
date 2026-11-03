@@ -12,7 +12,7 @@ const DOWNSTREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 pub(super) async fn process_incoming_message(
     downstream: Arc<Mutex<Downstream>>,
     incoming: json_rpc::Message,
-) -> Result<(), Error<'static>> {
+) -> Result<(), Error> {
     let is_submit = matches!(
         &incoming,
         json_rpc::Message::StandardRequest(request) if request.method == "mining.submit"
@@ -43,7 +43,7 @@ pub async fn start_receive_downstream(
     downstream: Arc<Mutex<Downstream>>,
     mut recv_from_down: mpsc::Receiver<String>,
     connection_id: u32,
-) -> Result<(), Error<'static>> {
+) -> Result<(), Error> {
     let handle = {
         let task_manager = task_manager.clone();
         task::spawn(async move {
@@ -112,6 +112,11 @@ pub async fn start_receive_downstream(
             if let Err(e) = downstream.safe_lock(|d| d.mark_closed()) {
                 error!("Failed to mark downstream {connection_id} closed: {e}");
             }
+            Downstream::send_message_upstream(
+                &downstream,
+                super::DownstreamMessages::CloseChannel(connection_id),
+            )
+            .await;
             let stats_sender = downstream.safe_lock(|d| d.stats_sender.clone()).ok();
             if let Some(stats_sender) = stats_sender {
                 if let Err(e) = stats_sender.remove_stats_reliable(connection_id).await {

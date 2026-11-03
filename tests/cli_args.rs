@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_crate_dependencies)]
 mod support;
 
+use dmnd_client::sv2_connection;
 use std::{fs, path::Path, time::Duration};
 use support::{
     artifacts::Artifacts,

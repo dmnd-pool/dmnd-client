@@ -1,6 +1,7 @@
 use super::{
     jobs::{JobKey, JobRecord},
     mining::ChannelState,
+    protocol::SubmitSharesExtended,
     transport::PeerId,
 };
 use bitcoin::{
@@ -9,7 +10,6 @@ use bitcoin::{
     hashes::{sha256d, Hash},
     BlockHash, CompactTarget, Target, Transaction, TxMerkleNode,
 };
-use roles_logic_sv2::mining_sv2::SubmitSharesExtended;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
@@ -84,7 +84,7 @@ impl ShareValidator {
         peer: PeerId,
         channel: Option<&ChannelState>,
         job: Option<&JobRecord>,
-        share: &SubmitSharesExtended<'_>,
+        share: &SubmitSharesExtended,
     ) -> ShareOutcome {
         let reject = ShareOutcome::Rejected;
         let Some(channel) =
@@ -133,9 +133,10 @@ impl ShareValidator {
         let path = job
             .message
             .merkle_path
-            .to_vec()
+            .clone()
+            .into_inner()
             .into_iter()
-            .map(|h| h.to_vec().try_into().expect("U256"))
+            .map(|h| h.as_ref().try_into().expect("U256"))
             .collect::<Vec<_>>();
         let root = merkle_root(coinbase.compute_txid().to_byte_array(), &path);
         let header = Header {

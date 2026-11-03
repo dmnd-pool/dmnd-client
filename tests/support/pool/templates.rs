@@ -1,16 +1,13 @@
 use super::{
+    protocol::{
+        CoinbaseOutputConstraints, CommonMessages, Protocol, RequestTransactionData,
+        RequestTransactionDataSuccess, SetupConnection, TemplateDistribution,
+    },
     transport::{Message, PeerConnection},
     Inbound,
 };
 use crate::support::{error, TestResult};
 use bitcoin::{consensus::deserialize, hashes::Hash, Transaction};
-use roles_logic_sv2::{
-    common_messages_sv2::{Protocol, SetupConnection},
-    parsers::{CommonMessages, TemplateDistribution},
-    template_distribution_sv2::{
-        CoinbaseOutputDataSize, RequestTransactionData, RequestTransactionDataSuccess,
-    },
-};
 use std::{collections::HashMap, net::SocketAddr};
 use tokio::sync::mpsc;
 
@@ -20,11 +17,11 @@ pub struct TemplateStore {
 }
 
 impl TemplateStore {
-    pub fn transaction_data(&mut self, data: RequestTransactionDataSuccess<'static>) -> TestResult {
+    pub fn transaction_data(&mut self, data: RequestTransactionDataSuccess) -> TestResult {
         for bytes in data.transaction_list.into_inner() {
             let tx: Transaction = deserialize(bytes.as_ref())?;
             self.transactions
-                .insert(tx.compute_wtxid().to_byte_array(), bytes.to_vec());
+                .insert(tx.compute_wtxid().to_byte_array(), bytes.as_ref().to_vec());
         }
         // Only JD declarations need the cached mempool; request missing transactions when evicted.
         if self.transactions.len() > 32768 {
@@ -61,8 +58,9 @@ impl TemplateClient {
         }
         connection
             .send(Message::TemplateDistribution(
-                TemplateDistribution::CoinbaseOutputDataSize(CoinbaseOutputDataSize {
+                TemplateDistribution::CoinbaseOutputConstraints(CoinbaseOutputConstraints {
                     coinbase_output_max_additional_size: 10,
+                    coinbase_output_max_additional_sigops: 0,
                 }),
             ))
             .await?;

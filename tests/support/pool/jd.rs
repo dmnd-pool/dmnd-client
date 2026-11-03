@@ -1,25 +1,25 @@
 use super::{
     jobs::{pool_output, EXTRANONCE_LEN},
+    protocol::{
+        declaration_coinbase, declaration_wtxids, decode_coinbase_outputs, encode_coinbase_outputs,
+        extended_job_from_custom_job, DeclareMiningJob, NewExtendedMiningJob,
+        ProvideMissingTransactionsSuccess, SetCustomMiningJob,
+    },
     templates::TemplateStore,
     transport::PeerId,
 };
 use crate::support::{error, TestResult};
 use bitcoin::{
-    consensus::{deserialize, serialize},
+    consensus::deserialize,
     hashes::{sha256d, Hash},
     Transaction,
-};
-use roles_logic_sv2::{
-    job_creator::extended_job_from_custom_job,
-    job_declaration_sv2::{DeclareMiningJob, ProvideMissingTransactionsSuccess},
-    mining_sv2::{NewExtendedMiningJob, SetCustomMiningJob},
 };
 use std::collections::{HashMap, HashSet};
 
 pub struct DeclarationState {
     pub peer: PeerId,
     pub identity: String,
-    pub message: DeclareMiningJob<'static>,
+    pub message: DeclareMiningJob,
     pub missing: Vec<u16>,
     pub signed_token: Option<Vec<u8>>,
 }
@@ -45,33 +45,28 @@ impl TokenRegistry {
         &mut self,
         peer: PeerId,
         identity: &str,
-        message: DeclareMiningJob<'static>,
+        message: DeclareMiningJob,
         store: &TemplateStore,
         force_missing: bool,
     ) -> TestResult<Vec<u16>> {
-        let token = message.mining_job_token.to_vec();
+        let token = message.mining_job_token.as_ref().to_vec();
         if self.allocated.get(&token) != Some(&(peer, identity.to_string())) {
             return Err(error("invalid-mining-job-token"));
         }
         if self.declarations.contains_key(&(peer, message.request_id)) {
             return Err(error("duplicate-request-id"));
         }
-        let coinbase: Transaction = deserialize(
-            &[
-                message.coinbase_prefix.as_ref(),
-                &[0; EXTRANONCE_LEN as usize],
-                message.coinbase_suffix.as_ref(),
-            ]
-            .concat(),
-        )?;
+        let (prefix, suffix) = declaration_coinbase(&message);
+        let coinbase: Transaction =
+            deserialize(&[prefix, &[0; EXTRANONCE_LEN as usize], suffix].concat())?;
         if !coinbase.is_coinbase() || !pays_pool(&coinbase) {
             return Err(error("invalid-declaration-coinbase"));
         }
         let mut unique = HashSet::new();
-        let txs = message.tx_list.to_vec();
+        let txs = declaration_wtxids(&message);
         let mut missing = vec![];
         for (index, id) in txs.into_iter().enumerate() {
-            let id: [u8; 32] = id.to_vec().try_into().expect("U256");
+            let id: [u8; 32] = id.as_ref().try_into().expect("U256");
             if !unique.insert(id) {
                 return Err(error("duplicate-transaction"));
             }
@@ -96,7 +91,7 @@ impl TokenRegistry {
     pub fn provide(
         &mut self,
         peer: PeerId,
-        message: ProvideMissingTransactionsSuccess<'static>,
+        message: ProvideMissingTransactionsSuccess,
         store: &mut TemplateStore,
     ) -> TestResult {
         let declaration = self
@@ -107,14 +102,14 @@ impl TokenRegistry {
         if txs.len() != declaration.missing.len() {
             return Err(error("missing-transaction-count"));
         }
-        let ids = declaration.message.tx_list.to_vec();
+        let ids = declaration_wtxids(&declaration.message);
         for (position, bytes) in declaration.missing.iter().zip(txs) {
             let tx: Transaction = deserialize(bytes.as_ref())?;
-            let expected: [u8; 32] = ids[*position as usize].to_vec().try_into().expect("U256");
+            let expected: [u8; 32] = ids[*position as usize].as_ref().try_into().expect("U256");
             if tx.is_coinbase() || tx.compute_wtxid().to_byte_array() != expected {
                 return Err(error("missing-transaction-hash"));
             }
-            store.transactions.insert(expected, bytes.to_vec());
+            store.transactions.insert(expected, bytes.as_ref().to_vec());
         }
         declaration.missing.clear();
         Ok(())
@@ -138,9 +133,9 @@ impl TokenRegistry {
     pub fn custom(
         &self,
         identity: &str,
-        message: &SetCustomMiningJob<'static>,
+        message: &SetCustomMiningJob,
         store: &TemplateStore,
-    ) -> TestResult<NewExtendedMiningJob<'static>> {
+    ) -> TestResult<NewExtendedMiningJob> {
         let key = self
             .signed
             .get(message.token.as_ref())
@@ -152,29 +147,21 @@ impl TokenRegistry {
         {
             return Err(error("custom-job-identity-or-version"));
         }
-        // Validate encoded outputs before the locked job constructor, which indexes output[0].
-        use bitcoin::consensus::Decodable;
-        let mut outputs = message.coinbase_tx_outputs.as_ref();
+        // Validate the counted output list before constructing the custom coinbase.
+        let outputs = decode_coinbase_outputs(message.coinbase_tx_outputs.as_ref())?;
         if outputs.is_empty() {
             return Err(error("custom-job-empty-outputs"));
         }
-        while !outputs.is_empty() {
-            bitcoin::TxOut::consensus_decode(&mut outputs)?;
-        }
         let job = extended_job_from_custom_job(message, 0, EXTRANONCE_LEN)
             .map_err(|e| error(format!("custom coinbase: {e:?}")))?;
-        if job.coinbase_tx_prefix != state.message.coinbase_prefix
-            || job.coinbase_tx_suffix != state.message.coinbase_suffix
-        {
+        let (prefix, suffix) = declaration_coinbase(&state.message);
+        if job.coinbase_tx_prefix.as_ref() != prefix || job.coinbase_tx_suffix.as_ref() != suffix {
             return Err(error("custom-job-coinbase-mismatch"));
         }
-        let txids = state
-            .message
-            .tx_list
-            .to_vec()
+        let txids = declaration_wtxids(&state.message)
             .into_iter()
             .map(|id| {
-                let id: [u8; 32] = id.to_vec().try_into().expect("U256");
+                let id: [u8; 32] = id.as_ref().try_into().expect("U256");
                 let bytes = store
                     .transactions
                     .get(&id)
@@ -186,11 +173,12 @@ impl TokenRegistry {
         let path = coinbase_merkle_path(&txids);
         let advertised = message
             .merkle_path
-            .to_vec()
+            .clone()
+            .into_inner()
             .into_iter()
-            .map(|id| id.to_vec())
+            .map(|id| <[u8; 32]>::try_from(id.as_ref()).expect("U256"))
             .collect::<Vec<_>>();
-        if advertised != path.iter().map(|h| h.to_vec()).collect::<Vec<_>>() {
+        if advertised != path {
             return Err(error("custom-job-merkle-mismatch"));
         }
         let coinbase: Transaction = deserialize(
@@ -208,7 +196,7 @@ impl TokenRegistry {
     }
 
     pub fn coinbase_output() -> Vec<u8> {
-        serialize(&pool_output())
+        encode_coinbase_outputs(vec![pool_output()])
     }
 }
 

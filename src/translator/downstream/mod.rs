@@ -1,5 +1,5 @@
-use roles_logic_sv2::mining_sv2::SubmitSharesExtended;
-use roles_logic_sv2::mining_sv2::Target;
+use roles_logic_sv2::mining::Target;
+use roles_logic_sv2::mining_sv2::SubmitSharesExtendedOwned;
 use sv1_api::{client_to_server::Submit, utils::HexU32Be};
 use tokio::sync::oneshot;
 
@@ -24,6 +24,7 @@ const SUBSCRIBE_TIMEOUT_SECS: u64 = 10;
 /// enum of messages sent to the Bridge
 #[derive(Debug)]
 pub enum DownstreamMessages {
+    CloseChannel(u32),
     SubmitShares(SubmitShareWithChannelId),
     SetDownstreamTarget(SetDownstreamTarget),
 }
@@ -37,7 +38,7 @@ pub type SubmitShareResultSender = oneshot::Sender<SubmitShareResult>;
 #[derive(Debug)]
 pub struct SubmitShareWithChannelId {
     pub channel_id: u32,
-    pub share: Submit<'static>,
+    pub share: Submit,
     // TODO why we need allow dead code here???
     #[allow(dead_code)]
     extranonce: Vec<u8>,
@@ -49,7 +50,7 @@ pub struct SubmitShareWithChannelId {
 
 #[derive(Debug)]
 pub struct UpstreamSubmitShare {
-    pub share: SubmitSharesExtended<'static>,
+    pub share: SubmitSharesExtendedOwned,
     pub result_tx: SubmitShareResultSender,
 }
 

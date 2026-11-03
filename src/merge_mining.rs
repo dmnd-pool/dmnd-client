@@ -9,7 +9,7 @@ use bitcoin::{
     Amount, BlockHash, CompactTarget, ScriptBuf, Transaction, TxMerkleNode, TxOut,
 };
 use roles_logic_sv2::{
-    mining_sv2::Target, template_distribution_sv2::NewTemplate, utils::merkle_root_from_path_,
+    mining::Target, template_distribution_sv2::NewTemplateOwned, utils::merkle_root_from_path_,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -393,7 +393,7 @@ impl MergeMining {
     #[cfg(test)]
     pub(crate) fn apply_to_template(
         &self,
-        template: &mut NewTemplate<'static>,
+        template: &mut NewTemplateOwned,
         reserved_bytes: usize,
     ) -> Result<bool, MergeMiningError> {
         self.apply_to_template_with_pool_output_count(template, reserved_bytes, 1)
@@ -401,7 +401,7 @@ impl MergeMining {
 
     pub(crate) fn apply_to_template_with_pool_output_count(
         &self,
-        template: &mut NewTemplate<'static>,
+        template: &mut NewTemplateOwned,
         reserved_bytes: usize,
         pool_output_count: usize,
     ) -> Result<bool, MergeMiningError> {
@@ -415,7 +415,7 @@ impl MergeMining {
 
     fn apply_to_template_with_output_limit(
         &self,
-        template: &mut NewTemplate<'static>,
+        template: &mut NewTemplateOwned,
         reserved_bytes: usize,
         max_template_outputs: u32,
     ) -> Result<bool, MergeMiningError> {
@@ -482,7 +482,7 @@ impl MergeMining {
             if count > max_template_outputs {
                 return Err(MergeMiningError::TooManyTemplateOutputs);
             }
-            let mut outputs = template.coinbase_tx_outputs.to_vec();
+            let mut outputs = template.coinbase_tx_outputs.as_bytes().to_vec();
             outputs.extend_from_slice(&desired.output);
             if is_rsk_payload(&desired.payload) {
                 let expected_tag_position =
@@ -501,15 +501,15 @@ impl MergeMining {
             (count, Some(outputs))
         };
 
-        let template_merkle_path = template.merkle_path.to_vec();
-        let mut merkle_path = Vec::with_capacity(template_merkle_path.len());
-        for sibling in template_merkle_path {
-            let sibling: [u8; 32] = sibling
-                .to_vec()
-                .try_into()
-                .map_err(|_| MergeMiningError::InvalidTemplateOutputs)?;
-            merkle_path.push(sibling);
-        }
+        let merkle_path: Vec<[u8; 32]> = template
+            .merkle_path
+            .iter_bytes()
+            .map(|sibling| {
+                sibling
+                    .try_into()
+                    .map_err(|_| MergeMiningError::InvalidTemplateOutputs)
+            })
+            .collect::<Result<_, _>>()?;
 
         let generation = next_id(&self.core.next_template_generation)
             .ok_or(MergeMiningError::StateUnavailable)?;
@@ -1476,7 +1476,7 @@ fn constant_time_eq(expected: &[u8], supplied: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use binary_sv2::{Seq0255, B0255, B064K, U256};
+    use binary_sv2::{B0255Owned, B064KOwned, Seq0255Owned, U256Owned};
     use bitcoin::{absolute::LockTime, transaction, OutPoint, Sequence, TxIn, Witness};
     use std::time::Duration;
 
@@ -1484,19 +1484,19 @@ mod tests {
         "52534b424c4f434b3a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     const EASY_TARGET: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
-    fn template(template_id: u64) -> NewTemplate<'static> {
-        NewTemplate {
+    fn template(template_id: u64) -> NewTemplateOwned {
+        NewTemplateOwned {
             template_id,
             future_template: false,
             version: 0x2000_0000,
             coinbase_tx_version: 2,
-            coinbase_prefix: B0255::try_from(Vec::new()).expect("empty prefix"),
+            coinbase_prefix: B0255Owned::try_from(Vec::new()).expect("empty prefix"),
             coinbase_tx_input_sequence: u32::MAX,
             coinbase_tx_value_remaining: 0,
             coinbase_tx_outputs_count: 0,
-            coinbase_tx_outputs: B064K::try_from(Vec::new()).expect("empty outputs"),
+            coinbase_tx_outputs: B064KOwned::try_from(Vec::new()).expect("empty outputs"),
             coinbase_tx_locktime: 0,
-            merkle_path: Seq0255::<U256>::from(Vec::new()),
+            merkle_path: Seq0255Owned::<U256Owned>::new(Vec::new()).unwrap(),
         }
     }
 
@@ -1732,13 +1732,16 @@ mod tests {
 
         let mut candidate = template(701);
         candidate.coinbase_tx_locktime = u32::from_le_bytes(*b"OCK:");
-        let original_outputs = candidate.coinbase_tx_outputs.to_vec();
+        let original_outputs = candidate.coinbase_tx_outputs.as_bytes().to_vec();
         assert!(matches!(
             merge.apply_to_template(&mut candidate, RESERVED_COINBASE_OUTPUT_BYTES as usize),
             Err(MergeMiningError::InvalidRskCommitment)
         ));
         assert_eq!(candidate.coinbase_tx_outputs_count, 0);
-        assert_eq!(candidate.coinbase_tx_outputs.to_vec(), original_outputs);
+        assert_eq!(
+            candidate.coinbase_tx_outputs.as_bytes().to_vec(),
+            original_outputs
+        );
         assert!(merge.template_generation(701).is_none());
     }
 
@@ -1782,7 +1785,7 @@ mod tests {
             outputs.extend_from_slice(&serialize(&filler));
             let mut template = template(template_id);
             template.coinbase_tx_outputs_count = 2;
-            template.coinbase_tx_outputs = B064K::try_from(outputs).expect("outputs");
+            template.coinbase_tx_outputs = B064KOwned::try_from(outputs).expect("outputs");
             template
         };
 
@@ -1828,7 +1831,7 @@ mod tests {
         let mut low_count = template(741);
         low_count.coinbase_tx_outputs_count = 2;
         low_count.coinbase_tx_outputs =
-            B064K::try_from(low_count_outputs).expect("low-count outputs");
+            B064KOwned::try_from(low_count_outputs).expect("low-count outputs");
         assert!(merge
             .apply_to_template(&mut low_count, RESERVED_COINBASE_OUTPUT_BYTES as usize)
             .expect("hidden tag requires a final canonical commitment"));
@@ -1841,14 +1844,14 @@ mod tests {
         outputs.extend_from_slice(&serialize(&hidden));
         let mut boundary = template(74);
         boundary.coinbase_tx_outputs_count = 251;
-        boundary.coinbase_tx_outputs = B064K::try_from(outputs.clone()).expect("outputs");
+        boundary.coinbase_tx_outputs = B064KOwned::try_from(outputs.clone()).expect("outputs");
 
         assert!(matches!(
             merge.apply_to_template(&mut boundary, RESERVED_COINBASE_OUTPUT_BYTES as usize),
             Err(MergeMiningError::TooManyTemplateOutputs)
         ));
         assert_eq!(boundary.coinbase_tx_outputs_count, 251);
-        assert_eq!(boundary.coinbase_tx_outputs.to_vec(), outputs);
+        assert_eq!(boundary.coinbase_tx_outputs.as_bytes().to_vec(), outputs);
     }
 
     #[test]
@@ -1867,7 +1870,7 @@ mod tests {
         let mut template = template(71);
         template.coinbase_tx_outputs_count = 1;
         template.coinbase_tx_outputs =
-            B064K::try_from(serialize(&noncanonical)).expect("serialized output");
+            B064KOwned::try_from(serialize(&noncanonical)).expect("serialized output");
 
         assert!(merge
             .apply_to_template(&mut template, RESERVED_COINBASE_OUTPUT_BYTES as usize)
@@ -1882,13 +1885,13 @@ mod tests {
             .set_desired_pair(PAYLOAD_HEX, EASY_TARGET)
             .expect("valid pair");
         let mut template = template(8);
-        let original = template.coinbase_tx_outputs.to_vec();
+        let original = template.coinbase_tx_outputs.as_bytes().to_vec();
         assert!(matches!(
             merge.apply_to_template(&mut template, 51),
             Err(MergeMiningError::OutputTooLarge(52))
         ));
         assert_eq!(template.coinbase_tx_outputs_count, 0);
-        assert_eq!(template.coinbase_tx_outputs.to_vec(), original);
+        assert_eq!(template.coinbase_tx_outputs.as_bytes().to_vec(), original);
     }
 
     #[test]
@@ -1907,7 +1910,7 @@ mod tests {
         let mut boundary_template = template(80);
         boundary_template.coinbase_tx_outputs_count = 251;
         boundary_template.coinbase_tx_outputs =
-            B064K::try_from(outputs.clone()).expect("serialized outputs");
+            B064KOwned::try_from(outputs.clone()).expect("serialized outputs");
 
         assert!(matches!(
             merge.apply_to_template(
@@ -1917,14 +1920,18 @@ mod tests {
             Err(MergeMiningError::TooManyTemplateOutputs)
         ));
         assert_eq!(boundary_template.coinbase_tx_outputs_count, 251);
-        assert_eq!(boundary_template.coinbase_tx_outputs.to_vec(), outputs);
+        assert_eq!(
+            boundary_template.coinbase_tx_outputs.as_bytes().to_vec(),
+            outputs
+        );
 
         let outputs = (0..250)
             .flat_map(|_| serialize(&output))
             .collect::<Vec<_>>();
         let mut safe_template = template(801);
         safe_template.coinbase_tx_outputs_count = 250;
-        safe_template.coinbase_tx_outputs = B064K::try_from(outputs).expect("serialized outputs");
+        safe_template.coinbase_tx_outputs =
+            B064KOwned::try_from(outputs).expect("serialized outputs");
         assert!(merge
             .apply_to_template(&mut safe_template, RESERVED_COINBASE_OUTPUT_BYTES as usize,)
             .expect("safe final output count"));
@@ -1936,7 +1943,7 @@ mod tests {
         let mut two_pool_output_template = template(803);
         two_pool_output_template.coinbase_tx_outputs_count = 250;
         two_pool_output_template.coinbase_tx_outputs =
-            B064K::try_from(outputs.clone()).expect("serialized outputs");
+            B064KOwned::try_from(outputs.clone()).expect("serialized outputs");
         assert!(matches!(
             merge.apply_to_template_with_pool_output_count(
                 &mut two_pool_output_template,
@@ -1947,7 +1954,10 @@ mod tests {
         ));
         assert_eq!(two_pool_output_template.coinbase_tx_outputs_count, 250);
         assert_eq!(
-            two_pool_output_template.coinbase_tx_outputs.to_vec(),
+            two_pool_output_template
+                .coinbase_tx_outputs
+                .as_bytes()
+                .to_vec(),
             outputs
         );
     }
@@ -1976,7 +1986,7 @@ mod tests {
         let mut boundary_template = template(802);
         boundary_template.coinbase_tx_outputs_count = 251;
         boundary_template.coinbase_tx_outputs =
-            B064K::try_from(outputs.clone()).expect("serialized outputs");
+            B064KOwned::try_from(outputs.clone()).expect("serialized outputs");
 
         assert!(merge
             .apply_to_template(
@@ -1985,14 +1995,17 @@ mod tests {
             )
             .expect("idempotent boundary output"));
         assert_eq!(boundary_template.coinbase_tx_outputs_count, 251);
-        assert_eq!(boundary_template.coinbase_tx_outputs.to_vec(), outputs);
+        assert_eq!(
+            boundary_template.coinbase_tx_outputs.as_bytes().to_vec(),
+            outputs
+        );
 
         let mut too_many_outputs = serialize(&ordinary_output);
         too_many_outputs.extend_from_slice(&outputs);
         let mut invalid_template = template(804);
         invalid_template.coinbase_tx_outputs_count = 252;
         invalid_template.coinbase_tx_outputs =
-            B064K::try_from(too_many_outputs.clone()).expect("serialized outputs");
+            B064KOwned::try_from(too_many_outputs.clone()).expect("serialized outputs");
 
         assert!(matches!(
             merge.apply_to_template(
@@ -2003,7 +2016,7 @@ mod tests {
         ));
         assert_eq!(invalid_template.coinbase_tx_outputs_count, 252);
         assert_eq!(
-            invalid_template.coinbase_tx_outputs.to_vec(),
+            invalid_template.coinbase_tx_outputs.as_bytes().to_vec(),
             too_many_outputs
         );
     }
