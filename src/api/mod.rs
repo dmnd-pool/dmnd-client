@@ -71,8 +71,32 @@ pub struct AppState {
 }
 
 #[derive(Clone)]
-struct PrioritizingTxs {
-    rpc: Arc<BitcoindRpc>,
+pub(crate) struct PrioritizingTxs {
+    pub(crate) rpc: Arc<BitcoindRpc>,
+    pub(crate) client: reqwest::Client,
+    pub(crate) mempool_space_api_base_url: String,
+}
+
+impl PrioritizingTxs {
+    pub(crate) fn new(rpc: Arc<BitcoindRpc>) -> Self {
+        Self {
+            rpc,
+            client: reqwest::Client::new(),
+            mempool_space_api_base_url: MEMPOOL_SPACE_API_BASE_URL.to_string(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_mempool_space_url(
+        rpc: Arc<BitcoindRpc>,
+        mempool_space_api_base_url: String,
+    ) -> Self {
+        Self {
+            rpc,
+            client: reqwest::Client::new(),
+            mempool_space_api_base_url,
+        }
+    }
 }
 
 pub(crate) async fn reset_node_fee_deltas_at_startup() -> bool {
@@ -137,8 +161,12 @@ pub(crate) async fn start(
     downstream_handoff: crate::DownstreamHandoffSender,
 ) {
     let api_tx_token = Configuration::api_tx_token();
-    let prioritizing_txs = Configuration::bitcoind_rpc_config().map(|config| PrioritizingTxs {
-        rpc: Arc::new(BitcoindRpc::new(config.url, config.user, config.pwd)),
+    let prioritizing_txs = Configuration::bitcoind_rpc_config().map(|config| {
+        PrioritizingTxs::new(Arc::new(BitcoindRpc::new(
+            config.url,
+            config.user,
+            config.pwd,
+        )))
     });
     let mut _tx_prio_tasks = None;
     if START_TX_PRIO.load(Ordering::Relaxed) {
@@ -476,7 +504,7 @@ async fn fetch_mempool_space_accelerations(
 }
 
 #[derive(Debug)]
-enum FetchMempoolSpaceTransactionError {
+pub(crate) enum FetchMempoolSpaceTransactionError {
     Request(reqwest::Error),
     Decode(FromHexError),
     TxidMismatch { requested: Txid, received: Txid },
@@ -530,7 +558,7 @@ async fn fetch_mempool_space_transaction(
     fetch_mempool_space_transaction_from(client, MEMPOOL_SPACE_API_BASE_URL, txid).await
 }
 
-async fn fetch_mempool_space_transaction_from(
+pub(crate) async fn fetch_mempool_space_transaction_from(
     client: &reqwest::Client,
     api_base_url: &str,
     txid: Txid,
