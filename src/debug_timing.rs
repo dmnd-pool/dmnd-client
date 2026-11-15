@@ -1,8 +1,14 @@
 use serde::Serialize;
 use std::{
+    collections::VecDeque,
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
+
+/// Maximum number of timing samples retained per stage. Acts as a fixed-size
+/// sliding window so the collector's memory (and snapshot cost) stay bounded
+/// regardless of how long the proxy runs.
+const MAX_TIMING_SAMPLES: usize = 10_000;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SessionTimingStage {
@@ -88,43 +94,73 @@ pub struct SessionTimingSnapshot {
 
 #[derive(Debug, Default)]
 struct SessionTimingCollector {
-    accept_queue_wait_us: Vec<u64>,
-    bridge_open_us: Vec<u64>,
-    downstream_init_us: Vec<u64>,
-    accept_to_downstream_ready_us: Vec<u64>,
-    accept_to_subscribe_us: Vec<u64>,
-    accept_to_authorize_us: Vec<u64>,
-    accept_to_first_notify_us: Vec<u64>,
+    accept_queue_wait_us: VecDeque<u64>,
+    bridge_open_us: VecDeque<u64>,
+    downstream_init_us: VecDeque<u64>,
+    accept_to_downstream_ready_us: VecDeque<u64>,
+    accept_to_subscribe_us: VecDeque<u64>,
+    accept_to_authorize_us: VecDeque<u64>,
+    accept_to_first_notify_us: VecDeque<u64>,
+}
+
+/// Push `value` into a bounded sliding window, evicting the oldest sample once
+/// the window is full so the buffer never exceeds `MAX_TIMING_SAMPLES`.
+fn push_bounded(buf: &mut VecDeque<u64>, value: u64) {
+    if buf.len() >= MAX_TIMING_SAMPLES {
+        buf.pop_front();
+    }
+    buf.push_back(value);
 }
 
 impl SessionTimingCollector {
     fn record(&mut self, stage: SessionTimingStage, duration: Duration) {
         let micros = duration.as_micros().min(u64::MAX as u128) as u64;
         match stage {
-            SessionTimingStage::AcceptQueueWait => self.accept_queue_wait_us.push(micros),
-            SessionTimingStage::BridgeOpen => self.bridge_open_us.push(micros),
-            SessionTimingStage::DownstreamInit => self.downstream_init_us.push(micros),
-            SessionTimingStage::AcceptToDownstreamReady => {
-                self.accept_to_downstream_ready_us.push(micros)
+            SessionTimingStage::AcceptQueueWait => {
+                push_bounded(&mut self.accept_queue_wait_us, micros)
             }
-            SessionTimingStage::AcceptToSubscribe => self.accept_to_subscribe_us.push(micros),
-            SessionTimingStage::AcceptToAuthorize => self.accept_to_authorize_us.push(micros),
-            SessionTimingStage::AcceptToFirstNotify => self.accept_to_first_notify_us.push(micros),
+            SessionTimingStage::BridgeOpen => push_bounded(&mut self.bridge_open_us, micros),
+            SessionTimingStage::DownstreamInit => {
+                push_bounded(&mut self.downstream_init_us, micros)
+            }
+            SessionTimingStage::AcceptToDownstreamReady => {
+                push_bounded(&mut self.accept_to_downstream_ready_us, micros)
+            }
+            SessionTimingStage::AcceptToSubscribe => {
+                push_bounded(&mut self.accept_to_subscribe_us, micros)
+            }
+            SessionTimingStage::AcceptToAuthorize => {
+                push_bounded(&mut self.accept_to_authorize_us, micros)
+            }
+            SessionTimingStage::AcceptToFirstNotify => {
+                push_bounded(&mut self.accept_to_first_notify_us, micros)
+            }
         }
     }
 
     fn snapshot(&self) -> SessionTimingSnapshot {
         SessionTimingSnapshot {
             enabled: true,
-            accept_queue_wait: stage_stats(&self.accept_queue_wait_us),
-            bridge_open: stage_stats(&self.bridge_open_us),
-            downstream_init: stage_stats(&self.downstream_init_us),
-            accept_to_downstream_ready: stage_stats(&self.accept_to_downstream_ready_us),
-            accept_to_subscribe: stage_stats(&self.accept_to_subscribe_us),
-            accept_to_authorize: stage_stats(&self.accept_to_authorize_us),
-            accept_to_first_notify: stage_stats(&self.accept_to_first_notify_us),
+            accept_queue_wait: stage_stats_deque(&self.accept_queue_wait_us),
+            bridge_open: stage_stats_deque(&self.bridge_open_us),
+            downstream_init: stage_stats_deque(&self.downstream_init_us),
+            accept_to_downstream_ready: stage_stats_deque(&self.accept_to_downstream_ready_us),
+            accept_to_subscribe: stage_stats_deque(&self.accept_to_subscribe_us),
+            accept_to_authorize: stage_stats_deque(&self.accept_to_authorize_us),
+            accept_to_first_notify: stage_stats_deque(&self.accept_to_first_notify_us),
         }
     }
+}
+
+/// Compute stage stats from a bounded `VecDeque` window. The buffer is capped at
+/// `MAX_TIMING_SAMPLES`, so collecting it into a contiguous slice for the
+/// existing `stage_stats` is a constant-bounded cost regardless of uptime.
+fn stage_stats_deque(samples: &VecDeque<u64>) -> Option<SessionStageStats> {
+    if samples.is_empty() {
+        return None;
+    }
+    let contiguous: Vec<u64> = samples.iter().copied().collect();
+    stage_stats(&contiguous)
 }
 
 fn stage_stats(samples_us: &[u64]) -> Option<SessionStageStats> {
@@ -215,7 +251,56 @@ pub fn snapshot() -> SessionTimingSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_enabled_flag, stage_stats};
+    use super::*;
+
+    #[test]
+    fn push_bounded_evicts_oldest_when_full() {
+        let mut buf = VecDeque::new();
+        for i in 0..MAX_TIMING_SAMPLES {
+            push_bounded(&mut buf, i as u64);
+        }
+        assert_eq!(buf.len(), MAX_TIMING_SAMPLES);
+        assert_eq!(buf[0], 0); // oldest sample
+
+        // Pushing past the cap evicts the oldest, keeping the window bounded.
+        push_bounded(&mut buf, 99_999);
+        assert_eq!(buf.len(), MAX_TIMING_SAMPLES); // still capped, not +1
+        assert_eq!(buf[0], 1); // 0 was evicted
+        assert_eq!(buf[buf.len() - 1], 99_999); // newest at the back
+    }
+
+    #[test]
+    fn collector_memory_stays_bounded() {
+        let mut collector = SessionTimingCollector::default();
+        let duration = Duration::from_micros(42);
+
+        // Record well past the cap.
+        for _ in 0..(MAX_TIMING_SAMPLES + 5_000) {
+            collector.record(SessionTimingStage::AcceptQueueWait, duration);
+        }
+
+        assert_eq!(collector.accept_queue_wait_us.len(), MAX_TIMING_SAMPLES);
+
+        let snap = collector.snapshot();
+        let stats = snap.accept_queue_wait.expect("should have stats");
+        assert_eq!(stats.count, MAX_TIMING_SAMPLES);
+    }
+
+    #[test]
+    fn stage_stats_deque_matches_stage_stats_for_same_data() {
+        let data = vec![1_000u64, 2_000, 3_000, 4_000, 5_000];
+        let deque: VecDeque<u64> = data.iter().copied().collect();
+
+        let from_slice = stage_stats(&data).expect("slice stats");
+        let from_deque = stage_stats_deque(&deque).expect("deque stats");
+
+        assert_eq!(from_slice.count, from_deque.count);
+        assert!((from_slice.min_ms - from_deque.min_ms).abs() < f64::EPSILON);
+        assert!((from_slice.avg_ms - from_deque.avg_ms).abs() < f64::EPSILON);
+        assert!((from_slice.p50_ms - from_deque.p50_ms).abs() < f64::EPSILON);
+        assert!((from_slice.p95_ms - from_deque.p95_ms).abs() < f64::EPSILON);
+        assert!((from_slice.max_ms - from_deque.max_ms).abs() < f64::EPSILON);
+    }
 
     #[test]
     fn stage_stats_compute_basic_percentiles() {
