@@ -54,11 +54,7 @@ pub(crate) fn take_coinbase_reservation_restart_request() -> bool {
 
 use crate::proxy_state::{DownstreamType, ProxyState, TpState};
 use roles_logic_sv2::{parsers::MiningOwned, utils::Mutex};
-use std::{
-    net::{IpAddr, SocketAddr},
-    str::FromStr,
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use crate::shared::utils::AbortOnDrop;
 
@@ -115,18 +111,26 @@ async fn initialize_jd(
 
     // Initialize JD part
     let tp_address = match crate::TP_ADDRESS.safe_lock(|tp| tp.clone()) {
-        Ok(tp_address) => tp_address
-            .expect("Unreachable code, jdc is not instantiated when TP_ADDRESS not present"),
+        Ok(Some(tp_address)) => tp_address,
+        Ok(None) => {
+            error!("TP_ADDRESS is missing, JD client can not start");
+            drop(abortable);
+            return None;
+        }
         Err(e) => {
             error!("TP_ADDRESS mutex corrupted: {e}");
             drop(abortable);
             return None;
         }
     };
-
-    let mut parts = tp_address.split(':');
-    let ip_tp = parts.next().expect("The passed value for TP address is not valid. Terminating.... TP_ADDRESS should be in this format `127.0.0.1:8442`").to_string();
-    let port_tp = parts.next().expect("The passed value for TP address is not valid. Terminating.... TP_ADDRESS should be in this format `127.0.0.1:8442`").parse::<u16>().expect("This operation should not fail because a valid port_tp should always be converted to U16");
+    let tp_socket_address = match crate::Configuration::parse_tp_address(&tp_address) {
+        Ok(tp_socket_address) => tp_socket_address,
+        Err(e) => {
+            error!("{e}");
+            drop(abortable);
+            return None;
+        }
+    };
 
     let auth_pub_k: Secp256k1PublicKey = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
     let address = match crate::ACTIVE_POOL_ADDRESS.safe_lock(|address| *address) {
@@ -223,10 +227,8 @@ async fn initialize_jd(
         drop(abortable); // drop all tasks initailzed upto this point
         return None;
     };
-    let ip = IpAddr::from_str(ip_tp.as_str())
-        .expect("Infallable Operation: Failed tp can always be converted into IpAddr");
     let tp_abortable = match TemplateRx::connect(
-        SocketAddr::new(ip, port_tp),
+        tp_socket_address,
         recv_solution,
         Some(jd.clone()),
         donwstream.clone(),
