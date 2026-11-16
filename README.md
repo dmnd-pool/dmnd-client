@@ -360,6 +360,7 @@ If the prioritization configuration is incomplete, these endpoints are disabled:
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | sv2-tp can't connect to Bitcoin Core | IPC not enabled, or custom datadir | Follow the sv2-tp README setup exactly; check the socket path |
+| Client stops at startup with `Invalid TP address` | `--tp-address` is not in `ip:port` format (a host name such as `localhost` is not accepted) | Use an IP address and a port, for example `--tp-address="127.0.0.1:8336"` |
 | DMND Client can't reach Template Provider | Wrong `--tp-address` or sv2-tp not running | Confirm sv2-tp is listening on 8336 (`ss -tlnp \| grep 8336`) |
 | Client runs but no templates | Bitcoin Core still syncing | Wait for full sync (`bitcoin-cli getblockchaininfo`) |
 | Miner connects but no shares yet | Normal within the first ~6 min | Wait; first share acceptance takes about 6 minutes |

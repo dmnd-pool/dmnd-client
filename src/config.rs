@@ -229,6 +229,15 @@ and make that test pass."
         ))
     }
 
+    /// Parses a Template Provider address. The only accepted format is `ip:port`.
+    pub(crate) fn parse_tp_address(tp_address: &str) -> Result<SocketAddr, String> {
+        tp_address.parse().map_err(|_| {
+            format!(
+                "Invalid TP address '{tp_address}'. Expected format: 'ip:port' (for example '127.0.0.1:8336')"
+            )
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         token: Option<String>,
@@ -615,8 +624,12 @@ and make that test pass."
     }
 
     // Loads config from CLI args, config file, and env vars with precedence: CLI > file > env.
-    pub fn from_cli() -> Self {
-        let args = Args::parse();
+    // Returns an error when a configured value is not valid, so the caller can exit cleanly.
+    pub fn from_cli() -> Result<Self, String> {
+        Self::from_args(Args::parse())
+    }
+
+    fn from_args(args: Args) -> Result<Self, String> {
         let config_path: PathBuf = args
             .config_file
             .or_else(|| {
@@ -640,6 +653,9 @@ and make that test pass."
             .tp_address
             .or(config.tp_address)
             .or_else(|| std::env::var("TP_ADDRESS").ok());
+        if let Some(tp_address) = tp_address.as_deref() {
+            Self::parse_tp_address(tp_address)?;
+        }
 
         let api_base_url = args
             .api_base_url
@@ -867,7 +883,7 @@ and make that test pass."
                 .unwrap_or(true)
         };
 
-        Self::new(
+        Ok(Self::new(
             token,
             tp_address,
             api_base_url,
@@ -900,7 +916,7 @@ and make that test pass."
             rpc_user,
             rpc_pwd,
             api_tx_token,
-        )
+        ))
     }
 }
 
@@ -1147,7 +1163,42 @@ impl HashUnit {
 
 #[cfg(test)]
 mod tests {
-    use super::Configuration;
+    use super::{Args, Configuration};
+    use clap::Parser;
+
+    fn configuration_from_tp_address(tp_address: &str) -> Result<Configuration, String> {
+        let args = Args::try_parse_from(["dmnd-client", "--tp-address", tp_address])
+            .expect("TP address arguments must parse");
+        Configuration::from_args(args)
+    }
+
+    #[test]
+    fn invalid_tp_addresses_return_an_error_at_startup() {
+        for address in ["127.0.0.1", "127.0.0.1:abc", "localhost"] {
+            let error = configuration_from_tp_address(address)
+                .err()
+                .unwrap_or_else(|| panic!("TP address '{address}' must be rejected"));
+
+            assert!(error.contains(&format!("Invalid TP address '{address}'")));
+        }
+    }
+
+    #[test]
+    fn valid_tp_addresses_are_accepted_at_startup() {
+        for address in ["127.0.0.1:8336", "[::1]:8336"] {
+            let config = configuration_from_tp_address(address)
+                .unwrap_or_else(|error| panic!("TP address '{address}' must be accepted: {error}"));
+
+            assert_eq!(config.tp_address.as_deref(), Some(address));
+        }
+    }
+
+    #[test]
+    fn missing_tp_address_is_accepted_at_startup() {
+        let args = Args::try_parse_from(["dmnd-client"]).expect("empty arguments must parse");
+
+        assert!(Configuration::from_args(args).is_ok());
+    }
 
     #[test]
     fn zero_delay_remains_supported() {
