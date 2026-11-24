@@ -855,6 +855,10 @@ mod test {
             quantize_downstream_difficulty(10_000.0, Some(NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY)),
             NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY
         );
+        assert_eq!(
+            quantize_downstream_difficulty(10_000.0, Some(90_000.0)),
+            131_072.0
+        );
     }
 
     #[test]
