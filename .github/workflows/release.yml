@@ -205,3 +205,58 @@ jobs:
             sha256-checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-docker:
+    name: Build Docker Image
+    needs: [create-release]
+    permissions:
+      contents: read
+    uses: docker/github-builder/.github/workflows/build.yml@v1
+    with:
+      output: image
+      push: true
+      sign: 'false'
+      platforms: linux/amd64,linux/arm64
+      runner: |
+        default=ubuntu-latest
+        linux/arm64=ubuntu-24.04-arm
+      meta-images: dmndcorp/dmnd-client
+      meta-tags: type=semver,pattern={{version}}
+      meta-flavor: latest=false
+    secrets:
+      registry-auths: |
+        - registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  publish-latest:
+    name: Update Latest Docker Image
+    needs: [build-docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: docker-latest
+      queue: max
+    env:
+      CLIENT_REPO: dmndcorp/dmnd-client
+    steps:
+      - name: Install regctl
+        uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # v0.2.0
+        with:
+          release: v0.11.7
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Update latest
+        shell: bash
+        run: |
+          set -euo pipefail
+          newest=$(regctl tag ls "$CLIENT_REPO" \
+            --include '[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -n 1)
+          [ -n "$newest" ] || exit 0
+          regctl image copy "$CLIENT_REPO:$newest" "$CLIENT_REPO:latest"

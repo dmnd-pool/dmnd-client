@@ -1,0 +1,36 @@
+name: Docker image
+
+on:
+  pull_request:
+    branches:
+      - master
+    # The files that can change the image build.
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'build.rs'
+      - 'release-signing.pub'
+      - 'src/**'
+      - 'frontend/**'
+      - '.cargo/**'
+      - '.github/workflows/docker.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Docker Image
+    uses: docker/github-builder/.github/workflows/build.yml@v1
+    with:
+      output: image
+      push: false
+      sign: 'false'
+      platforms: linux/amd64,linux/arm64
+      runner: |
+        default=ubuntu-latest
+        linux/arm64=ubuntu-24.04-arm
+      meta-images: dmndcorp/dmnd-client

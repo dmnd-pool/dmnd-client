@@ -639,7 +639,8 @@ and make that test pass."
         let tp_address = args
             .tp_address
             .or(config.tp_address)
-            .or_else(|| std::env::var("TP_ADDRESS").ok());
+            .or_else(|| std::env::var("TP_ADDRESS").ok())
+            .and_then(|address| parse_tp_address(&address).unwrap_or_else(|e| panic!("{e}")));
 
         let api_base_url = args
             .api_base_url
@@ -1013,6 +1014,30 @@ fn normalize_optional_url(url: String) -> Option<String> {
     }
 }
 
+fn parse_tp_address(address: &str) -> Result<Option<String>, String> {
+    let address = address.trim();
+    if address.is_empty() {
+        return Ok(None);
+    }
+    if tp_address_port(address).is_some_and(|port| port != 0) {
+        return Ok(Some(address.to_string()));
+    }
+    Err(format!(
+        "TP address `{address}` is not valid. Use the format host:port, for example \
+        127.0.0.1:8336 or [::1]:8336"
+    ))
+}
+
+fn tp_address_port(address: &str) -> Option<u16> {
+    if let Ok(socket) = address.parse::<SocketAddr>() {
+        return Some(socket.port());
+    }
+    let (host, port) = address.rsplit_once(':')?;
+    let is_host_name =
+        !host.is_empty() && !host.contains(|c: char| c.is_whitespace() || "[]:".contains(c));
+    is_host_name.then(|| port.parse().ok()).flatten()
+}
+
 fn parse_address(addr: String) -> Option<SocketAddr> {
     match addr.to_socket_addrs() {
         Ok(mut addrs) => match addrs.next() {
@@ -1147,7 +1172,43 @@ impl HashUnit {
 
 #[cfg(test)]
 mod tests {
-    use super::Configuration;
+    use super::{parse_tp_address, Configuration};
+
+    #[test]
+    fn tp_address_accepts_host_and_port() {
+        assert!(parse_tp_address("127.0.0.1:8336").is_ok());
+        assert!(parse_tp_address("host.docker.internal:8336").is_ok());
+        assert!(parse_tp_address("[::1]:8336").is_ok());
+    }
+
+    #[test]
+    fn tp_address_without_host_or_port_is_rejected() {
+        let error = parse_tp_address("127.0.0.1").unwrap_err();
+        assert!(error.contains("host:port"));
+        assert!(parse_tp_address(":8336").is_err());
+        assert!(parse_tp_address("127.0.0.1:port").is_err());
+    }
+
+    #[test]
+    fn tp_address_that_cannot_connect_is_rejected() {
+        assert!(parse_tp_address("::1:8336").is_err());
+        assert!(parse_tp_address("127.0.0.1:0").is_err());
+        assert!(parse_tp_address("[::1]:0").is_err());
+        assert!(parse_tp_address("tp host:8336").is_err());
+    }
+
+    #[test]
+    fn tp_address_spaces_around_are_removed() {
+        assert_eq!(
+            parse_tp_address(" 127.0.0.1:8336\n"),
+            Ok(Some("127.0.0.1:8336".to_string()))
+        );
+    }
+
+    #[test]
+    fn tp_address_empty_means_not_set() {
+        assert_eq!(parse_tp_address(" "), Ok(None));
+    }
 
     #[test]
     fn zero_delay_remains_supported() {
