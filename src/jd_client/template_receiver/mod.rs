@@ -28,7 +28,7 @@ use roles_logic_sv2::{
     utils::Mutex,
 };
 use setup_connection::SetupConnectionHandler;
-use std::{convert::TryInto, net::SocketAddr, sync::Arc};
+use std::{convert::TryInto, sync::Arc};
 use task_manager::TaskManager;
 use tokio::sync::mpsc::{Receiver as TReceiver, Sender as TSender};
 use tracing::{error, info, warn};
@@ -80,7 +80,7 @@ fn will_publish_template(
 impl TemplateRx {
     #[allow(clippy::too_many_arguments)]
     pub async fn connect(
-        address: SocketAddr,
+        address: impl tokio::net::ToSocketAddrs,
         solution_receiver: TReceiver<SubmitSolutionOwned>,
         jd: Option<Arc<Mutex<super::job_declarator::JobDeclarator>>>,
         down: Arc<Mutex<Downstream>>,
@@ -95,6 +95,7 @@ impl TemplateRx {
         let stream = tokio::net::TcpStream::connect(address)
             .await
             .map_err(Error::Io)?;
+        let address = stream.peer_addr().map_err(Error::Io)?;
 
         let initiator = match authority_public_key {
             Some(pub_key) => Initiator::from_raw_k(pub_key.into_bytes()),
@@ -919,6 +920,44 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::{mpsc, oneshot};
     use tokio::time::Duration;
+
+    #[tokio::test]
+    async fn tp_hostname_address_starts_noise_handshake() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("localhost:{}", listener.local_addr().unwrap().port());
+        let (mining_sender, _) = mpsc::channel(1);
+        let (solution_sender, solution_receiver) = mpsc::channel(1);
+        let down = Arc::new(Mutex::new(Downstream::new(
+            mining_sender,
+            None,
+            solution_sender,
+            false,
+            vec![],
+            None,
+        )));
+        let peer = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut handshake = [0; noise_sv2::ELLSWIFT_ENCODING_SIZE];
+            tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut handshake))
+                .await
+                .unwrap()
+                .unwrap();
+        };
+
+        // Without a time limit, the test waits forever for `accept` if the connection fails.
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                TemplateRx::connect(&address, solution_receiver, None, down, vec![], None, false),
+                peer,
+            )
+        })
+        .await
+        .expect("TP connection did not reach the peer");
+        // The peer closes after the request. No handshake response is sent.
+        assert!(result.is_err());
+    }
 
     #[test]
     fn native_coinbase_capacity_counts_serialized_outputs_and_sigops() {

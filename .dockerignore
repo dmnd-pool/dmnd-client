@@ -2,3 +2,9 @@ target
 .git
 .github
 pulumi
+logs
+config.toml
+template-provider
+**/*.pem
+**/*.dump
+**/.DS_Store

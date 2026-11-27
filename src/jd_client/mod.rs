@@ -54,11 +54,7 @@ pub(crate) fn take_coinbase_reservation_restart_request() -> bool {
 
 use crate::proxy_state::{DownstreamType, ProxyState, TpState};
 use roles_logic_sv2::{parsers::MiningOwned, utils::Mutex};
-use std::{
-    net::{IpAddr, SocketAddr},
-    str::FromStr,
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use crate::shared::utils::AbortOnDrop;
 
@@ -123,10 +119,6 @@ async fn initialize_jd(
             return None;
         }
     };
-
-    let mut parts = tp_address.split(':');
-    let ip_tp = parts.next().expect("The passed value for TP address is not valid. Terminating.... TP_ADDRESS should be in this format `127.0.0.1:8442`").to_string();
-    let port_tp = parts.next().expect("The passed value for TP address is not valid. Terminating.... TP_ADDRESS should be in this format `127.0.0.1:8442`").parse::<u16>().expect("This operation should not fail because a valid port_tp should always be converted to U16");
 
     let auth_pub_k: Secp256k1PublicKey = crate::AUTH_PUB_KEY.parse().expect("Invalid public key");
     let address = match crate::ACTIVE_POOL_ADDRESS.safe_lock(|address| *address) {
@@ -223,10 +215,8 @@ async fn initialize_jd(
         drop(abortable); // drop all tasks initailzed upto this point
         return None;
     };
-    let ip = IpAddr::from_str(ip_tp.as_str())
-        .expect("Infallable Operation: Failed tp can always be converted into IpAddr");
     let tp_abortable = match TemplateRx::connect(
-        SocketAddr::new(ip, port_tp),
+        &tp_address,
         recv_solution,
         Some(jd.clone()),
         donwstream.clone(),
@@ -237,7 +227,8 @@ async fn initialize_jd(
     .await
     {
         Ok(abortable) => abortable,
-        Err(_) => {
+        Err(e) => {
+            error!("Cannot connect to TP {tp_address}: {e}");
             info!("Dropping jd abortable");
             eprintln!("TP is unreachable, the proxy is in not in JD mode");
             drop(abortable);

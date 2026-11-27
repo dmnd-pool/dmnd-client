@@ -230,6 +230,45 @@ The merge-mining endpoints use a shared secret in request data and do not provid
 on a trusted network or place it behind an authenticated TLS reverse proxy and firewall; do not
 expose port 3001 directly to the Internet.
 
+### 4.4 Run with Docker (optional)
+The `latest` tag is the newest stable release with a published image. To build the image yourself, run `docker build -t dmndcorp/dmnd-client .` in the repository folder.
+
+**Linux (Intel/AMD or ARM):**
+
+```
+docker run -d --name dmnd-client --restart unless-stopped --network host -e TOKEN=<DMND-token> -e API_BIND_ADDRESS=127.0.0.1 dmndcorp/dmnd-client -d 250T --tp-address=127.0.0.1:8336
+```
+
+- `--network host`: the container uses the network of the computer. `127.0.0.1:8336` is sv2-tp, and miners connect to port 32767 of the computer.
+- `API_BIND_ADDRESS=127.0.0.1`: the dashboard at `http://127.0.0.1:3001` is available only on this computer.
+
+**macOS (Apple Silicon or Intel) with Docker Desktop:**
+
+```
+docker run -d --name dmnd-client --restart unless-stopped -p 32767:32767 -p 127.0.0.1:3001:3001 -e TOKEN=<DMND-token> dmndcorp/dmnd-client -d 250T --tp-address=host.docker.internal:8336
+```
+
+- `host.docker.internal` is the Mac. In the container, `127.0.0.1` is the container itself.
+- `-p 32767:32767`: miners connect to port 32767 of the Mac.
+- `-p 127.0.0.1:3001:3001`: the dashboard at `http://127.0.0.1:3001` is available only on this Mac. Do not set `API_BIND_ADDRESS` here: Docker can send port 3001 to the client only if the client listens on all addresses in the container.
+
+**Windows:** run the tools inside WSL, install Docker Engine inside WSL, and use the Linux
+command. Docker Desktop for Windows is not tested.
+
+**sv2-tp on a different computer:** use the command for your platform, and change only `--tp-address=<template-provider-ip>:8336`.
+
+Configuration and files:
+
+- The client runs as user ID 1000 in the folder `/home/dmnd`. To use a `config.toml`, mount it at `/home/dmnd/config.toml`, for example `-v "$PWD/config.toml:/home/dmnd/config.toml:ro"`. The client ignores the file and shows no error if the file is not at this path, if user ID 1000 cannot read it, or if it has a TOML syntax error.
+- With `FILE_LOGGING=true`, the client writes logs to `/home/dmnd/logs`. To keep the logs, mount a folder at this path that user ID 1000 can write to.
+- The image sets `HEADFUL=false` and `AUTO_UPDATE=false`. A `config.toml` has priority over these variables (see [Configuration precedence](#configuration-precedence)). Do not set `auto_update = true` in it: in a container the update cannot replace the binary, and the client logs an error.
+- To update the client, pull a new image tag and create the container again.
+
+Publishing (maintainers): the Docker jobs run after the existing Release workflow creates the
+GitHub release. They need the repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
+Missing Docker settings stop the Docker jobs; they do not stop the existing release jobs.
+The workflow updates `latest` one release at a time.
+
 ## 5. Connect Your Miners
 
 With Bitcoin Core, sv2-tp, and the DMND Client all running, point your ASICs at the machine running the DMND Client:
@@ -361,6 +400,8 @@ If the prioritization configuration is incomplete, these endpoints are disabled:
 |---|---|---|
 | sv2-tp can't connect to Bitcoin Core | IPC not enabled, or custom datadir | Follow the sv2-tp README setup exactly; check the socket path |
 | DMND Client can't reach Template Provider | Wrong `--tp-address` or sv2-tp not running | Confirm sv2-tp is listening on 8336 (`ss -tlnp \| grep 8336`) |
+| DMND Client in Docker can't reach Template Provider | Wrong command for the platform: in a container, `127.0.0.1` is the container | Linux: use `--network host`. macOS: use `--tp-address=host.docker.internal:8336` (Section 4.4) |
+| Client stops at start with "TP address ... is not valid" | `--tp-address` has no port, the port is not a number from 1 to 65535, the host name has a space, or an IPv6 address has no brackets | Use the format `host:port`, for example `127.0.0.1:8336` or `[::1]:8336` |
 | Client runs but no templates | Bitcoin Core still syncing | Wait for full sync (`bitcoin-cli getblockchaininfo`) |
 | Miner connects but no shares yet | Normal within the first ~6 min | Wait; first share acceptance takes about 6 minutes |
 | Still no shares after 10+ min | Wrong token in password field, or `-d` far off | Re-check token; set `-d` to your least powerful machine (250T direct / 20P proxies) |
