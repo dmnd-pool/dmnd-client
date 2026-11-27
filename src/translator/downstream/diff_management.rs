@@ -410,10 +410,15 @@ pub fn quantize_downstream_difficulty(
     difficulty: f32,
     hard_minimum_difficulty: Option<f32>,
 ) -> f32 {
-    nearest_power_of_2(clamp_downstream_difficulty_to_floor(
+    let quantized = nearest_power_of_2(clamp_downstream_difficulty_to_floor(
         difficulty,
         hard_minimum_difficulty,
-    ))
+    ));
+    match hard_minimum_difficulty {
+        // Rounding down can fall below the minimum, use the next power of two.
+        Some(minimum) if quantized < minimum => quantized * 2.0,
+        _ => quantized,
+    }
 }
 
 #[cfg(test)]
@@ -854,6 +859,10 @@ mod test {
         assert_eq!(
             quantize_downstream_difficulty(10_000.0, Some(NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY)),
             NON_LOCAL_DOWNSTREAM_MIN_DIFFICULTY
+        );
+        assert_eq!(
+            quantize_downstream_difficulty(10_000.0, Some(90_000.0)),
+            131_072.0
         );
     }
 
